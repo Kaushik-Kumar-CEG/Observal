@@ -1,10 +1,8 @@
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.deps import get_current_user, get_db
+from api.deps import get_current_user, get_db, resolve_prefix_id
 from models.graphrag import GraphRagListing
 from models.hook import HookListing
 from models.mcp import ListingStatus, McpListing
@@ -34,22 +32,35 @@ def _require_admin(user: User):
 
 
 async def _find_listing(listing_id: str, db: AsyncSession):
-    """Try each listing model to find the listing by id or name."""
-    import uuid as _uuid
-    if isinstance(listing_id, _uuid.UUID):
-        clause_fn = lambda model: model.id == listing_id
-    else:
-        try:
-            uid = _uuid.UUID(listing_id)
-            clause_fn = lambda model: model.id == uid
-        except ValueError:
-            clause_fn = lambda model: model.name == listing_id
+    """Try each listing model to find the listing by id or unique prefix."""
+    matches = []
     for listing_type, model in LISTING_MODELS.items():
-        result = await db.execute(select(model).where(clause_fn(model)))
-        listing = result.scalar_one_or_none()
-        if listing:
-            return listing_type, listing
-    return None, None
+        try:
+            # First try exact/prefix using the helper
+            listing = await resolve_prefix_id(model, listing_id, db)
+            matches.append((listing_type, listing))
+        except HTTPException as e:
+            if e.status_code == 404:
+                # Not found in this model, try by name as fallback for legacy
+                from sqlalchemy import select
+                result = await db.execute(select(model).where(model.name == listing_id))
+                listing = result.scalar_one_or_none()
+                if listing:
+                    matches.append((listing_type, listing))
+                continue
+            # Rethrow 400 (Ambiguous) or other errors
+            raise e
+
+    if not matches:
+        return None, None
+
+    if len(matches) == 1:
+        return matches[0]
+
+    # Multiple models matched (cross-type ambiguity)
+    detail = f"Ambiguous identifier '{listing_id}' matches multiple component types: "
+    detail += ", ".join([f"{m[0]} ({str(m[1].id)[:8]}...)" for m in matches])
+    raise HTTPException(status_code=400, detail=detail)
 
 
 @router.get("")
@@ -67,7 +78,16 @@ async def list_pending(
             select(model).where(model.status == ListingStatus.pending).order_by(model.created_at.desc())
         )
         for r in result.scalars().all():
-            items.append({"type": listing_type, "id": str(r.id), "name": r.name, "status": r.status.value, "submitted_by": str(r.submitted_by), "created_at": r.created_at.isoformat()})
+            items.append(
+                {
+                    "type": listing_type,
+                    "id": str(r.id),
+                    "name": r.name,
+                    "status": r.status.value,
+                    "submitted_by": str(r.submitted_by),
+                    "created_at": r.created_at.isoformat(),
+                }
+            )
     return items
 
 
@@ -81,7 +101,14 @@ async def get_review(
     listing_type, listing = await _find_listing(listing_id, db)
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
-    return {"type": listing_type, "id": str(listing.id), "name": listing.name, "status": listing.status.value, "submitted_by": str(listing.submitted_by), "created_at": listing.created_at.isoformat()}
+    return {
+        "type": listing_type,
+        "id": str(listing.id),
+        "name": listing.name,
+        "status": listing.status.value,
+        "submitted_by": str(listing.submitted_by),
+        "created_at": listing.created_at.isoformat(),
+    }
 
 
 @router.post("/{listing_id}/approve")
