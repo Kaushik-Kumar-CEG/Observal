@@ -43,6 +43,8 @@ observal = "observal_cli.main:app"
 observal-shim = "observal_cli.shim:main"
 observal-proxy = "observal_cli.proxy:main"
 observal-sandbox-run = "observal_cli.sandbox_runner:main"
+observal-kiro-hook = "observal_cli.hooks.kiro_hook:main"
+observal-kiro-stop-hook = "observal_cli.hooks.kiro_stop_hook:main"
 #observal-graphrag-proxy = "observal_cli.graphrag_proxy:main"
 
 [build-system]

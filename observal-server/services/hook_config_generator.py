@@ -13,25 +13,11 @@ def generate_hook_telemetry_config(
         }
         kiro_event = kiro_event_map.get(event, event)
 
-        if platform == "win32":
-            # PowerShell-compatible: pipe stdin through the Python hook script.
-            # No cat/sed/curl/$PPID/$TERM/$SHELL — those don't exist in PowerShell.
-            if kiro_event == "stop":
-                ps_stop_cmd = f"python -m observal_cli.hooks.kiro_stop_hook --url {server_url}/api/v1/telemetry/hooks"
-                return {"hooks": {kiro_event: [{"command": ps_stop_cmd}]}}
-
-            ps_cmd = f"python -m observal_cli.hooks.kiro_hook --url {server_url}/api/v1/telemetry/hooks"
-            hook_entry = {"command": ps_cmd}
-            if kiro_event in ("preToolUse", "postToolUse"):
-                hook_entry["matcher"] = "*"
-            return {"hooks": {kiro_event: [hook_entry]}}
-
-        # Unix: use the same Python hook scripts as Windows.
         if kiro_event == "stop":
-            stop_cmd = f"python3 -m observal_cli.hooks.kiro_stop_hook --url {server_url}/api/v1/telemetry/hooks"
+            stop_cmd = f"observal-kiro-stop-hook --url {server_url}/api/v1/telemetry/hooks"
             return {"hooks": {kiro_event: [{"command": stop_cmd}]}}
 
-        cmd = f"python3 -m observal_cli.hooks.kiro_hook --url {server_url}/api/v1/telemetry/hooks"
+        cmd = f"observal-kiro-hook --url {server_url}/api/v1/telemetry/hooks"
         hook_entry = {"command": cmd}
         if kiro_event in ("preToolUse", "postToolUse"):
             hook_entry["matcher"] = "*"

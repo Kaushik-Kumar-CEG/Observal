@@ -7,7 +7,7 @@ the full enrichment in ``kiro_stop_hook.py`` — it only reads the
 conversation_id column, not the multi-MB conversation JSON.
 
 Usage (in a Kiro agent hook):
-    python -m observal_cli.hooks.kiro_hook --url http://host/api/v1/telemetry/hooks --agent-name my-agent
+    observal-kiro-hook --url http://host/api/v1/telemetry/hooks --agent-name my-agent
 """
 
 from __future__ import annotations

@@ -780,13 +780,12 @@ class TestGenerateKiroWin32:
             for forbidden in UNIX_FORBIDDEN_IN_WIN32:
                 assert forbidden not in cmd, f"Found Unix-only '{forbidden}' in win32 hook: {cmd}"
 
-    def test_win32_hooks_use_python_not_python3(self):
+    def test_win32_hooks_use_entry_point(self):
         agent = _make_agent()
         cfg = generate_agent_config(agent, "kiro", platform="win32")
         cmds = self._all_hook_commands(cfg)
         for cmd in cmds:
-            assert "python3" not in cmd
-            assert "python " in cmd or "python -m" in cmd
+            assert cmd.startswith("observal-kiro-hook") or cmd.startswith("observal-kiro-stop-hook")
 
     def test_win32_hooks_include_agent_name(self):
         agent = _make_agent(name="my-cool-agent")
@@ -837,12 +836,12 @@ class TestGenerateKiroPreservation:
         cfg_empty = generate_agent_config(agent, "kiro", platform="")
         assert cfg_default == cfg_empty
 
-    def test_unix_hooks_use_python_hook_scripts(self):
+    def test_unix_hooks_use_entry_point(self):
         agent = _make_agent()
         cfg = generate_agent_config(agent, "kiro", platform="linux")
         hooks = cfg["agent_file"]["content"]["hooks"]
         spawn_cmd = hooks["agentSpawn"][0]["command"]
-        assert "python3 -m observal_cli.hooks.kiro_hook" in spawn_cmd
+        assert "observal-kiro-hook" in spawn_cmd
         assert "cat |" not in spawn_cmd
         assert "sed " not in spawn_cmd
         assert "curl" not in spawn_cmd
@@ -858,7 +857,7 @@ class TestGenerateKiroPreservation:
 class TestHookConfigGeneratorWin32:
     """Fix checking: hook_config_generator Windows output has no Unix syntax."""
 
-    def test_win32_kiro_hook_no_unix_syntax(self):
+    def test_win32_kiro_hook_uses_entry_point(self):
         from services.hook_config_generator import generate_hook_telemetry_config
 
         listing = MagicMock()
@@ -867,9 +866,9 @@ class TestHookConfigGeneratorWin32:
         cmd = cfg["hooks"]["userPromptSubmit"][0]["command"]
         for forbidden in UNIX_FORBIDDEN_IN_WIN32:
             assert forbidden not in cmd, f"Found Unix-only '{forbidden}' in win32 hook: {cmd}"
-        assert "python " in cmd or "python -m" in cmd
+        assert cmd.startswith("observal-kiro-hook")
 
-    def test_win32_kiro_stop_hook_no_unix_syntax(self):
+    def test_win32_kiro_stop_hook_uses_entry_point(self):
         from services.hook_config_generator import generate_hook_telemetry_config
 
         listing = MagicMock()
@@ -878,7 +877,7 @@ class TestHookConfigGeneratorWin32:
         cmd = cfg["hooks"]["stop"][0]["command"]
         for forbidden in UNIX_FORBIDDEN_IN_WIN32:
             assert forbidden not in cmd, f"Found Unix-only '{forbidden}' in win32 hook: {cmd}"
-        assert "python " in cmd or "python -m" in cmd
+        assert cmd.startswith("observal-kiro-stop-hook")
 
     def test_unix_kiro_hook_preserved(self):
         from services.hook_config_generator import generate_hook_telemetry_config

@@ -521,9 +521,8 @@ def _build_kiro_hooks(safe_name: str, observal_url: str, platform: str = "") -> 
     if not observal_url:
         return {}
     hooks_path = f"{observal_url}/api/v1/telemetry/hooks"
-    py = "python" if platform == "win32" else "python3"
-    hook_cmd = f"{py} -m observal_cli.hooks.kiro_hook --url {hooks_path} --agent-name {safe_name}"
-    stop_cmd = f"{py} -m observal_cli.hooks.kiro_stop_hook --url {hooks_path} --agent-name {safe_name}"
+    hook_cmd = f"observal-kiro-hook --url {hooks_path} --agent-name {safe_name}"
+    stop_cmd = f"observal-kiro-stop-hook --url {hooks_path} --agent-name {safe_name}"
     return {
         "agentSpawn": [{"command": hook_cmd}],
         "userPromptSubmit": [{"command": hook_cmd}],

@@ -24,6 +24,8 @@ doctor_app = typer.Typer(help="Diagnose IDE settings for Observal compatibility"
 _OBSERVAL_HOOK_MARKERS = (
     "observal-hook",
     "observal-stop-hook",
+    "observal-kiro-hook",
+    "observal-kiro-stop-hook",
     "observal_cli",
     "telemetry/hooks",
     "otel/hooks",

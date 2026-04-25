@@ -703,6 +703,8 @@ def _is_already_shimmed(entry: dict) -> bool:
 _OBSERVAL_HOOK_MARKERS = (
     "observal-hook",
     "observal-stop-hook",
+    "observal-kiro-hook",
+    "observal-kiro-stop-hook",
     "observal_cli",
     "telemetry/hooks",
     "otel/hooks",

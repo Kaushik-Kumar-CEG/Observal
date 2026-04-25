@@ -286,33 +286,9 @@ def generate_agent_config(
     if ide == "kiro":
         # Kiro agent JSON: drop into ~/.kiro/agents/<name>.json
         # Telemetry collected via observal-shim + hook bridge
-        if platform == "win32":
-            # PowerShell-compatible: pipe stdin through the Python hook script.
-            # No cat/sed/curl/$PPID/$TERM/$SHELL — those don't exist in PowerShell.
-            hook_cmd = (
-                f"python -m observal_cli.hooks.kiro_hook "
-                f"--url {observal_url}/api/v1/telemetry/hooks "
-                f"--agent-name {safe_name}"
-            )
-            stop_cmd = (
-                f"python -m observal_cli.hooks.kiro_stop_hook "
-                f"--url {observal_url}/api/v1/telemetry/hooks "
-                f"--agent-name {safe_name}"
-            )
-            spawn_cmd = hook_cmd  # Windows: Python script handles session IDs
-        else:
-            # Unix: use the same Python hook scripts as Windows.
-            hook_cmd = (
-                f"python3 -m observal_cli.hooks.kiro_hook "
-                f"--url {observal_url}/api/v1/telemetry/hooks "
-                f"--agent-name {safe_name}"
-            )
-            stop_cmd = (
-                f"python3 -m observal_cli.hooks.kiro_stop_hook "
-                f"--url {observal_url}/api/v1/telemetry/hooks "
-                f"--agent-name {safe_name}"
-            )
-            spawn_cmd = hook_cmd  # Python script handles session IDs
+        hook_cmd = f"observal-kiro-hook --url {observal_url}/api/v1/telemetry/hooks --agent-name {safe_name}"
+        stop_cmd = f"observal-kiro-stop-hook --url {observal_url}/api/v1/telemetry/hooks --agent-name {safe_name}"
+        spawn_cmd = hook_cmd
         hooks = {
             "agentSpawn": [{"command": spawn_cmd}],
             "userPromptSubmit": [{"command": hook_cmd}],
