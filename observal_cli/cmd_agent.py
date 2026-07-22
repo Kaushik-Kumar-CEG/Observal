@@ -643,6 +643,19 @@ def agent_show(
         for link in item["mcp_links"]:
             rprint(f"  [cyan]•[/cyan] {link.get('mcp_name', '')} [dim]({link.get('mcp_listing_id', '')})[/dim]")
 
+    # Success criteria
+    sc = item.get("success_criteria")
+    if sc and sc.get("intended_purpose"):
+        rprint("\n[bold]Success Criteria:[/bold]")
+        rprint(f"  [cyan]Purpose:[/cyan] {sc['intended_purpose']}")
+        metrics = sc.get("success_metrics") or []
+        if metrics:
+            rprint("  [cyan]Metrics:[/cyan]")
+            for m in metrics:
+                rprint(f"    • {m['name']} — target: {m['target']} (via: {m['measurement']})")
+        if sc.get("evaluation_notes"):
+            rprint(f"  [cyan]Notes:[/cyan] {sc['evaluation_notes']}")
+
 
 @agent_app.command(name="install")
 def agent_install(
@@ -858,6 +871,7 @@ def agent_init(
         "prompt": prompt_text,
         "supported_harnesses": harnesses,
         "components": [],
+        "success_criteria": None,
     }
 
     _save_agent_yaml(dir_path, data)
@@ -1016,6 +1030,7 @@ def agent_publish(
         "prompt": data.get("prompt", ""),
         "supported_harnesses": data.get("supported_harnesses", []),
         "components": data.get("components", []),
+        "success_criteria": data.get("success_criteria"),
     }
 
     if update:
@@ -1155,6 +1170,7 @@ def agent_release(
         "supported_harnesses": data.get("supported_harnesses", []),
         "components": data.get("components", []),
         "yaml_snapshot": raw_yaml,
+        "success_criteria": data.get("success_criteria"),
     }
 
     rprint("[dim]→[/dim] Pushing definition to registry...")
