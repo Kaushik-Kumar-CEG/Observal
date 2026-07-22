@@ -145,6 +145,7 @@ def _agent_to_response(
         "status",
         "rejection_reason",
         "visibility",
+        "success_criteria",
     ):
         agent_dict[field] = getattr(agent, field)
     if not isinstance(agent_dict.get("models_by_harness"), dict):
