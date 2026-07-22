@@ -38,12 +38,13 @@ import { useRegistryItem, useAgentValidation, useTeams, useWhoami, useSaveDraft,
 import { useAuthGuard } from "@/hooks/use-auth";
 import { registry, type RegistryType } from "@/lib/api";
 import { isValidAgentName, normalizeAgentName, slugifyRegistryText } from "@/lib/registry-name";
-import type { RegistryItem } from "@/lib/types";
+import type { RegistryItem, SuccessCriteria } from "@/lib/types";
 import type { ValidationResult } from "@/lib/types";
 
 const DRAFT_STORAGE_KEY = "observal_agent_draft";
 
 import { SortableComponentList } from "@/components/builder/sortable-component-list";
+import { SuccessCriteriaSection } from "@/components/builder/success-criteria-section";
 import { SubmitComponentDialog } from "@/components/registry/submit-component-dialog";
 import { ValidationPanel } from "@/components/builder/validation-panel";
 import { PreviewPanel } from "@/components/builder/preview-panel";
@@ -134,6 +135,7 @@ function AgentBuilderInner() {
   });
 
   const [systemPrompt, setSystemPrompt] = useState<string>("");
+  const [successCriteria, setSuccessCriteria] = useState<SuccessCriteria | null>(null);
 
   // Goal template sections
 
@@ -190,6 +192,11 @@ function AgentBuilderInner() {
 
     const promptField = (existingAgent as Record<string, unknown>).prompt;
     if (typeof promptField === "string") setSystemPrompt(promptField);
+
+    const agentCriteria = (existingAgent as Record<string, unknown>).success_criteria;
+    if (agentCriteria && typeof agentCriteria === "object" && !Array.isArray(agentCriteria)) {
+      setSuccessCriteria(agentCriteria as SuccessCriteria);
+    }
   }, [existingAgent, draftParam]);
 
   // Edit lock for pending agents, acquire on mount, release on unmount
@@ -311,6 +318,7 @@ function AgentBuilderInner() {
           models_by_harness: modelsByHarness,
           components: selectedComponents,
           prompt: systemPrompt,
+          success_criteria: successCriteria,
           draft_id: draftId,
           // The publication target belongs with the draft. Without it a restored
           // team-private draft silently reverts to a personal public agent, which
@@ -328,7 +336,7 @@ function AgentBuilderInner() {
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
-  }, [name, description, version, modelName, modelsByHarness, selectedComponents, systemPrompt, draftId, teamId, visibility, isEditMode]);
+  }, [name, description, version, modelName, modelsByHarness, selectedComponents, systemPrompt, successCriteria, draftId, teamId, visibility, isEditMode]);
 
   function restoreLocalDraft() {
     try {
@@ -344,6 +352,9 @@ function AgentBuilderInner() {
       }
       if (draft.components) setSelectedComponents(draft.components);
       if (typeof draft.prompt === "string") setSystemPrompt(draft.prompt);
+      if (draft.success_criteria && typeof draft.success_criteria === "object") {
+        setSuccessCriteria(draft.success_criteria as SuccessCriteria);
+      }
       if (draft.draft_id) setDraftId(draft.draft_id);
       // Restore the publication target too. A draft saved for a teamspace must
       // not come back as a personal public agent.
@@ -457,6 +468,14 @@ function AgentBuilderInner() {
       }
     }
 
+    const normalizedCriteria = successCriteria?.intended_purpose?.trim()
+      ? {
+          ...successCriteria,
+          success_metrics: successCriteria.success_metrics.filter(
+            (m) => m.name.trim() && m.target.trim() && m.measurement.trim(),
+          ),
+        }
+      : null;
 
     const body: Record<string, unknown> = {
       name: normalizeAgentName(name),
@@ -469,6 +488,7 @@ function AgentBuilderInner() {
       models_by_harness: modelsByHarness,
       components: components.length > 0 ? components : [],
       visibility,
+      success_criteria: normalizedCriteria,
     };
     if (teamId) body.team_id = teamId;
     return body;
@@ -741,6 +761,12 @@ function AgentBuilderInner() {
                 )}
               </div>
             </section>
+
+            {/* Success Criteria */}
+            <SuccessCriteriaSection
+              value={successCriteria}
+              onChange={setSuccessCriteria}
+            />
 
             <Separator />
 
