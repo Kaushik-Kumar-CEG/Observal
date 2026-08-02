@@ -1196,6 +1196,7 @@ def _update_agent_mock(user, *, is_private=False, team_id=None):
     agent.supported_harnesses = []
     agent.status = AgentStatus.approved
     agent.rejection_reason = None
+    agent.success_criteria = None
     agent.created_by = user.id
     agent.created_at = datetime.now(UTC)
     agent.updated_at = datetime.now(UTC)
