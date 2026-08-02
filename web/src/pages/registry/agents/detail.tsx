@@ -641,10 +641,12 @@ export default function AgentDetailPage() {
   const { data: teams = [] } = useTeams();
   const updateVisibility = useUpdateRegistryVisibility();
   const { data: versionsData } = useAgentVersions(id);
+  const versions = versionsData?.items ?? [];
+  const latestApprovedVersion = useMemo(() => getLatestApprovedVersion(versions), [versions]);
   const [selectedVersion, setSelectedVersion] = useState<string | null>(null);
   const [confirmPublicOpen, setConfirmPublicOpen] = useState(false);
   const { data: versionDetail, isLoading: isVersionDetailLoading } = useAgentVersionDetail(id, selectedVersion);
-  const effectiveVersionForDetail = selectedVersion ?? versionsData?.items?.find(v => v.status === "approved")?.version ?? (agent as unknown as AgentDetail | undefined)?.version ?? null;
+  const effectiveVersionForDetail = selectedVersion ?? latestApprovedVersion ?? (agent as unknown as AgentDetail | undefined)?.version ?? null;
   const { data: effectiveVersionDetail } = useAgentVersionDetail(id, effectiveVersionForDetail);
 
   // Co-authors
@@ -675,8 +677,6 @@ export default function AgentDetailPage() {
   );
 
   const a = agent as unknown as AgentDetail | undefined;
-  const versions = versionsData?.items ?? [];
-  const latestApprovedVersion = useMemo(() => getLatestApprovedVersion(versions), [versions]);
   const effectiveVersion = selectedVersion ?? latestApprovedVersion ?? a?.version;
   const selectedVersionSummary = versions.find((v) => v.version === effectiveVersion);
   const vd = versionDetail ?? effectiveVersionDetail;

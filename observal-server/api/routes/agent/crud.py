@@ -698,10 +698,12 @@ async def update_agent(
                 raise HTTPException(status_code=422, detail=f"Invalid MCP command: {e}")
         agent.external_mcps = [m.model_dump() for m in req.external_mcps]
 
-    if req.success_criteria is not None:
+    if "success_criteria" in req.model_fields_set:
         if not agent.latest_version:
             raise HTTPException(status_code=400, detail="Agent has no version to update")
-        agent.latest_version.success_criteria = req.success_criteria.model_dump()
+        agent.latest_version.success_criteria = (
+            req.success_criteria.model_dump() if req.success_criteria is not None else None
+        )
 
     if req.components is not None:
         # New components field replaces ALL components (type validated by Pydantic Literal)
@@ -811,6 +813,29 @@ async def update_agent(
 
         agent.required_capabilities = infer_required_features(_AgentProxy(), skill_listings=skill_listings_map_update)
         agent.inferred_supported_harnesses = compute_supported_harnesses(agent.required_capabilities)
+
+    snapshot_fields = (
+        "version",
+        "description",
+        "prompt",
+        "model_name",
+        "model_config_json",
+        "models_by_harness",
+        "supported_harnesses",
+    )
+    snapshot_needs_refresh = (
+        req.version_bump_type is not None
+        or any(getattr(req, field) is not None for field in snapshot_fields)
+        or req.external_mcps is not None
+        or req.components is not None
+        or req.mcp_server_ids is not None
+        or "success_criteria" in req.model_fields_set
+    )
+    if snapshot_needs_refresh:
+        await db.flush()
+        from services.agent_snapshot import build_yaml_snapshot
+
+        agent.latest_version.yaml_snapshot = await build_yaml_snapshot(agent.latest_version, db)
 
     await db.commit()
     agent = await _load_agent(db, str(agent.id), prefer_user_id=current_user.id, current_user=current_user)

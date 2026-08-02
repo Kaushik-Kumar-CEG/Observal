@@ -80,6 +80,27 @@ async def test_snapshot_includes_models_by_harness():
 
 
 @pytest.mark.asyncio
+async def test_snapshot_includes_success_criteria():
+    """Success criteria should be preserved in the reviewer snapshot."""
+    from services.agent_snapshot import build_yaml_snapshot
+
+    criteria = {
+        "intended_purpose": "Review pull requests consistently.",
+        "success_metrics": [
+            {"name": "Review accuracy", "target": "> 95%", "measurement": "Human audit"},
+        ],
+        "evaluation_notes": "Sample completed reviews monthly.",
+    }
+    ver = _mock_version()
+    ver.success_criteria = criteria
+    db = _mock_session_for_snapshot(components=[], goal=None)
+
+    text = await build_yaml_snapshot(ver, db)
+
+    assert yaml.safe_load(text)["success_criteria"] == criteria
+
+
+@pytest.mark.asyncio
 async def test_snapshot_emits_empty_dict_when_no_overrides():
     """An empty ``models_by_harness`` should be present (not omitted) so reviewers
     can tell "no overrides" apart from "data missing"."""

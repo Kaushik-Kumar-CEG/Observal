@@ -37,7 +37,7 @@ import {
 } from "@/hooks/use-api";
 import { registry } from "@/lib/api";
 import type { RegistryType } from "@/lib/api";
-import type { ReviewItem, ComponentChange } from "@/lib/types";
+import type { ComponentChange, ReviewItem, SuccessCriteria } from "@/lib/types";
 
 function pluralizeType(type: string): string {
 	if (type === "agent") return "agents";
@@ -609,7 +609,7 @@ function DiffDialogBody({
 	);
 	const supportedIdes =
 		(detail?.supported_harnesses as string[]) || item.supported_harnesses || [];
-	const successCriteria = detail?.success_criteria as { intended_purpose?: string; success_metrics?: { name: string; target: string; measurement: string }[]; evaluation_notes?: string } | null | undefined;
+	const successCriteria = detail?.success_criteria as SuccessCriteria | null | undefined;
 	const components =
 		(detail?.components as {
 			component_type: string;

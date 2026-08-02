@@ -63,6 +63,7 @@ def _make_version(agent_id: uuid.UUID, ver: str = SEMVER_VALID, status: AgentSta
     v.required_capabilities = ["rules"]
     v.inferred_supported_harnesses = ["claude-code"]
     v.yaml_snapshot = None
+    v.success_criteria = None
     v.harness_configs = None
     v.status = status
     v.is_prerelease = False

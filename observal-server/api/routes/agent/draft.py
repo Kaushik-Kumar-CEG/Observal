@@ -302,8 +302,8 @@ async def update_draft(
         if val is not None:
             setattr(version, field, val)
 
-    if req.success_criteria is not None:
-        version.success_criteria = req.success_criteria.model_dump()
+    if "success_criteria" in req.model_fields_set:
+        version.success_criteria = req.success_criteria.model_dump() if req.success_criteria is not None else None
 
     if req.external_mcps is not None:
         for _mcp in req.external_mcps:

@@ -16,7 +16,7 @@ interface SuccessCriteriaSectionProps {
 
 const EMPTY_METRIC: SuccessMetric = { name: "", target: "", measurement: "" };
 
-function hasContent(v: SuccessCriteria | null): boolean {
+export function hasSuccessCriteriaContent(v: SuccessCriteria | null): boolean {
   if (!v) return false;
   return !!(
     v.intended_purpose?.trim() ||
@@ -25,9 +25,34 @@ function hasContent(v: SuccessCriteria | null): boolean {
   );
 }
 
+export function validateSuccessCriteria(v: SuccessCriteria | null): string | null {
+  if (!v || !hasSuccessCriteriaContent(v)) return null;
+  if (!v.intended_purpose?.trim()) return "Intended purpose is required when success criteria are defined.";
+  const incompleteMetric = (v.success_metrics ?? []).findIndex(
+    (metric) => !metric.name.trim() || !metric.target.trim() || !metric.measurement.trim(),
+  );
+  return incompleteMetric === -1
+    ? null
+    : `Complete all fields for metric ${incompleteMetric + 1}.`;
+}
+
+export function normalizeSuccessCriteria(v: SuccessCriteria | null): SuccessCriteria | null {
+  if (!v || !hasSuccessCriteriaContent(v)) return null;
+  return {
+    intended_purpose: v.intended_purpose?.trim() ?? "",
+    success_metrics: (v.success_metrics ?? []).map((metric) => ({
+      name: metric.name.trim(),
+      target: metric.target.trim(),
+      measurement: metric.measurement.trim(),
+    })),
+    evaluation_notes: v.evaluation_notes?.trim() ?? "",
+  };
+}
+
 export function SuccessCriteriaSection({ value, onChange }: SuccessCriteriaSectionProps) {
-  const [expanded, setExpanded] = useState(hasContent(value));
-  const defined = hasContent(value);
+  const [expanded, setExpanded] = useState(hasSuccessCriteriaContent(value));
+  const defined = hasSuccessCriteriaContent(value);
+  const validationError = validateSuccessCriteria(value);
 
   function handleToggle() {
     if (expanded) {
@@ -123,18 +148,21 @@ export function SuccessCriteriaSection({ value, onChange }: SuccessCriteriaSecti
               <div key={index} className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_1fr_auto] gap-2 items-start">
                 <Input
                   placeholder="Metric name"
+                  aria-label={`Metric ${index + 1} name`}
                   value={metric.name}
                   onChange={(e) => updateMetric(index, "name", e.target.value)}
                   className="text-sm"
                 />
                 <Input
                   placeholder="Target (e.g. < 5%)"
+                  aria-label={`Metric ${index + 1} target`}
                   value={metric.target}
                   onChange={(e) => updateMetric(index, "target", e.target.value)}
                   className="text-sm"
                 />
                 <Input
                   placeholder="How to measure"
+                  aria-label={`Metric ${index + 1} measurement method`}
                   value={metric.measurement}
                   onChange={(e) => updateMetric(index, "measurement", e.target.value)}
                   className="text-sm"
@@ -143,6 +171,7 @@ export function SuccessCriteriaSection({ value, onChange }: SuccessCriteriaSecti
                   type="button"
                   variant="ghost"
                   size="icon"
+                  aria-label={`Remove metric ${index + 1}`}
                   onClick={() => removeMetric(index)}
                   className="h-9 w-9 text-muted-foreground hover:text-destructive"
                 >
@@ -150,6 +179,11 @@ export function SuccessCriteriaSection({ value, onChange }: SuccessCriteriaSecti
                 </Button>
               </div>
             ))}
+            {validationError && (
+              <p role="alert" className="text-xs text-destructive">
+                {validationError}
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">

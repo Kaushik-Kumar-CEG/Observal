@@ -16,6 +16,7 @@ import {
   Save,
   RotateCcw,
 } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -50,7 +51,11 @@ import type {
 import type { RegistryType } from "@/lib/api";
 import { ModelPicker } from "@/components/builder/model-picker";
 import { SortableComponentList } from "@/components/builder/sortable-component-list";
-import { SuccessCriteriaSection } from "@/components/builder/success-criteria-section";
+import {
+  normalizeSuccessCriteria,
+  SuccessCriteriaSection,
+  validateSuccessCriteria,
+} from "@/components/builder/success-criteria-section";
 import { ValidationPanel } from "@/components/builder/validation-panel";
 import { COMPONENT_TYPES, REVERSE_TYPE_MAP, TYPE_MAP } from "@/components/registry/agent-component-constants";
 import { ComponentPicker } from "@/components/registry/component-picker";
@@ -327,14 +332,7 @@ export function AgentEditForm({
       }
     }
 
-    const normalizedCriteria = successCriteria?.intended_purpose?.trim()
-      ? {
-          ...successCriteria,
-          success_metrics: successCriteria.success_metrics.filter(
-            (m) => m.name.trim() && m.target.trim() && m.measurement.trim(),
-          ),
-        }
-      : null;
+    const normalizedCriteria = normalizeSuccessCriteria(successCriteria);
 
     return {
       version,
@@ -353,6 +351,11 @@ export function AgentEditForm({
   }
 
   async function handleRelease(selectedVersion: string) {
+    const criteriaError = validateSuccessCriteria(successCriteria);
+    if (criteriaError) {
+      toast.error(criteriaError);
+      return;
+    }
     setPublishing(true);
     try {
       const body = buildVersionBody(selectedVersion);
@@ -377,6 +380,11 @@ export function AgentEditForm({
   }
 
   async function handleSaveDraft() {
+    const criteriaError = validateSuccessCriteria(successCriteria);
+    if (criteriaError) {
+      toast.error(criteriaError);
+      return;
+    }
     setSavingDraft(true);
     try {
       const draftVersion = versionSuggestions?.suggestions?.patch ?? currentVersion;

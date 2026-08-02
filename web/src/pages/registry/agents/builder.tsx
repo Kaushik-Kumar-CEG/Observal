@@ -44,7 +44,12 @@ import type { ValidationResult } from "@/lib/types";
 const DRAFT_STORAGE_KEY = "observal_agent_draft";
 
 import { SortableComponentList } from "@/components/builder/sortable-component-list";
-import { SuccessCriteriaSection } from "@/components/builder/success-criteria-section";
+import {
+  hasSuccessCriteriaContent,
+  normalizeSuccessCriteria,
+  SuccessCriteriaSection,
+  validateSuccessCriteria,
+} from "@/components/builder/success-criteria-section";
 import { SubmitComponentDialog } from "@/components/registry/submit-component-dialog";
 import { ValidationPanel } from "@/components/builder/validation-panel";
 import { PreviewPanel } from "@/components/builder/preview-panel";
@@ -305,7 +310,8 @@ function AgentBuilderInner() {
       const hasContent = name || description || modelName || version !== "1.0.0" ||
         Object.keys(modelsByHarness).length > 0 ||
         Object.values(selectedComponents).some((items) => items.length > 0) ||
-        systemPrompt.trim().length > 0;
+        systemPrompt.trim().length > 0 ||
+        hasSuccessCriteriaContent(successCriteria);
 
       if (!hasContent) return;
 
@@ -393,6 +399,11 @@ function AgentBuilderInner() {
       toast.error("An agent prompt is required.");
       return;
     }
+    const criteriaError = validateSuccessCriteria(successCriteria);
+    if (criteriaError) {
+      toast.error(criteriaError);
+      return;
+    }
 
     setSavingDraft(true);
     try {
@@ -468,14 +479,7 @@ function AgentBuilderInner() {
       }
     }
 
-    const normalizedCriteria = successCriteria?.intended_purpose?.trim()
-      ? {
-          ...successCriteria,
-          success_metrics: successCriteria.success_metrics.filter(
-            (m) => m.name.trim() && m.target.trim() && m.measurement.trim(),
-          ),
-        }
-      : null;
+    const normalizedCriteria = normalizeSuccessCriteria(successCriteria);
 
     const body: Record<string, unknown> = {
       name: normalizeAgentName(name),
@@ -509,6 +513,11 @@ function AgentBuilderInner() {
     }
     if (!isValidAgentName(name)) {
       toast.error(`Invalid agent name. ${AGENT_NAME_ERROR}`);
+      return;
+    }
+    const criteriaError = validateSuccessCriteria(successCriteria);
+    if (criteriaError) {
+      toast.error(criteriaError);
       return;
     }
 
@@ -564,6 +573,11 @@ function AgentBuilderInner() {
 
   async function handleUpdateWithVersion(selectedVersion: string) {
     if (!editId) return;
+    const criteriaError = validateSuccessCriteria(successCriteria);
+    if (criteriaError) {
+      toast.error(criteriaError);
+      return;
+    }
 
     setPublishing(true);
     try {

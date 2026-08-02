@@ -271,7 +271,7 @@ async def _create_agent_version(
         models_by_harness=req.models_by_harness,
         external_mcps=[m.model_dump() for m in req.external_mcps] if req.external_mcps else [],
         supported_harnesses=req.supported_harnesses,
-        yaml_snapshot=req.yaml_snapshot,
+        yaml_snapshot=None,
         is_prerelease=req.is_prerelease,
         status=initial_status,
         released_by=current_user.id,
@@ -312,16 +312,12 @@ async def _create_agent_version(
     ver.required_capabilities = infer_required_features(_VersionProxy(), skill_listings=skill_listings_map)
     ver.inferred_supported_harnesses = compute_supported_harnesses(ver.required_capabilities)
 
-    # Backfill yaml_snapshot when the client didn't supply one (web builder
-    # path). Without this the reviewer's diff view is blank for everything
-    # that wasn't published from the CLI.
-    if not ver.yaml_snapshot:
-        # Flush pending AgentComponent rows so the snapshot
-        # builder can re-query them from the session.
-        await db.flush()
-        from services.agent_snapshot import build_yaml_snapshot
+    # Always build the snapshot from structured fields so caller-provided text
+    # cannot drift from the version stored in the database.
+    await db.flush()
+    from services.agent_snapshot import build_yaml_snapshot
 
-        ver.yaml_snapshot = await build_yaml_snapshot(ver, db)
+    ver.yaml_snapshot = await build_yaml_snapshot(ver, db)
 
     # Pre-generate harness configs at release time (spec: no generation at request time)
     mcp_comp_ids = [c.component_id for c in req.components if c.component_type == "mcp"]
