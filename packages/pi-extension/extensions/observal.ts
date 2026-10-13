@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -249,7 +250,7 @@ export default function (pi: ExtensionAPI) {
             // ignore
           }
 
-          state.layerSnapshot = buildPiLayerSnapshot(true);
+          state.layerSnapshot = buildPiLayerSnapshot();
           state.layerHash = state.layerSnapshot.hash;
           if (!(await uploadLayerSnapshot(state.config, state.layerSnapshot))) {
             ctx.ui.notify("Layer snapshot upload failed", "warning");
@@ -306,7 +307,7 @@ export default function (pi: ExtensionAPI) {
       lineCount = cursor.line_count;
     }
 
-    const layerSnapshot = buildPiLayerSnapshot(true);
+    const layerSnapshot = buildPiLayerSnapshot();
     const layerHash = layerSnapshot.hash;
 
     // Tools Pi runs (the bash tool included) inherit this process's environment,
@@ -477,7 +478,7 @@ export default function (pi: ExtensionAPI) {
     return name.replace(/[^a-zA-Z0-9_-]/g, "-");
   }
 
-  function buildPiLayerSnapshot(includeContent: boolean): LayerSnapshot {
+  function buildPiLayerSnapshot(): LayerSnapshot {
     const piHome = path.join(os.homedir(), ".pi", "agent");
     const files = discoverPiLayerFiles(piHome);
     const manifest: LayerFileEntry[] = [];
@@ -492,9 +493,10 @@ export default function (pi: ExtensionAPI) {
           size: content.length,
           source: "user",
         };
-        if (includeContent) {
-          entry.content = content.toString("utf-8");
-        }
+        // Never transmit user configuration contents: they may include API
+        // keys. Hashes preserve change detection without leaking file bytes.
+        // A future content-based extractor needs a separately reviewed,
+        // allowlisted redaction policy before it can claim coverage.
         manifest.push(entry);
       } catch {
         continue;
@@ -589,10 +591,25 @@ export default function (pi: ExtensionAPI) {
       const standalone: Record<string, unknown>[] = [];
       for (const [harness, section] of Object.entries((registry.harnesses ?? {}) as Record<string, any>)) {
         for (const agent of section.agents ?? []) {
-          agents.push({ ...agent, harness });
+          // Never spread a lockfile object into a request: component settings
+          // may embed remote credentials or user-owned environment overrides.
+          agents.push({
+            id: agent.id, name: agent.name, version: agent.version,
+            scope: agent.scope, local_name: agent.local_name,
+            qualified_name: agent.qualified_name, harness,
+            components: Array.isArray(agent.components) ? agent.components.map((component: any) => ({
+              id: component.id, type: component.type, name: component.name,
+              version: component.version, scope: component.scope,
+              local_name: component.local_name, qualified_name: component.qualified_name,
+            })) : [],
+          });
         }
         for (const item of section.standalone ?? []) {
-          standalone.push({ ...item, harness });
+          standalone.push({
+            id: item.id, type: item.type, name: item.name, version: item.version,
+            scope: item.scope, local_name: item.local_name,
+            qualified_name: item.qualified_name, harness,
+          });
         }
       }
       return { agents, standalone };

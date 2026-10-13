@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """harness layer scanning and hash computation.
@@ -662,7 +663,8 @@ def build_upload_payload(harness: str | None = None, project_dir: str | None = N
     """Build the full layer snapshot payload for upload to the server.
 
     Scans all detected first-class harnesses. Structured by harness.
-    Includes file contents for server-side diffing and insight analysis.
+    Sends paths and hashes only. Local configuration file contents may include
+    credentials; server-side redaction would occur after network transmission.
     """
     harnesses_to_scan = [harness] if harness else _detect_active_harnesses()
 
@@ -670,7 +672,7 @@ def build_upload_payload(harness: str | None = None, project_dir: str | None = N
     harnesses_section: dict[str, list[dict[str, Any]]] = {}
 
     for scan_harness in harnesses_to_scan:
-        manifest = build_layer_manifest(scan_harness, project_dir, include_content=True)
+        manifest = build_layer_manifest(scan_harness, project_dir, include_content=False)
         harnesses_section[scan_harness] = manifest
         for entry in manifest:
             all_hash_entries.append((f"{scan_harness}/{entry['path']}", entry["hash"]))
