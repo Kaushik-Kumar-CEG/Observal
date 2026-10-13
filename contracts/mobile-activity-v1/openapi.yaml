@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+openapi: 3.1.0
+info:
+  title: Observal mobile activity v1 (negotiation contract)
+  version: 1.0.0-draft
+  description: >-
+    Backend-owned proposed wire contract. These routes are NOT implemented until the
+    corresponding backend gates pass. All readings describe observed, retained,
+    identity-checked client reports, not attested real-world usage.
+servers:
+  - url: /api/v1
+security:
+  - mobileBearer: []
+paths:
+  /mobile-activity/v1/capabilities:
+    get:
+      operationId: mobileActivityCapabilities
+      description: Authentication required. Origin is the HTTPS request origin; never use server_id alone as a credential key.
+      responses:
+        '200':
+          description: Capability negotiation; an advertised kind requires a qualified upgraded sender cohort.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Capabilities'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /mobile-activity/v1/people/{subject_id}/summary:
+    get:
+      operationId: personActivitySummary
+      description: >-
+        Self user activity, or trace-authorized admin/maintainer user and author
+        activity subject to trace privacy. Following and original authorship confer
+        no telemetry permission. No raw session identifiers or transcripts.
+      parameters:
+        - $ref: '#/components/parameters/Subject'
+        - $ref: '#/components/parameters/Period'
+        - $ref: '#/components/parameters/Scope'
+      responses:
+        '200':
+          description: Permission-scoped summary including separately authorized general sessions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonSummary'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Restricted' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /mobile-activity/v1/platform/overview:
+    get:
+      operationId: platformActivityOverview
+      description: >-
+        Trace-authorized admin/maintainer only when security.trace_privacy allows
+        platform access. Fixed server-anchored UTC day windows; no user, project,
+        harness, component or arbitrary-time filters. No cross-user data for ordinary
+        mobile accounts. Count distinct active account IDs and distinct prompted
+        logical roots independently, never sums of per-person readings. This does
+        not measure all real-world usage or component invocation.
+      parameters:
+        - $ref: '#/components/parameters/Period'
+      responses:
+        '200':
+          description: Privacy-screened platform aggregate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformOverview'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Restricted' }
+components:
+  securitySchemes:
+    mobileBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Audience- and scope-limited, read-only mobile credential; never a full account JWT.
+  parameters:
+    Subject:
+      name: subject_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Scope:
+      name: scope
+      in: query
+      required: true
+      schema: { type: string, enum: [user, author] }
+    Period:
+      name: period
+      in: query
+      required: true
+      schema: { type: string, enum: [1w, 1m, 3m] }
+  responses:
+    Unauthorized:
+      description: Missing or expired credential.
+    Restricted:
+      description: Permission denied; no alternate total, coverage, or listing hint.
+    NotFound:
+      description: Subject not visible; indistinguishable from absent subject.
+  schemas:
+    Reading:
+      type: object
+      additionalProperties: false
+      required: [value, status, reasons, coverage]
+      properties:
+        value: { type: [integer, 'null'], minimum: 0 }
+        status: { type: string, enum: [supported, partial, not_recorded, restricted] }
+        reasons:
+          type: array
+          items: { type: string }
+        coverage:
+          type: object
+          additionalProperties: false
+          required: [eligible_sessions, source_start, source_end, supported_harnesses, projection]
+          properties:
+            eligible_sessions: { type: [integer, 'null'], minimum: 0 }
+            source_start: { type: [string, 'null'], format: date-time }
+            source_end: { type: [string, 'null'], format: date-time }
+            supported_harnesses:
+              type: array
+              items: { type: string }
+            projection: { type: string, enum: [complete, partial, pending, unavailable] }
+      description: >-
+        Null means unavailable, never zero. Numeric zero means zero observed in a
+        declared eligible cohort only; partial zero must be labelled 0 observed.
+        Missing source, unsupported client, invalid event time, purges and incomplete
+        retention cannot be advertised as full-window measured zero.
+    Window:
+      type: object
+      additionalProperties: false
+      required: [start, end, as_of, timezone, period]
+      properties:
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        as_of: { type: string, format: date-time }
+        timezone: { type: string, const: UTC }
+        period: { type: string, enum: [1w, 1m, 3m] }
+      description: >-
+        Half-open [start,end) by event time. Person windows are server-pinned.
+        Platform windows end at a fixed completed UTC day boundary to limit
+        time-differencing. 1w/1m/3m are 7/30/90 calendar days.
+    Capabilities:
+      type: object
+      additionalProperties: false
+      required: [contract, server_id, project_id, viewer_id, kinds, platform_overview]
+      properties:
+        contract: { type: string, const: mobile-activity-v1 }
+        server_id: { type: string }
+        project_id: { type: string }
+        viewer_id: { type: string, format: uuid }
+        kinds:
+          type: array
+          items: { type: string, enum: [mcp_calls, confirmed_skill_loads, recorded_hook_runs] }
+        platform_overview: { type: boolean }
+    PersonSummary:
+      type: object
+      additionalProperties: false
+      required: [subject_id, scope, window, revision, mcp_calls, confirmed_skill_loads, recorded_hook_runs, activity_traces, active_days_utc, general_sessions]
+      properties:
+        subject_id: { type: string, format: uuid }
+        scope: { type: string, enum: [user, author] }
+        window: { $ref: '#/components/schemas/Window' }
+        revision: { type: string, description: 'Opaque freshness marker; reauthorize every read.' }
+        mcp_calls: { $ref: '#/components/schemas/Reading' }
+        confirmed_skill_loads: { $ref: '#/components/schemas/Reading' }
+        recorded_hook_runs: { $ref: '#/components/schemas/Reading' }
+        activity_traces: { $ref: '#/components/schemas/Reading' }
+        active_days_utc: { $ref: '#/components/schemas/Reading' }
+        general_sessions: { $ref: '#/components/schemas/Reading' }
+      description: >-
+        General sessions are prompted, logical-root sessions with in-window root
+        or verified same-project/user/harness linked-child activity. Component
+        traces are a separate union of roots with attributable typed events.
+        Child events each count; unresolved parent chains are partial, not
+        silently merged by bare session ID. No general sessions in author scope;
+        that field is not_recorded there.
+    PlatformOverview:
+      type: object
+      additionalProperties: false
+      required: [window, revision, active_accounts, prompted_root_sessions]
+      properties:
+        window: { $ref: '#/components/schemas/Window' }
+        revision: { type: string }
+        active_accounts: { $ref: '#/components/schemas/Reading' }
+        prompted_root_sessions: { $ref: '#/components/schemas/Reading' }
+      description: >-
+        Active accounts are DISTINCT current, non-deleted, non-deactivated account
+        IDs with at least one qualifying prompted root in the window. Roots use
+        the verified scoped parent chain; do not sum accounts or roots over
+        component/person reports. Suppress BOTH readings (null/not_recorded,
+        common non-identifying reason) whenever the distinct qualifying account
+        cohort is under 10, even if root count is higher. No per-day buckets,
+        arbitrary end, identifiers or fine-grained filters. Counts exclude erased
+        and deactivated accounts; erasure revokes derived evidence and replay
+        cannot restore it. Retention/purge and unsupported/unlinked sessions
+        make coverage partial or unknown, not measured zero. This coarse gate
+        does not authorize public release or eliminate all differencing risk;
+        only trace-privileged viewers can see it.
