@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """OAuth 2.0 Device Authorization Grant (RFC 8628) endpoints.
@@ -44,6 +45,28 @@ _USER_CODE_ALPHABET = "BCDFGHJKMNPQRSTVWXZ23456789"
 
 _DEVICE_AUTH_TTL = 600  # 10 minutes
 _DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+
+# Redis executes this as one operation; only one poller can consume an
+# approved device grant. Pending/denied grants are left untouched.
+_CONSUME_APPROVED_GRANT = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return nil end
+local ok, grant = pcall(cjson.decode, raw)
+if not ok or grant.status ~= 'approved' then return nil end
+redis.call('DEL', KEYS[1])
+return raw
+"""
+
+_APPROVE_PENDING_GRANT = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local ok, grant = pcall(cjson.decode, raw)
+if not ok or grant.status ~= 'pending' then return 0 end
+grant.status = 'approved'
+grant.user_id = ARGV[1]
+redis.call('SET', KEYS[1], cjson.encode(grant), 'KEEPTTL')
+return 1
+"""
 
 
 def _generate_user_code() -> str:
@@ -256,15 +279,19 @@ async def device_token(request: Request, req: DeviceTokenRequest, db: AsyncSessi
         if not user:
             return JSONResponse(status_code=400, content={"error": "expired_token"})
 
-        # Clean up Redis keys
+        # Claim the approved grant atomically *before* issuing credentials.
+        # A concurrent poller must not redeem the same code twice.
         try:
-            normalized_code = _normalize_user_code(data.get("user_code", ""))
-            pipe = redis.pipeline()
-            pipe.delete(f"device_auth:{req.device_code}")
-            pipe.delete(f"device_code_by_user:{normalized_code}")
-            await pipe.execute()
-        except RedisError:
-            pass
+            consumed = await redis.eval(_CONSUME_APPROVED_GRANT, 1, f"device_auth:{req.device_code}")
+            if not consumed:
+                return JSONResponse(status_code=400, content={"error": "expired_token"})
+            consumed_data = json.loads(consumed)
+            if consumed_data.get("user_id") != user_id:
+                return JSONResponse(status_code=400, content={"error": "expired_token"})
+            await redis.delete(f"device_code_by_user:{_normalize_user_code(data.get('user_code', ''))}")
+        except RedisError as e:
+            optic.error("Redis unavailable during device redemption: {}", e)
+            raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
         access_token, refresh_token, expires_in = await _issue_tokens(user)
 
@@ -324,20 +351,15 @@ async def device_confirm(
     if data.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Device code already used or expired")
 
-    # Update status to approved with the authenticated user's ID
-    data["status"] = "approved"
-    data["user_id"] = str(current_user.id)
-
+    # Only one confirmation may transition pending -> approved. An old
+    # confirm request must not resurrect a code already consumed by polling.
     try:
-        # Preserve existing TTL
-        ttl = await redis.ttl(f"device_auth:{device_code}")
-        if ttl and ttl > 0:
-            await redis.setex(f"device_auth:{device_code}", ttl, json.dumps(data))
-        else:
-            await redis.setex(f"device_auth:{device_code}", _DEVICE_AUTH_TTL, json.dumps(data))
+        approved = await redis.eval(_APPROVE_PENDING_GRANT, 1, f"device_auth:{device_code}", str(current_user.id))
     except RedisError as e:
         optic.error("Redis unavailable during device confirm update: {}", e)
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    if not approved:
+        raise HTTPException(status_code=400, detail="Device code already used or expired")
 
     optic.info("device_confirm: device authorized for user={}", current_user.email)
     return {"message": "Device authorized"}

@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for OAuth 2.0 Device Authorization Grant (RFC 8628) endpoints."""
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
@@ -61,6 +63,24 @@ class FakeRedis:
 
     async def ttl(self, key: str) -> int:
         return self._ttls.get(key, -1)
+
+    async def eval(self, script: str, _key_count: int, key: str, *args):
+        raw = self._store.get(key)
+        if raw is None:
+            return None if "DEL" in script else 0
+        data = json.loads(raw)
+        if "DEL" in script:
+            if data.get("status") != "approved":
+                return None
+            self._store.pop(key, None)
+            self._ttls.pop(key, None)
+            return raw
+        if data.get("status") != "pending":
+            return 0
+        data["status"] = "approved"
+        data["user_id"] = args[0]
+        self._store[key] = json.dumps(data)
+        return 1
 
     def pipeline(self):
         return FakePipeline(self)
@@ -379,9 +399,64 @@ class TestDeviceToken:
         finally:
             _cleanup()
 
+    @pytest.mark.asyncio
+    async def test_concurrent_redemption_issues_only_one_token_pair(self):
+        user = _make_mock_user()
+        redis = FakeRedis()
+        code = "single-use-device-code"
+        await redis.setex(
+            f"device_auth:{code}",
+            600,
+            json.dumps({"user_code": "BCDF-GHJK", "status": "approved", "user_id": str(user.id)}),
+        )
+        _setup_db_override(user)
+        try:
+            with (
+                patch("api.routes.device_auth.get_redis", return_value=redis),
+                patch("api.routes.auth.get_redis", return_value=redis),
+            ):
+                async with _make_async_client() as client:
+
+                    async def poll():
+                        return await client.post(
+                            "/api/v1/auth/device/token",
+                            json={"device_code": code, "grant_type": "urn:ietf:params:oauth:grant-type:device_code"},
+                        )
+
+                    first, second = await asyncio.gather(poll(), poll())
+            assert sorted((first.status_code, second.status_code)) == [200, 400]
+            assert len([key for key in redis._store if key.startswith("refresh_jti:")]) == 1
+        finally:
+            _cleanup()
+
 
 class TestDeviceConfirm:
     """POST /api/v1/auth/device/confirm"""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_confirmation_only_one_approval(self):
+        user = _make_mock_user()
+        redis = FakeRedis()
+        code = "single-confirm-device-code"
+        await redis.setex(f"device_auth:{code}", 600, json.dumps({"status": "pending", "user_code": "BCDF-GHJK"}))
+        await redis.setex("device_code_by_user:BCDFGHJK", 600, code)
+        _setup_auth_override(user)
+        try:
+            with patch("api.routes.device_auth.get_redis", return_value=redis):
+                async with _make_async_client() as client:
+
+                    async def confirm():
+                        return await client.post(
+                            "/api/v1/auth/device/confirm",
+                            json={"user_code": "BCDF-GHJK"},
+                            headers={"Authorization": "Bearer fake-token"},
+                        )
+
+                    first, second = await asyncio.gather(confirm(), confirm())
+            assert sorted((first.status_code, second.status_code)) == [200, 400]
+            assert json.loads(redis._store[f"device_auth:{code}"])["user_id"] == str(user.id)
+        finally:
+            _cleanup()
 
     @pytest.mark.asyncio
     async def test_invalid_user_code_returns_404(self):
