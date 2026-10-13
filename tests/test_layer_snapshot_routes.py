@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Focused coverage for the layer snapshot routes."""
@@ -30,6 +31,7 @@ _CHECK_SQL = """
     SELECT count() as cnt
     FROM layer_snapshots FINAL
     WHERE project_id = {project_id:String}
+      AND user_id = {user_id:String}
       AND hash = {hash:String}
     FORMAT JSON
 """
@@ -37,6 +39,7 @@ _GET_SQL = """
     SELECT hash, harness, content, uploaded_at, file_count, total_size, lockfile_hash
     FROM layer_snapshots FINAL
     WHERE project_id = {project_id:String}
+      AND user_id = {user_id:String}
       AND hash = {hash:String}
     LIMIT 1
     FORMAT JSON
@@ -45,6 +48,7 @@ _DIFF_SQL = """
     SELECT hash, content
     FROM layer_snapshots FINAL
     WHERE project_id = {project_id:String}
+      AND user_id = {user_id:String}
       AND hash IN ({hash_a:String}, {hash_b:String})
     FORMAT JSON
 """
@@ -237,6 +241,7 @@ async def test_upload_serializes_redacted_manifest_and_inserts_exact_row_in_orde
     }
     assert query_mock.await_args.args[1] == {
         "param_project_id": DEFAULT_PROJECT_ID,
+        "param_user_id": str(USER_ID),
         "param_hash": HASH_A,
     }
     assert _compact(query_mock.await_args.args[0]) == _compact(_CHECK_SQL)
@@ -301,6 +306,7 @@ async def test_duplicate_upload_is_a_no_mutation_success(boundaries):
     boundaries.insert.assert_not_awaited()
     assert boundaries.query.await_args.args[1] == {
         "param_project_id": DEFAULT_PROJECT_ID,
+        "param_user_id": str(USER_ID),
         "param_hash": HASH_A,
     }
 
@@ -521,6 +527,7 @@ async def test_get_snapshot_flattens_harnesses_and_prefers_manifest_lock_hash(mo
     assert _compact(query.await_args.args[0]) == _compact(_GET_SQL)
     assert query.await_args.args[1] == {
         "param_project_id": DEFAULT_PROJECT_ID,
+        "param_user_id": str(USER_ID),
         "param_hash": HASH_A,
     }
 
@@ -636,6 +643,7 @@ async def test_diff_snapshots_returns_exact_changes_and_query(monkeypatch):
     assert _compact(query.await_args.args[0]) == _compact(_DIFF_SQL)
     assert query.await_args.args[1] == {
         "param_project_id": DEFAULT_PROJECT_ID,
+        "param_user_id": str(USER_ID),
         "param_hash_a": HASH_A,
         "param_hash_b": HASH_B,
     }

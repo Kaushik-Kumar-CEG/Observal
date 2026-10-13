@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Layer snapshot upload and retrieval endpoint.
@@ -105,7 +106,8 @@ async def upload_layer_snapshot(
 
     import json
 
-    # Check if this hash already exists for this project
+    # Deduplicate only this authenticated uploader's project/hash. Another user's
+    # identical hash is never an acknowledgement of this user's upload.
     from services.clickhouse.client import _query as ch_query
     from services.clickhouse.insert import insert_layer_snapshot
 
@@ -113,6 +115,7 @@ async def upload_layer_snapshot(
         SELECT count() as cnt
         FROM layer_snapshots FINAL
         WHERE project_id = {project_id:String}
+          AND user_id = {user_id:String}
           AND hash = {hash:String}
         FORMAT JSON
     """
@@ -121,6 +124,7 @@ async def upload_layer_snapshot(
             check_sql,
             {
                 "param_project_id": project_id,
+                "param_user_id": user_id,
                 "param_hash": req.hash,
             },
         )
@@ -210,6 +214,7 @@ async def get_layer_snapshot(
         SELECT hash, harness, content, uploaded_at, file_count, total_size, lockfile_hash
         FROM layer_snapshots FINAL
         WHERE project_id = {project_id:String}
+          AND user_id = {user_id:String}
           AND hash = {hash:String}
         LIMIT 1
         FORMAT JSON
@@ -218,6 +223,7 @@ async def get_layer_snapshot(
         sql,
         {
             "param_project_id": project_id,
+            "param_user_id": str(current_user.id),
             "param_hash": snapshot_hash,
         },
     )
@@ -274,6 +280,7 @@ async def diff_layer_snapshots(
         SELECT hash, content
         FROM layer_snapshots FINAL
         WHERE project_id = {project_id:String}
+          AND user_id = {user_id:String}
           AND hash IN ({hash_a:String}, {hash_b:String})
         FORMAT JSON
     """
@@ -281,6 +288,7 @@ async def diff_layer_snapshots(
         sql,
         {
             "param_project_id": project_id,
+            "param_user_id": str(current_user.id),
             "param_hash_a": hash_a,
             "param_hash_b": hash_b,
         },

@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Version impact analysis for insight reports.
@@ -319,6 +320,13 @@ async def build_version_impact_data(
         success_gap >= 0.20 or error_gap >= 0.15 or any(label != "normal" for label in outlier_labels.values())
     )
     confidence = _confidence_for_groups(groups, significant)
+
+    # Cross-user hash cohorts cannot identify the uploader of a legacy snapshot.
+    # Never feed a user's stored file contents to an Insights model or report on
+    # the basis of project+hash alone. Until the report carries a verified uploader
+    # identity and explicit content authorization, omit content-based impact data.
+    if significant:
+        return None
 
     if not significant:
         # Return lightweight summary (no snapshot content, saves context)
