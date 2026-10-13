@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """User-wide token revocation must stick: a later login, refresh, or password change never revives old tokens."""
 
+import asyncio
 import time
 import uuid
 from contextlib import contextmanager
@@ -144,6 +146,14 @@ async def test_refresh_racing_a_logout_hands_out_no_tokens(env):
     env.db.execute = AsyncMock(side_effect=lookup_then_logout)
     assert not await _refreshes(env, refresh)
     assert not [key for key in env.redis.values if key.startswith("refresh_jti:")]
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_refresh_only_one_successor(env):
+    _, refresh, _ = await auth._issue_tokens(env.user)
+    outcomes = await asyncio.gather(_refreshes(env, refresh), _refreshes(env, refresh))
+    assert sorted(outcomes) == [False, True]
+    assert len([key for key in env.redis.values if key.startswith("refresh_jti:")]) == 1
 
 
 @pytest.mark.asyncio
