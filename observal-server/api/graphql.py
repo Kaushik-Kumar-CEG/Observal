@@ -42,12 +42,49 @@ class ReviewEvent:
     state: str | None = None
 
 
+def _subscription_token(info: strawberry.Info) -> str:
+    # Strawberry attaches connection_init to context after get_context_dep.
+    params = info.context.get("connection_params") or {}
+    authorization = params.get("authorization") if isinstance(params, dict) else None
+    authorization = authorization or info.context["request"].headers.get("authorization")
+    if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
+        raise ValueError("Authentication required")
+    return authorization.removeprefix("Bearer ").strip()
+
+
+async def _trace_admin_allowed(token: str) -> bool:
+    from api.deps import _authenticate_via_jwt
+    from database import async_session
+    from models.user import UserRole
+
+    async with async_session() as db:
+        user = await _authenticate_via_jwt(token, db)
+        return bool(
+            user
+            and (
+                user.role == UserRole.super_admin
+                or (user.role == UserRole.admin and not ds.get_sync_bool("security.trace_privacy"))
+            )
+        )
+
+
 @strawberry.type
 class Subscription:
     @strawberry.subscription
-    async def session_updated(self, session_id: str | None = None) -> AsyncGenerator[SessionEvent, None]:
+    async def session_updated(
+        self, info: strawberry.Info, session_id: str | None = None
+    ) -> AsyncGenerator[SessionEvent, None]:
+        # The published event contains only a bare session ID, not its scoped
+        # project/user/harness identity. A non-admin with the same ID could
+        # otherwise observe another user's session. Deny both subscription
+        # forms until their payloads carry authenticated scoped identity.
+        token = _subscription_token(info)
+        if not await _trace_admin_allowed(token):
+            raise ValueError("Trace access required")
         channel = f"sessions:{session_id}:updated" if session_id else "sessions:updated"
         async for data in subscribe(channel):
+            if not await _trace_admin_allowed(token):
+                return
             sid = data.get("session_id", "")
             if not session_id or sid == session_id:
                 yield SessionEvent(session_id=sid, event_name=data.get("event_name", ""))
@@ -56,6 +93,10 @@ class Subscription:
     async def review_updated(
         self, info: strawberry.Info, listing_id: str | None = None, review_id: str | None = None
     ) -> AsyncGenerator[ReviewEvent, None]:
+        if not review_id:
+            # The global and listing-filtered payloads omit review identity.
+            # Public-at-publish-time is not proof of current read permission.
+            raise ValueError("Review ID required for live updates")
         if review_id:
             import uuid
 
@@ -72,12 +113,7 @@ class Subscription:
             # Browsers cannot put Authorization in WebSocket headers. graphql-ws
             # sends it in connection_init; Strawberry attaches that payload to
             # context *after* get_context_dep has run.
-            params = info.context.get("connection_params") or {}
-            authorization = params.get("authorization") if isinstance(params, dict) else None
-            authorization = authorization or info.context["request"].headers.get("authorization")
-            if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
-                raise ValueError("Authentication required")
-            token = authorization.removeprefix("Bearer ").strip()
+            token = _subscription_token(info)
 
             async def is_allowed() -> bool:
                 async with async_session() as db:
