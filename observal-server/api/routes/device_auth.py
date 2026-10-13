@@ -200,7 +200,7 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
 
     frontend_url = _resolve_frontend_url(request)
 
-    optic.info("device_authorize: code issued, user_code={}", user_code)
+    optic.info("device_authorize: code issued")
     if req and req.sso:
         next_path = f"/device?code={quote(user_code)}&sso=1"
         next_param = quote(next_path, safe="")
@@ -312,7 +312,7 @@ async def device_token(request: Request, req: DeviceTokenRequest, db: AsyncSessi
             user, client_id=client_id, device_id=consumed_data.get("device_id")
         )
 
-        optic.info("device_token: tokens issued for user={}", user.email)
+        optic.info("device_token: tokens issued for user_id={}", user.id)
         return JSONResponse(
             status_code=200,
             content={
@@ -338,7 +338,7 @@ async def device_confirm(
     current_user: User = Depends(get_current_user),
 ):
     """Browser calls this after the user logs in and enters the code."""
-    optic.trace("user={} confirming code", current_user.email)
+    optic.trace("user_id={} confirming code", current_user.id)
     normalized_code = _normalize_user_code(req.user_code)
 
     try:
@@ -378,5 +378,5 @@ async def device_confirm(
     if not approved:
         raise HTTPException(status_code=400, detail="Device code already used or expired")
 
-    optic.info("device_confirm: device authorized for user={}", current_user.email)
+    optic.info("device_confirm: device authorized for user_id={}", current_user.id)
     return {"message": "Device authorized"}
