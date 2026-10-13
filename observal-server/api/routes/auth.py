@@ -30,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import services.dynamic_settings as ds
-from api.deps import get_current_user, get_db, require_password_auth
+from api.deps import get_current_user, get_db, get_mobile_user, require_password_auth
 from api.ratelimit import limiter
 from models.user import User, UserRole
 from models.user_group import UserGroup
@@ -51,7 +51,13 @@ from schemas.auth import (
 )
 from schemas.sso_health import make_check
 from services import sso_diagnostics
-from services.jwt_service import create_access_token, create_refresh_token, decode_access_token, decode_refresh_token
+from services.jwt_service import (
+    MOBILE_CLIENT_ID,
+    create_access_token,
+    create_refresh_token,
+    decode_access_token,
+    decode_refresh_token,
+)
 from services.redis import get_redis
 from services.registry_namespace import is_valid_namespace, rename_namespace, user_has_listings
 from services.security_events import (
@@ -242,7 +248,9 @@ async def _start_oauth_flow(
     return await client.authorize_redirect(request, redirect_uri)
 
 
-async def _issue_tokens(user: User, groups: list[str] | None = None) -> tuple[str, str, int]:
+async def _issue_tokens(
+    user: User, groups: list[str] | None = None, *, client_id: str | None = None, device_id: str | None = None
+) -> tuple[str, str, int]:
     """Issue JWT access + refresh tokens for a user, storing refresh JTI in Redis.
 
     Returns (access_token, refresh_token, expires_in).
@@ -253,8 +261,12 @@ async def _issue_tokens(user: User, groups: list[str] | None = None) -> tuple[st
         redis = get_redis()
         # Before minting: an upgraded legacy marker means "now", and the new pair must postdate it.
         await upgrade_legacy_revocation(redis, user.id)
-        access_token, expires_in = create_access_token(user.id, user.role, groups=groups)
-        refresh_token, jti = create_refresh_token(user.id, user.role, groups=groups)
+        access_token, expires_in = create_access_token(
+            user.id, user.role, groups=groups, client_id=client_id, device_id=device_id
+        )
+        refresh_token, jti = create_refresh_token(
+            user.id, user.role, groups=groups, client_id=client_id, device_id=device_id
+        )
         refresh_ttl = ds.get_sync_int("jwt.refresh_token_expire_days", 30) * 86400
         await redis.setex(f"refresh_jti:{jti}", refresh_ttl, str(user.id))
     except RedisError as e:
@@ -1727,8 +1739,20 @@ async def refresh_token(request: Request, req: RefreshRequest, db: AsyncSession 
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
     stored_user_id = stored.decode() if isinstance(stored, bytes) else stored
+    client_id = payload.get("client_id")
+    device_id = payload.get("device_id") if client_id == MOBILE_CLIENT_ID else None
+    if client_id == MOBILE_CLIENT_ID and not await ds.get_bool("mobile.auth_enabled"):
+        raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
     if stored_user_id != user_id or is_revoked(marker, token_issued_us(payload)):
         raise HTTPException(status_code=401, detail="Refresh token has been revoked or expired")
+
+    try:
+        device_revoked = bool(device_id and await redis.get(f"revoked_mobile_device:{device_id}"))
+    except RedisError as e:
+        optic.warning("Redis unavailable during mobile refresh: {}", e)
+        raise HTTPException(status_code=503, detail="Auth service temporarily unavailable") from e
+    if device_revoked:
+        raise HTTPException(status_code=401, detail="Mobile session revoked")
 
     # Look up the user to ensure they still exist
     result = await db.execute(select(User).where(User.id == user_id))
@@ -1738,8 +1762,12 @@ async def refresh_token(request: Request, req: RefreshRequest, db: AsyncSession 
 
     # Issue new token pair
     groups = payload.get("groups", [])
-    access_token, expires_in = create_access_token(user.id, user.role, groups=groups)
-    new_refresh_token, new_jti = create_refresh_token(user.id, user.role, groups=groups)
+    access_token, expires_in = create_access_token(
+        user.id, user.role, groups=groups, client_id=client_id, device_id=device_id
+    )
+    new_refresh_token, new_jti = create_refresh_token(
+        user.id, user.role, groups=groups, client_id=client_id, device_id=device_id
+    )
 
     try:
         refresh_ttl = ds.get_sync_int("jwt.refresh_token_expire_days", 30) * 86400
@@ -1747,6 +1775,8 @@ async def refresh_token(request: Request, req: RefreshRequest, db: AsyncSession 
         # A logout can land while this request is in flight. Re-check after issuing: a later
         # revocation is newer than the new pair, so it is caught either here or by the marker itself.
         revoked_meanwhile = is_revoked(await get_revocation_marker(redis, user_id), token_issued_us(payload))
+        if device_id:
+            revoked_meanwhile = revoked_meanwhile or bool(await redis.get(f"revoked_mobile_device:{device_id}"))
         if revoked_meanwhile:
             await redis.delete(f"refresh_jti:{new_jti}")
     except RedisError as e:
@@ -1783,6 +1813,39 @@ async def revoke_token(request: Request, req: RevokeRequest):
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
     return {"detail": "Token revoked"}
+
+
+@router.post("/mobile/logout")
+@limiter.limit(ds.get_sync("security.rate_limit_auth", "10/minute"))
+async def mobile_logout(request: Request, req: RevokeRequest, current_user: User = Depends(get_mobile_user)):
+    """Revoke only this mobile device's access/refresh family, not CLI tokens."""
+    bearer = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    try:
+        access = decode_access_token(bearer, allow_mobile=True)
+        refresh = decode_refresh_token(req.refresh_token)
+    except pyjwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid mobile credentials") from None
+    if (
+        access.get("client_id") != MOBILE_CLIENT_ID
+        or refresh.get("client_id") != MOBILE_CLIENT_ID
+        or access.get("sub") != str(current_user.id)
+        or refresh.get("sub") != str(current_user.id)
+        or access.get("device_id") != refresh.get("device_id")
+    ):
+        raise HTTPException(status_code=403, detail="Mobile credential mismatch")
+    try:
+        redis = get_redis()
+        # The marker also invalidates any concurrently rotated successor.
+        ttl = ds.get_sync_int("jwt.refresh_token_expire_days", 30) * 86400
+        await redis.setex(f"revoked_mobile_device:{access['device_id']}", ttl, "1")
+        await redis.delete(f"refresh_jti:{refresh['jti']}")
+        await redis.setex(
+            f"revoked_jti:{access['jti']}", max(int(access["exp"]) - int(datetime.now(UTC).timestamp()), 1), "1"
+        )
+    except RedisError as e:
+        optic.warning("Redis unavailable during mobile logout: {}", e)
+        raise HTTPException(status_code=503, detail="Auth service temporarily unavailable") from e
+    return {"detail": "Mobile device signed out"}
 
 
 @router.put("/profile/password", dependencies=[Depends(require_password_auth)])

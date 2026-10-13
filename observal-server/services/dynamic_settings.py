@@ -346,6 +346,9 @@ DEFAULTS: dict[str, str] = {
     "security.rate_limit_auth": "10/minute",
     "security.rate_limit_auth_strict": "5/minute",
     "security.trace_privacy": "false",
+    # Off until subscription isolation and the aggregate-only API are deployed
+    # and verified together. Phone credentials must not expose legacy feeds.
+    "mobile.auth_enabled": "false",
     # Registry policy
     "registry.registered_agents_only": "false",
     # Must be enabled only after all old API/worker processes are drained and
