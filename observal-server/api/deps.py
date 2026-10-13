@@ -41,14 +41,14 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-async def _authenticate_via_jwt(token: str, db: AsyncSession) -> User | None:
+async def _authenticate_via_jwt(token: str, db: AsyncSession, *, allow_mobile: bool = False) -> User | None:
     """Try to authenticate using a JWT access token. Returns User or None.
 
     Resolves the deployment trace privacy policy from the settings cache so
     downstream code never needs a separate DB call for it.
     """
     try:
-        payload = decode_access_token(token)
+        payload = decode_access_token(token, allow_mobile=allow_mobile)
     except jwt.InvalidTokenError as e:
         optic.trace("JWT decode failed: {}", e)
         return None
@@ -74,6 +74,10 @@ async def _authenticate_via_jwt(token: str, db: AsyncSession) -> User | None:
             idx += 1
         if user_id_str and is_revoked(results[idx], token_issued_us(payload)):
             return None  # SEC-001: account-wide revocation (e.g. logout all)
+        if payload.get("client_id") == "observal-mobile" and await redis.get(
+            f"revoked_mobile_device:{payload['device_id']}"
+        ):
+            return None
     except RedisError as e:
         # Redis is down: block all token-based auth to prevent revoked tokens
         # from regaining access. Requests will receive HTTP 503.
@@ -106,6 +110,7 @@ _PASSWORD_CHANGE_EXEMPT_PATHS = frozenset(
         "/api/v1/auth/whoami",
         "/api/v1/auth/token/refresh",
         "/api/v1/auth/token/revoke",
+        "/api/v1/auth/mobile/logout",
     }
 )
 
@@ -147,6 +152,42 @@ async def get_current_user(
     # Fail closed when a required password change cannot be verified.
     await _enforce_password_change(request, user)
 
+    request.state.current_user = user
+    return user
+
+
+async def get_mobile_user(
+    request: Request,
+    authorization: str | None = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Only for explicitly allowlisted aggregate mobile-activity routes.
+
+    All legacy dependency paths deny phone access tokens by default. Callers
+    must still authorize subject, scope, listing and trace privacy separately.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing credentials")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = decode_access_token(token, allow_mobile=True)
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from None
+    from services.jwt_service import MOBILE_AUDIENCE, MOBILE_CLIENT_ID, MOBILE_SCOPE
+
+    if (
+        payload.get("client_id") != MOBILE_CLIENT_ID
+        or payload.get("aud") != MOBILE_AUDIENCE
+        or payload.get("scope") != MOBILE_SCOPE
+    ):
+        raise HTTPException(status_code=403, detail="Mobile credential required")
+    user = await _authenticate_via_jwt(token, db, allow_mobile=True)
+    if not user or user.auth_provider == "deactivated":
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if request.url.path != "/api/v1/auth/mobile/logout" and not await ds.get_bool("mobile.auth_enabled"):
+        raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
+    request.state.audit_user = user
+    await _enforce_password_change(request, user)
     request.state.current_user = user
     return user
 
