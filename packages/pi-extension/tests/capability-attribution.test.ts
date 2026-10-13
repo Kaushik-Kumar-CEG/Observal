@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
 // The Pi extension must attach capability-lock uses to the session payload the
@@ -15,6 +16,13 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), "observal-pi-capabilities-"))
 process.env.HOME = home;
 const observalDir = path.join(home, ".observal");
 fs.mkdirSync(observalDir, { recursive: true });
+const secretSentinel = "outbound-snapshot-credential-sentinel";
+const piHome = path.join(home, ".pi", "agent");
+fs.mkdirSync(piHome, { recursive: true });
+fs.writeFileSync(path.join(piHome, "settings.json"), JSON.stringify({ token: secretSentinel }));
+fs.writeFileSync(path.join(observalDir, "lockfile.json"), JSON.stringify({
+  harnesses: { pi: { agents: [{ id: "agent", version: "1.0", extra_secret: secretSentinel, components: [] }], standalone: [] } },
+}));
 
 const projectDir = path.join(home, "project");
 fs.mkdirSync(path.join(projectDir, "sub"), { recursive: true });
@@ -45,6 +53,7 @@ fs.writeFileSync(
 );
 
 const ingestPayloads: Array<Record<string, any>> = [];
+const snapshotRequests: string[] = [];
 let acknowledgedLine = -1;
 let acknowledgedOffset = 0;
 const server = http.createServer((request, response) => {
@@ -56,8 +65,10 @@ const server = http.createServer((request, response) => {
   const chunks: Buffer[] = [];
   request.on("data", (chunk) => chunks.push(chunk));
   request.on("end", () => {
-    const payload = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+    const body = Buffer.concat(chunks).toString("utf-8");
+    const payload = JSON.parse(body);
     if (request.url === "/api/v1/layer-snapshots") {
+      snapshotRequests.push(body);
       response.end(JSON.stringify({ hash: payload.hash }));
       return;
     }
@@ -94,6 +105,9 @@ assert.equal(process.env.OBSERVAL_HARNESS, "pi");
 
 await handlers.get("agent_end")!({}, context);
 assert.equal(ingestPayloads.length, 1);
+assert(snapshotRequests.length > 0, "Pi actually uploaded a snapshot");
+assert(snapshotRequests.every((body) => !body.includes(secretSentinel)), "snapshot request cannot contain private config");
+assert(snapshotRequests.every((body) => !body.includes("extra_secret")), "unreviewed lockfile fields must be omitted");
 const used = ingestPayloads[0].capabilities_used;
 assert(Array.isArray(used), "payload carries capabilities_used");
 const byId = Object.fromEntries(used.map((u: any) => [u.identifier, u]));
