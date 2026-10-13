@@ -33,12 +33,17 @@
     },
     {
       "id": "platform_small_cohort",
-      "expected": {"active_accounts": null, "prompted_root_sessions": null, "status": "not_recorded"},
+      "expected": {"active_accounts": null, "prompted_root_sessions": null, "status": "not_recorded", "reasons": ["unavailable"], "eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"},
       "description": "Under 10 qualifying accounts, suppress both values, even if many roots. No per-person subtraction or precise filtered platform endpoint."
     },
     {
+      "id": "author_scope_general_sessions_unavailable",
+      "expected": {"general_sessions": null, "status": "not_recorded", "reasons": ["unavailable"], "eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"},
+      "description": "Author usage never carries another person's general-session denominator or retention status."
+    },
+    {
       "id": "platform_purged_unknown",
-      "expected": {"active_accounts": null, "prompted_root_sessions": null, "status": "not_recorded"},
+      "expected": {"active_accounts": null, "prompted_root_sessions": null, "status": "not_recorded", "reasons": ["unavailable"], "eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"},
       "description": "A fully purged window cannot be interpreted as zero active people or zero roots."
     }
   ]

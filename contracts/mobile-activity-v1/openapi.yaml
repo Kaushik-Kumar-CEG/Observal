@@ -126,6 +126,33 @@ components:
         declared eligible cohort only; partial zero must be labelled 0 observed.
         Missing source, unsupported client, invalid event time, purges and incomplete
         retention cannot be advertised as full-window measured zero.
+    PrivacySafeUnavailableReading:
+      type: object
+      additionalProperties: false
+      required: [value, status, reasons, coverage]
+      properties:
+        value: { type: 'null' }
+        status: { type: string, const: not_recorded }
+        reasons:
+          type: array
+          prefixItems: [{ type: string, const: unavailable }]
+          minItems: 1
+          maxItems: 1
+        coverage:
+          type: object
+          additionalProperties: false
+          required: [eligible_sessions, source_start, source_end, supported_harnesses, projection]
+          properties:
+            eligible_sessions: { type: 'null' }
+            source_start: { type: 'null' }
+            source_end: { type: 'null' }
+            supported_harnesses: { type: array, maxItems: 0 }
+            projection: { type: string, const: unavailable }
+      description: >-
+        Shared redacted null reading for a suppressed platform cohort and
+        author-scope general sessions. No denominator, supported-harness set,
+        retention horizon, reason distinguishing a small cohort from purged
+        history, or hidden-listing-specific metadata may be returned.
     Window:
       type: object
       additionalProperties: false
@@ -168,13 +195,21 @@ components:
         activity_traces: { $ref: '#/components/schemas/Reading' }
         active_days_utc: { $ref: '#/components/schemas/Reading' }
         general_sessions: { $ref: '#/components/schemas/Reading' }
+      allOf:
+        - if:
+            properties:
+              scope: { const: author }
+          then:
+            properties:
+              general_sessions: { $ref: '#/components/schemas/PrivacySafeUnavailableReading' }
       description: >-
         General sessions are prompted, logical-root sessions with in-window root
         or verified same-project/user/harness linked-child activity. Component
         traces are a separate union of roots with attributable typed events.
         Child events each count; unresolved parent chains are partial, not
         silently merged by bare session ID. No general sessions in author scope;
-        that field is not_recorded there.
+        that field MUST equal PrivacySafeUnavailableReading in author scope;
+        no denominator or source horizon may be returned in that field.
     PlatformOverview:
       type: object
       additionalProperties: false
@@ -184,6 +219,25 @@ components:
         revision: { type: string }
         active_accounts: { $ref: '#/components/schemas/Reading' }
         prompted_root_sessions: { $ref: '#/components/schemas/Reading' }
+      allOf:
+        - if:
+            properties:
+              active_accounts:
+                properties:
+                  value: { type: 'null' }
+          then:
+            properties:
+              active_accounts: { $ref: '#/components/schemas/PrivacySafeUnavailableReading' }
+              prompted_root_sessions: { $ref: '#/components/schemas/PrivacySafeUnavailableReading' }
+        - if:
+            properties:
+              prompted_root_sessions:
+                properties:
+                  value: { type: 'null' }
+          then:
+            properties:
+              active_accounts: { $ref: '#/components/schemas/PrivacySafeUnavailableReading' }
+              prompted_root_sessions: { $ref: '#/components/schemas/PrivacySafeUnavailableReading' }
       description: >-
         Active accounts are DISTINCT current, non-deleted, non-deactivated account
         IDs with at least one qualifying prompted root in the window. Roots use
@@ -196,4 +250,8 @@ components:
         cannot restore it. Retention/purge and unsupported/unlinked sessions
         make coverage partial or unknown, not measured zero. This coarse gate
         does not authorize public release or eliminate all differencing risk;
-        only trace-privileged viewers can see it.
+        only trace-privileged viewers can see it. If either reading is suppressed
+        or source coverage cannot establish a truthful count, both MUST equal
+        PrivacySafeUnavailableReading with the same neutral `unavailable`
+        reason and fully redacted coverage; do not distinguish subthreshold,
+        erased, unsupported or unobserved platform cohorts on this route.
