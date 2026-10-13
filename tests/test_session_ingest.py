@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Shreem Seth <shreemseth26@gmail.com>
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Behavioral coverage for canonical session ingestion."""
@@ -343,6 +344,20 @@ async def test_registered_harness_selects_its_parser_and_normalizes_the_write(
     assert row["is_source_record"] == 1
     assert row["rendered"] == 1
     external_calls.refresh.assert_awaited_once_with(SESSION_ID, PROJECT_ID, USER_ID, harness)
+
+
+async def test_malformed_transcript_does_not_leak_to_log_sinks(external_calls):
+    from loguru import logger
+
+    messages: list[str] = []
+    sink_id = logger.add(lambda message: messages.append(str(message)), format="{message}")
+    try:
+        result = await _ingest(["{not-json: sentinel-private-credential}"])
+    finally:
+        logger.remove(sink_id)
+    assert result.errors == 1
+    assert any("session_ingest_parse_error" in message for message in messages)
+    assert all("sentinel-private-credential" not in message and "not-json" not in message for message in messages)
 
 
 async def test_batch_normalizes_relationships_timestamps_usage_tools_and_result_counts(external_calls):
