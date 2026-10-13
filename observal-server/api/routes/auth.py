@@ -5,6 +5,7 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -1715,23 +1716,19 @@ async def refresh_token(request: Request, req: RefreshRequest, db: AsyncSession 
     if not jti or not user_id:
         raise HTTPException(status_code=401, detail="Invalid refresh token claims")
 
-    # Check that the JTI has not been revoked
+    # Consume the refresh grant atomically: GET followed by DELETE allows two
+    # concurrent rotations to both mint valid successor tokens.
     try:
         redis = get_redis()
-        stored = await redis.get(f"refresh_jti:{jti}")
+        stored = await redis.getdel(f"refresh_jti:{jti}")
         marker = await get_revocation_marker(redis, user_id)
     except RedisError as e:
         optic.warning("Redis unavailable during token refresh: {}", e)
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
-    if stored is None or is_revoked(marker, token_issued_us(payload)):
+    stored_user_id = stored.decode() if isinstance(stored, bytes) else stored
+    if stored_user_id != user_id or is_revoked(marker, token_issued_us(payload)):
         raise HTTPException(status_code=401, detail="Refresh token has been revoked or expired")
-
-    # Revoke the old refresh token (one-time use / rotation)
-    try:
-        await redis.delete(f"refresh_jti:{jti}")
-    except RedisError:
-        pass
 
     # Look up the user to ensure they still exist
     result = await db.execute(select(User).where(User.id == user_id))
