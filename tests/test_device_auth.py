@@ -168,11 +168,18 @@ class TestDeviceAuthorize:
 
     @pytest.mark.asyncio
     async def test_returns_device_and_user_codes(self):
+        from loguru import logger
+
         fake_redis = FakeRedis()
+        messages: list[str] = []
+        client = _make_async_client()  # App initialization may reset log sinks.
+        sink_id = logger.add(lambda message: messages.append(str(message)), format="{message}")
         try:
             with patch("api.routes.device_auth.get_redis", return_value=fake_redis):
-                async with _make_async_client() as client:
+                async with client:
                     resp = await client.post("/api/v1/auth/device/authorize", json={})
+            logger.remove(sink_id)
+            sink_id = None
 
             assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
             body = resp.json()
@@ -186,6 +193,7 @@ class TestDeviceAuthorize:
             assert body["interval"] == 5
             assert "/device" in body["verification_uri"]
             assert body["user_code"] in body["verification_uri_complete"]
+            assert all(body["user_code"] not in message for message in messages)
 
             # Verify data was stored in Redis
             stored_keys = list(fake_redis._store.keys())
@@ -199,6 +207,8 @@ class TestDeviceAuthorize:
             assert stored_data["status"] == "pending"
             assert stored_data["user_code"] == body["user_code"]
         finally:
+            if sink_id is not None:
+                logger.remove(sink_id)
             _cleanup()
 
     @pytest.mark.asyncio
