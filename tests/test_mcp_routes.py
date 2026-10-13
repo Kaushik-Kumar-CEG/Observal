@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -936,7 +937,19 @@ class TestListAndDetail:
         visibility = Mock(side_effect=lambda stmt, model, user: stmt.where(model.is_private.is_(False)))
         monkeypatch.setattr(mcp, "apply_visibility_filter", visibility)
 
-        rows = await mcp.my_mcps(db, _user())
+        response = Response()
+        rows = await mcp.my_mcps(
+            response,
+            search=None,
+            category=None,
+            status=None,
+            namespace=None,
+            team_id=None,
+            limit=None,
+            offset=0,
+            db=db,
+            current_user=_user(),
+        )
 
         assert [row.qualified_name for row in rows] == ["alice/review-mcp"]
         visibility.assert_called_once()

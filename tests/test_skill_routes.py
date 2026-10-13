@@ -633,7 +633,18 @@ class TestListAndDetail:
         monkeypatch.setattr(skill, "apply_visibility_filter", visibility)
         user = _user()
 
-        rows = await skill.my_skills(db, user)
+        rows = await skill.my_skills(
+            Response(),
+            search=None,
+            task_type=None,
+            status=None,
+            namespace=None,
+            team_id=None,
+            limit=None,
+            offset=0,
+            db=db,
+            current_user=user,
+        )
 
         assert [row.qualified_name for row in rows] == ["alice/review-skill"]
         visibility.assert_called_once()
