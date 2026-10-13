@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Session JSONL ingest service.
@@ -496,14 +497,10 @@ async def ingest_session_lines(
                 event_type = "_ignored"
                 rendered = 0
                 skipped += 1
-        except (orjson.JSONDecodeError, ValueError) as exc:
-            optic.warning(
-                "session_ingest_parse_error: session={}, offset={}, error={}, line_preview={}",
-                session_id,
-                line_offset,
-                str(exc),
-                repr(raw_line[:200]),
-            )
+        except (orjson.JSONDecodeError, ValueError):
+            # Invalid transcript bytes and parser exception text may contain
+            # credentials. Logs (including admin SSE) get metadata only.
+            optic.warning("session_ingest_parse_error: session={}, offset={}", session_id, line_offset)
             event_type = "_parse_error"
             rendered = 0
             errors += 1

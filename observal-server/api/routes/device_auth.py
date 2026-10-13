@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """OAuth 2.0 Device Authorization Grant (RFC 8628) endpoints.
@@ -169,7 +170,7 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
 
     frontend_url = _resolve_frontend_url(request)
 
-    optic.info("device_authorize: code issued, user_code={}", user_code)
+    optic.info("device_authorize: code issued")
     if req and req.sso:
         next_path = f"/device?code={quote(user_code)}&sso=1"
         next_param = quote(next_path, safe="")
@@ -268,7 +269,7 @@ async def device_token(request: Request, req: DeviceTokenRequest, db: AsyncSessi
 
         access_token, refresh_token, expires_in = await _issue_tokens(user)
 
-        optic.info("device_token: tokens issued for user={}", user.email)
+        optic.info("device_token: tokens issued for user_id={}", user.id)
         return JSONResponse(
             status_code=200,
             content={
@@ -294,7 +295,7 @@ async def device_confirm(
     current_user: User = Depends(get_current_user),
 ):
     """Browser calls this after the user logs in and enters the code."""
-    optic.trace("user={} confirming code", current_user.email)
+    optic.trace("user_id={} confirming code", current_user.id)
     normalized_code = _normalize_user_code(req.user_code)
 
     try:
@@ -339,5 +340,5 @@ async def device_confirm(
         optic.error("Redis unavailable during device confirm update: {}", e)
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
-    optic.info("device_confirm: device authorized for user={}", current_user.email)
+    optic.info("device_confirm: device authorized for user_id={}", current_user.id)
     return {"message": "Device authorized"}
