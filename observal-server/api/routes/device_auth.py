@@ -36,6 +36,7 @@ from schemas.auth import (
     DeviceConfirmRequest,
     DeviceTokenRequest,
 )
+from services.jwt_service import MOBILE_CLIENT_ID
 from services.redis import get_redis
 
 router = APIRouter(prefix="/api/v1/auth/device", tags=["device-auth"])
@@ -157,6 +158,11 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
     """Create a device authorization request. Returns device_code + user_code."""
     optic.debug("initiating device auth flow")
     requested_provider = (req.provider or "").lower() if req and req.sso else ""
+    client_id = req.client_id if req else None
+    if client_id not in (None, MOBILE_CLIENT_ID):
+        raise HTTPException(status_code=400, detail="Unknown device client")
+    if client_id == MOBILE_CLIENT_ID and not await ds.get_bool("mobile.auth_enabled"):
+        raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
     if requested_provider in ("google", "github"):
         from api.routes.auth import is_github_oauth_configured, is_google_oauth_configured
 
@@ -176,6 +182,8 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
         {
             "user_code": user_code,
             "status": "pending",
+            "client_id": client_id,
+            "device_id": secrets.token_urlsafe(32) if client_id == MOBILE_CLIENT_ID else None,
             "created_at": time.time(),
         }
     )
@@ -293,7 +301,16 @@ async def device_token(request: Request, req: DeviceTokenRequest, db: AsyncSessi
             optic.error("Redis unavailable during device redemption: {}", e)
             raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
-        access_token, refresh_token, expires_in = await _issue_tokens(user)
+        client_id = consumed_data.get("client_id")
+        if client_id not in (None, MOBILE_CLIENT_ID):
+            return JSONResponse(status_code=400, content={"error": "expired_token"})
+        # The feature may have been disabled after an approved device code was
+        # created. The consumed grant stays burned; it must not mint credentials.
+        if client_id == MOBILE_CLIENT_ID and not await ds.get_bool("mobile.auth_enabled"):
+            raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
+        access_token, refresh_token, expires_in = await _issue_tokens(
+            user, client_id=client_id, device_id=consumed_data.get("device_id")
+        )
 
         optic.info("device_token: tokens issued for user={}", user.email)
         return JSONResponse(
