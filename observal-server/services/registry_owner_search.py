@@ -79,7 +79,8 @@ async def owner_page(
         conditions=conditions,
     )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
-    stmt = stmt.order_by(listing_model.created_at.desc())
+    # Created timestamps can tie during bulk imports; the ID stabilizes page boundaries.
+    stmt = stmt.order_by(listing_model.created_at.desc(), listing_model.id.desc())
     if offset:
         stmt = stmt.offset(offset)
     if limit is not None:

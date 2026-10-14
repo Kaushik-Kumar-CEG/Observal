@@ -94,6 +94,7 @@ async def test_owner_page_counts_filtered_query_before_limit():
     page_sql = _sql(db.execute.await_args.args[0])
     assert "needle" in count_sql and " LIMIT " not in count_sql
     assert "needle" in page_sql and "LIMIT 20 OFFSET 40" in page_sql
+    assert "created_at DESC" in page_sql and "id DESC" in page_sql
 
     await owner_page(db, McpListing, McpVersion, user, lambda stmt, _model, _user: stmt, search="needle", offset=40)
     assert "OFFSET 40" in _sql(db.execute.await_args.args[0])
