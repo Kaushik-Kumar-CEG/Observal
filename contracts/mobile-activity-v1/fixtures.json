@@ -1,0 +1,28 @@
+{
+  "draft_only": true,
+  "source": "synthetic invented examples, not recent activity or evidence of implementation",
+  "contract_version": "1.1.0-draft",
+  "cases": [
+    {"id": "40-calls-one-root-two-components", "verified_actor_runs": 1, "mcp_calls": 40, "component_rows": [{"component": "A", "traces": 1}, {"component": "B", "traces": 1}], "expected_person_trace_union": 1, "rows_must_not_be_summed": true},
+    {"id": "same-id-two-run-incarnations", "actor_runs": ["actor-1/run-1", "actor-1/run-2"], "legacy_session_id": "same", "expected_person_trace_union": 2, "requires_verified_distinct_incarnations": true},
+    {"id": "same-id-two-uploaders", "actor_runs": ["actor-1/run-1", "actor-2/run-2"], "legacy_session_id": "same", "scope": "author", "subject_original_author_of_both_visible_approved_components": true, "expected_author_trace_union": 2, "expected_actor_1_user_trace_union": 1},
+    {"id": "missing-child-origin", "legacy_child_has_prompt": true, "verified_parent_incarnation": false, "expected_status": "not_recorded", "expected_value": null, "must_not_count_child_as_root": true},
+    {"id": "unprompted-component-root", "verified_component_attribution": true, "has_user_prompt": false, "expected_component_traces": 1, "expected_general_sessions": 0},
+    {"id": "supported-zero", "qualified_eligible_sessions": 10, "all_relevant_kinds_instrumented": true, "complete_retained_window": true, "observed_component_roots": 0, "expected_status": "supported", "expected_value": 0},
+    {"id": "partial-zero", "qualified_eligible_sessions": 3, "unknown_sessions": 7, "observed_component_roots": 0, "expected_status": "partial", "expected_value": 0, "spoken": "0 observed traces · Partial coverage"},
+    {"id": "missing-source", "qualified_eligible_sessions": null, "expected_status": "not_recorded", "expected_value": null},
+    {"id": "private-self-use", "subject_is_viewer": true, "public_approval": false, "self_activity_authorized": true, "expected_scope": "user", "expected_component_traces": 1, "author_requires_public_approval": true},
+    {"id": "own-author-cross-user", "subject_is_viewer": true, "author_component_used_by_other": true, "privacy_exception_approved": false, "expected_http": 403, "expected_count": null},
+    {"id": "erasure-between-pages", "old_cursor": "opaque-redacted", "scope_erasure_committed": true, "expected_http": 409, "old_count_must_not_reappear": true},
+    {"id": "erasure-during-read", "read_holds_shared_scope_lock": true, "erasure_waits_for_exclusive_lock": true, "old_response_may_arrive_after_commit": true, "new_read_after_commit_denied": true},
+    {"id": "replay-after-physical-delete", "old_run_outbox_replayed": true, "barrier_completed": true, "durable_replay_epoch_active": true, "expected_new_qualified_fact": false},
+    {"id": "parentless-upgraded-child", "new_incarnation": true, "launcher_origin_verified": false, "expected_status": "not_recorded", "expected_value": null},
+    {"id": "cold-bookmark-resolution", "ids": ["visible-person", "deleted-person"], "expected_returned": ["visible-person"], "must_not_return_previous_deleted_name": true},
+    {"id": "scope-repair-during-other-pagination", "affected_subject_scope": "A/user", "unrelated_subject_scope": "B/user", "expected_A_cursor": "stale_cursor", "expected_B_cursor": "continues"},
+    {"id": "listing-hidden-before-detail", "listing_was_visible_at_summary": true, "listing_visible_now": false, "expected_http": 404, "must_not_expose_previous_count": true},
+    {"id": "source-timestamp-invalid", "ingest_time_present": true, "valid_jsonl_call_time": false, "expected_dated_mcp_fact": false},
+    {"id": "platform-below-k", "eligible_active_accounts": 9, "expected_active_accounts": null, "expected_prompted_sessions": null, "both_reasons": ["unavailable"]},
+    {"id": "cursor-forward-progress", "listed_components": 301, "page_size": 20, "unrelated_writes": 200, "expected_each_once": true, "expected_terminal_complete": true},
+    {"id": "retention-poison-queue", "poison_first": true, "expired_second": true, "expected_second_deleted_by_deadline": true}
+  ]
+}

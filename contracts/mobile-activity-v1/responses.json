@@ -1,0 +1,30 @@
+{
+  "draft_only": true,
+  "synthetic": true,
+  "warning": "Not a deployed API, credential, verified run, or current reading",
+  "capabilities": {
+    "contract": "mobile-activity-v1",
+    "server_id": "10000000-0000-4000-8000-000000000001",
+    "project_id": "fixture-only",
+    "viewer_id": "10000000-0000-4000-8000-000000000002",
+    "trace_headlines": false,
+    "supported_kinds": [],
+    "platform_overview": false
+  },
+  "paired_viewport": {
+    "window": {"start": "2026-09-01T00:00:00Z", "end": "2026-09-08T00:00:00Z", "as_of": "2026-09-08T00:01:00Z", "timezone": "UTC", "period": "1w"},
+    "window_anchor": "synthetic-opaque-not-a-real-cursor",
+    "items": [{
+      "subject_id": "10000000-0000-4000-8000-000000000003",
+      "author_revision": "fixture-author", "user_revision": "fixture-user",
+      "author_usage": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}},
+      "user_usage": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}}
+    }]
+  },
+  "platform_suppressed": {
+    "window": {"start": "2026-09-01T00:00:00Z", "end": "2026-09-08T00:00:00Z", "as_of": "2026-09-08T00:01:00Z", "timezone": "UTC", "period": "1w"},
+    "revision": "fixture-only",
+    "active_accounts": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}},
+    "prompted_root_sessions": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}}
+  }
+}

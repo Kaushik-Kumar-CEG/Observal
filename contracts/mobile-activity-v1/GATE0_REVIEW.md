@@ -1,0 +1,37 @@
+<!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+# Gate 0 adversarial review and verification record
+
+**Disposition:** proposed design and corrected **undeployed negotiation** wire, NOT owner-ratified Gate 0, not running-instance evidence. Base `origin/main` `ca47a952fcebac806e4f20d1bae837754c4f23a2`. Previous backend negotiation draft was backend commit `9cb8f9f3051db93475dd5c2f335674b354059d66` (OpenAPI SHA-256 `bc0deae3689a4f5d472eab410ec044595bcf265328a0e2a500c170baa2881eed`, fixtures `751f0ffbf53e92a0d11557bf34fd8b5157c5a83a239ed2becda7ac5ac6f5730e`, responses `a9520f8062d97f94945fe4b252473c0b91cbff7643fb176619d9bcdaf42ae130`). Its old calls-first bytes remain in Git, but are **not** a qualified running API. New draft files on this branch are not a silent revision of those pinned bytes in mobile.
+
+## Evidence and alternatives reviewed
+
+- **Read-only code scouts:** sender Pi session ID and delegated child/parent gap; CH/PG migration 002/045–047; mobile evidence projection, general prompted roots, retention, query service. Scouts reported a current invalid JSONL call-time fallback to CH/ingest time and a separate insight-report cleanup skip when no CH source exists; no production mutation was made, and current upstream-main behavior still requires independent verification. Pi extension tests passed in a scout's environment; focused Python tests in the R1 scout lacked dependencies; the R2 scout reported 60 focused tests passed in its separate environment. These reports are not a main-branch CI or database qualification.
+- **R1:** stable run incarnation plus verified root origin and parent association preferred to guesswork from session ID/time or a bare untrusted parent string. Legacy/delegation unknown. Alternative of proving harness-native globally unique run identity explicitly remains open.
+- **R2:** PG read-control epoch, serialization at read/ingest/projection/erasure commit, durable replay fence and TTL coverage floor preferred to five-minute sweep or per-request 40,000-line rescans. Pending privacy-owner decision on minimum replay-marker lifetime, erasure completion, backup/SCIM policy. Allow in-flight reads linearized before revocation to finish; never claim bytes can be recalled.
+- **B-scale:** indexed PG qualified event facts + separately indexed zero-positive eligibility ledger proposed; CH fact alternative possible only with equivalent authorization/revocation and source-proof tests. SQLite query plan is **not** PG/CH `EXPLAIN`, production-like contention or revocation proof.
+- **Wire:** maintain one corrected v1 negotiation draft because old v1 is undeployed; if a real deployed consumer exists choose versioning with owner rather than repurpose an existing route. Both teams must explicitly approve routes, auth issuance, window anchor and subject/scope revision before pinning the wire in mobile.
+
+## Adversarial passes and disposition
+
+1. **Privacy/R1/R2 scout:** (a) tombstone removal allows delayed outbox replay, (b) read-only barrier check does not serialize with erasure, (c) fresh-incarnation parentless child still counted as root. Corrections: durable replay-rejection epoch, lock ordering with explicit in-flight limitation, independently verified root-origin attestation. Actual cross-store race tests **not yet run**.
+2. **Wire/scale scout:** cold bookmark names had no ID-resolution read; `restricted` required forbidden metadata; two uploaders fixture conflated author/user; component author identity absent; only null wire responses; batch revision globally ambiguous. Corrections: `/people/resolve`, bodyless 403, separately scoped uploader fixture, public author field, paired/page/detail examples and per-subject/scope revisions.
+3. **Targeted pass:** spotted in-flight ingest/projection writer can commit after erasure check; global generation language in shared time anchor; schema allowed impossible status/null combinations; first page/detail lacked card revision; ordinary visibility/role changes lacked read serialization. Corrections: hold lock through fact commit, time-only anchor, oneOf status-specific variants with negative tests, required `expected_revision`, viewer/listing epochs and shared/exclusive serialization.
+4. **Targeted re-review:** previous five contradictions addressed as designs, not proven behavior. Found supported union in MCP-only vector falsely implied complete skill/hook coverage. Corrected paired union to Partial; row-level MCP measurement remains separate, and spoken partial copy asserted by test. No assertion that this is a qualified multi-kind running source.
+
+## Exact local results and limitations
+
+- `python3 -m unittest discover -s tests -p test_mobile_trace_contract_draft.py -v`: **5 tests passed** after latest status/revision fixes (re-run before committing). Tests validate local `$ref` existence and selected draft DTO/status cases; they do **not** implement full OpenAPI 3.1/JSON Schema validation, mobile rendering/TalkBack, backend enforcement, privacy races or production auth.
+- `python3 contracts/mobile-activity-v1/prototype_sqlite.py`: in-memory, synthetic **107,101** fact rows and **59,500** eligible roots across 100 actors (one actor 10K); 9K distinct union, two overlapping component rows of 9K, 10K eligible versus 9K positive, cross-uploader distinctness, current listing visibility invalidation. **8.9ms, 17.1ms and 20.3ms SQLite-only p95** for 12 actors/two scopes in three 30-repetition runs of the tracked script; an earlier similar disposable /tmp script measured 13.9ms. SQLite used actor/day and component/day indexes plus temporary distinct B-tree. Not PostgreSQL/ClickHouse, HTTP, queues, shared locks, cursor forward progress, 4K component paging, production p95 or 90-day ingestion cost.
+- `git diff --check`: no whitespace error at time of this record (re-run before commit). No live service, migrations, trace source export, sender changes, credentials, production signing, deployment or PR.
+
+## Required external approvals / next tests
+
+1. Backend owner and harness owner ratify R1 parent/root-origin/restart/import proof; run prospective sender and legacy unknown fixture tests. Current Pi delegated child link is missing.
+2. Privacy/DB owner choose lawful replay marker, deletion deadline and autonomous TTL safety margin; prove concurrent read/upload/projection vs CH mutation/TTL/count-retention and poison/backlog fairness on actual PG/CH. Model read linearization policy explicitly in privacy review.
+3. DB owner measure synthetic 10K roots per person, 100 follows, 4K distinct components and 90-day windows in actual PG/CH; measure ≥200 unrelated writes during full pagination, list visibility fanout locks, source revisions, cold/warm p95, index disk/cost, deletion backlog. Ratify or replace provisional budgets.
+4. Security owner confirm privileged policy for Author, ordinary own-author Restricted, private/pending own User, independent platform min-ten suppression (including timing), device-scoped read-only auth across REST/GraphQL/WebSocket and logout.
+5. Mobile owner review contract-vectors (especially **partial** MCP-only union), `expected_revision`, 403 and pinned window, then deliberately repin new approved backend bytes and update `IMPLEMENTATION_PLAN.md`/`BACKEND_CONTRACT_HANDOFF.md` only after approval. No mobile plan changed in this backend branch.
+
+**No design review is an implementation certificate. Gate 0 remains open.**
