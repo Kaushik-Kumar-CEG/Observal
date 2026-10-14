@@ -3,7 +3,7 @@
 
 import { Link, useBlocker, useNavigate, useSearch } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, FilePlus2 } from "lucide-react";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
@@ -171,12 +171,11 @@ export default function BuildPage() {
         <span aria-hidden="true">/</span><span className="text-foreground">Builder</span>
       </div>
       <div className="mb-7">
-        <p className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">Create a resource</p>
-        <h1 ref={headingRef} tabIndex={-1} className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl focus:outline-none">{selected ? `${draft ? "Edit" : "Build"} a ${selected.name}` : "What will you build?"}</h1>
+        <h1 ref={headingRef} tabIndex={-1} className="text-2xl font-semibold tracking-tight sm:text-3xl focus:outline-none">{selected ? `${draft ? "Edit" : "Build"} a ${selected.name}` : "What will you build?"}</h1>
         <p className="mt-2 max-w-2xl text-sm text-muted-foreground">Save a private working draft first, or submit a complete resource for review. Submission is not publication.</p>
       </div>
-      {selected && selected.type !== "agents" && <Link to="/build" className="mb-5 inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline sm:hidden"><ArrowLeft className="h-4 w-4" /> Change resource kind</Link>}
-      <nav aria-label="Choose resource kind" className={`mb-8 grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 ${selected && selected.type !== "agents" ? "hidden sm:grid" : "grid"}`}>
+      {selected && selected.type !== "agents" && <Link to="/build" className="mb-5 inline-flex items-center gap-1 rounded-sm text-sm font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><ArrowLeft className="h-4 w-4" /> Change resource kind</Link>}
+      {!selected && <nav aria-label="Choose resource kind" className="mb-8 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {KINDS.map(({ type, name, summary }) => (
           <Link key={type} to={type === "agents" ? "/agents/builder" : "/build"}
             search={type === "agents" ? undefined : { kind: type }}
@@ -187,15 +186,10 @@ export default function BuildPage() {
             <ArrowRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground group-hover:text-foreground" aria-hidden="true" />
           </Link>
         ))}
-      </nav>
+      </nav>}
       {selected && selected.type !== "agents" && (
-        <div className="grid gap-7 lg:grid-cols-[minmax(0,1fr)_220px]">
+        <div className="mx-auto max-w-4xl">
           <ComponentWorkspace key={selected.type} type={selected.type as ComponentKind} draft={draft} />
-          <aside className="self-start rounded-xl border border-border bg-muted/20 p-4 text-xs leading-relaxed text-muted-foreground lg:sticky lg:top-6">
-            <div className="mb-3 flex items-center gap-2 font-medium text-foreground"><FilePlus2 className="h-4 w-4" /> Before you submit</div>
-            <ol className="list-inside list-decimal space-y-2"><li>Choose the resource kind.</li><li>Enter a name and configuration; save a draft at any point.</li><li>Submit a complete version for review. Check your submissions to follow its status.</li></ol>
-            <p className="mt-4 border-t border-border pt-3">Only approved versions appear in the public catalogue. You can continue editing rejected drafts.</p>
-          </aside>
         </div>
       )}
     </div>

@@ -724,7 +724,7 @@ export function SubmitComponentDialog({
 			return "SKILL.md is required for a folder draft";
 		}
 
-		if (type === "mcps") {
+		if (type === "mcps" && !gitUrl.trim()) {
 			if (mcpMode === "json" && !jsonParsed && !isEditMode) {
 				return "Paste a valid server config JSON";
 			}
@@ -734,7 +734,7 @@ export function SubmitComponentDialog({
 					return "Paste a new server config JSON to update";
 				}
 			}
-			if (mcpMode === "manual" && !command && !mcpUrl) {
+			if (mcpMode === "manual" && !command.trim() && !mcpUrl.trim()) {
 				return "Command or Server URL is required";
 			}
 		}
@@ -868,6 +868,15 @@ export function SubmitComponentDialog({
 	}
 
 	const busy = isSubmitting || isSavingDraft;
+	const saveFocusRef = useRef<HTMLButtonElement | null>(null);
+	useEffect(() => {
+		if (busy || !saveFocusRef.current) return;
+		const button = saveFocusRef.current;
+		saveFocusRef.current = null;
+		requestAnimationFrame(() => {
+			if (button.isConnected && document.activeElement === document.body) button.focus();
+		});
+	}, [busy]);
 	const typeLabel =
 		type === "mcps"
 			? "MCP Client"
@@ -906,7 +915,7 @@ export function SubmitComponentDialog({
 					<DialogHeader><DialogTitle>{isEditMode ? `Edit ${typeLabel}` : `Submit ${typeLabel}`}</DialogTitle></DialogHeader>
 				)}
 
-				<div className="space-y-4 pt-2">
+				<div className="space-y-4 pt-2" inert={busy}>
 					{validationError && <div id="component-form-error" ref={validationSummaryRef} tabIndex={-1} role="alert"
 						className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">{validationError}</div>}
 					<div className="flex items-start gap-2 rounded-md border border-border/50 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
@@ -973,7 +982,7 @@ export function SubmitComponentDialog({
 									}
 								}}
 								options={[
-									{ value: "personal", label: `Personal (${whoami?.username || whoami?.email || "me"})` },
+									{ value: "personal", label: "Personal" },
 									...teams.map((team) => ({ value: team.id, label: `Team: ${team.name}` })),
 								]}
 							/>
@@ -1051,6 +1060,9 @@ export function SubmitComponentDialog({
 										</div>
 										<CodeEditor
 											id="mcp-json"
+											label="Server Config (JSON)"
+											invalid={validationError?.startsWith("Paste")}
+											errorId="component-form-error"
 											value={jsonInput}
 											onChange={handleJsonInput}
 											language="json"
@@ -1712,6 +1724,9 @@ export function SubmitComponentDialog({
 									<Label htmlFor="sandbox-limits">Resource Limits JSON</Label>
 									<CodeEditor
 										id="sandbox-limits"
+										label="Resource Limits JSON"
+										invalid={validationError?.startsWith("Resource limits")}
+										errorId="component-form-error"
 										value={sandboxResourceLimits}
 										onChange={setSandboxResourceLimits}
 										language="json"
@@ -1723,6 +1738,9 @@ export function SubmitComponentDialog({
 									<Label htmlFor="sandbox-runtime-config">Runtime Config JSON</Label>
 									<CodeEditor
 										id="sandbox-runtime-config"
+										label="Runtime Config JSON"
+										invalid={!!validationError && (validationError.includes("JSON") || validationError.startsWith("Runtime config") || validationError.startsWith("Firecracker") || validationError.startsWith("WASM"))}
+										errorId="component-form-error"
 										value={sandboxRuntimeConfig}
 										onChange={setSandboxRuntimeConfig}
 										language="json"
@@ -1760,11 +1778,12 @@ export function SubmitComponentDialog({
 						</div>
 					</div>
 
-					{/* ── Actions ───────────────────────────────────── */}
-					{type === "skills" && skillMode === "upload" && submitError && (
-						<p role="status" className="text-xs text-muted-foreground">{submitError}</p>
-					)}
-					<div className="flex justify-end gap-2 pt-2">
+				</div>
+				{/* Keep the save control focused while editable fields are locked in flight. */}
+				{type === "skills" && skillMode === "upload" && submitError && (
+					<p role="status" className="mt-4 text-xs text-muted-foreground">{submitError}</p>
+				)}
+				<div className="mt-4 flex justify-end gap-2 pt-2">
 						{isEditMode ? (
 							<>
 								{isFolderVersion ? (
@@ -1863,12 +1882,17 @@ export function SubmitComponentDialog({
 								</Button>
 							</>
 						)}
-					</div>
 				</div>
 		</>
 	);
 	if (surface === "page") {
-		return <section aria-label={`${typeLabel} editor`} aria-busy={busy} inert={busy} className="relative mx-auto w-full max-w-4xl rounded-xl border border-border bg-card p-5 sm:p-8">{formBody}</section>;
+		return <section aria-label={`${typeLabel} editor`} aria-busy={busy}
+			onClickCapture={(event) => {
+				const target = event.target;
+				const button = target instanceof HTMLElement ? target.closest("button") : null;
+				if (button?.textContent?.includes("Save Changes")) saveFocusRef.current = button;
+			}}
+			className="relative mx-auto w-full max-w-4xl rounded-xl border border-border bg-card p-5 sm:p-8">{formBody}</section>;
 	}
 	return (
 		<Dialog modal={false} open={open} onOpenChange={(value) => {

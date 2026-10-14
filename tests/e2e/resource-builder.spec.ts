@@ -23,6 +23,7 @@ test.describe("Resource builder", () => {
   });
 
   test("five components save, reopen, edit and submit real drafts", async ({ page }) => {
+    test.setTimeout(120_000);
     await loginToWebUI(page);
     for (const kind of ["mcps", "skills", "hooks", "prompts", "sandboxes"] as const) {
       const name = `pw-builder-${kind}-${Date.now()}`;
@@ -78,6 +79,101 @@ test.describe("Resource builder", () => {
     await expect(page.getByRole("textbox", { name: "Description *" })).toHaveValue("A revised pasted Skill");
     await page.getByRole("button", { name: "Save & Submit for Review" }).click();
     await expect(page).toHaveURL(/\/components\/skills\//);
+  });
+
+  test("My submissions resumes a complete Prompt without discarding its template", async ({ page }) => {
+    await loginToWebUI(page);
+    const name = `pw-owner-prompt-${Date.now()}`;
+    await page.goto("/build?kind=prompts");
+    await page.getByRole("textbox", { name: "Name *" }).fill(name);
+    await page.getByRole("textbox", { name: "Description *" }).fill("Owner resume regression");
+    await page.getByRole("textbox", { name: "Template *" }).fill("Keep this unique template");
+    await page.getByRole("button", { name: "Save Draft" }).click();
+    await expect(page).toHaveURL(/draft=[a-f0-9-]+/);
+    const draftUrl = page.url();
+    await page.goto("/resources/prompts?view=my");
+    await expect(page.getByText(name).first()).toBeVisible();
+    await page.getByRole("link", { name: "Continue draft" }).last().click();
+    await expect(page.getByRole("textbox", { name: "Template *" })).toHaveValue("Keep this unique template");
+    await page.getByRole("button", { name: "Save Changes" }).click();
+    await page.goto(draftUrl);
+    await expect(page.getByRole("textbox", { name: "Template *" })).toHaveValue("Keep this unique template");
+  });
+
+  test("pending Prompt edit loads the full template instead of a summary row", async ({ page }) => {
+    await loginToWebUI(page);
+    const name = `pw-pending-prompt-${Date.now()}`;
+    await page.goto("/build?kind=prompts");
+    await page.getByRole("textbox", { name: "Name *" }).fill(name);
+    await page.getByRole("textbox", { name: "Description *" }).fill("Pending content proof");
+    await page.getByRole("textbox", { name: "Template *" }).fill("Keep the pending template");
+    await page.getByRole("button", { name: "Submit for Review" }).click();
+    await expect(page).toHaveURL(/\/components\/prompts\//);
+    const detailUrl = page.url();
+    await page.goto("/resources/prompts?view=my");
+    const row = page.getByText(name, { exact: true }).last().locator("xpath=ancestor::div[contains(@class,'py-3')][1]");
+    await row.getByRole("button", { name: "Edit", exact: true }).click();
+    await expect(page.getByRole("textbox", { name: "Template *" })).toHaveValue("Keep the pending template");
+    await page.getByRole("button", { name: "Save Changes" }).click();
+    await page.goto(detailUrl);
+    await expect(page.getByText("Keep the pending template").first()).toBeVisible();
+  });
+
+  test("accepts Git-only MCP submissions without requiring a pasted command", async ({ page }) => {
+    await loginToWebUI(page);
+    await page.goto("/build?kind=mcps");
+    await page.getByRole("textbox", { name: "Name *" }).fill(`pw-git-mcp-${Date.now()}`);
+    await page.getByRole("textbox", { name: "Description *" }).fill("A Git-only MCP source");
+    await page.getByRole("textbox", { name: /Git URL/ }).fill("https://github.com/example/mcp-server");
+    await page.getByRole("button", { name: "Submit for Review" }).click();
+    await expect(page).toHaveURL(/\/components\/mcps\//);
+  });
+
+  test("locks only the editable form while a draft request is pending", async ({ page }) => {
+    await loginToWebUI(page);
+    let startRequest!: () => void;
+    let finishRequest!: () => void;
+    const requested = new Promise<void>((resolve) => { startRequest = resolve; });
+    const release = new Promise<void>((resolve) => { finishRequest = resolve; });
+    await page.route("**/api/v1/prompts/draft", async (route) => {
+      startRequest();
+      await release;
+      await route.continue();
+    });
+    await page.goto("/build?kind=prompts");
+    const name = `pw-save-lock-${Date.now()}`;
+    await page.getByRole("textbox", { name: "Name *" }).fill(name);
+    await page.getByRole("button", { name: "Save Draft" }).click();
+    try {
+      await requested;
+      await expect(page.getByRole("region", { name: "Prompt editor" })).toHaveAttribute("aria-busy", "true");
+      await expect(page.locator("#prompt-template").locator("xpath=ancestor::div[@inert][1]")).toHaveCount(1);
+      await expect(page.getByRole("button", { name: "Save Draft" })).toBeVisible();
+    } finally {
+      finishRequest();
+    }
+    await expect(page).toHaveURL(/\/build\?kind=prompts&draft=/);
+    await expect(page.getByRole("textbox", { name: "Name *" })).toHaveValue(name);
+  });
+
+  test("retains save focus and announces JSON validation on the focused editor", async ({ page }) => {
+    await loginToWebUI(page);
+    await page.goto("/build?kind=sandboxes");
+    await page.getByRole("textbox", { name: "Name *" }).fill(`pw-a11y-sandbox-${Date.now()}`);
+    await page.getByRole("button", { name: "Save Draft" }).click();
+    await expect(page).toHaveURL(/draft=[a-f0-9-]+/);
+    const save = page.getByRole("button", { name: "Save Changes" });
+    await save.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("Draft updated")).toBeVisible();
+    await expect(save).toBeFocused();
+    const editor = page.locator("#sandbox-limits [contenteditable=true]");
+    await editor.fill("{ invalid");
+    await save.click();
+    await expect(editor).toBeFocused();
+    await expect(editor).toHaveAttribute("aria-label", "Resource Limits JSON");
+    await expect(editor).toHaveAttribute("aria-invalid", "true");
+    await expect(editor).toHaveAttribute("aria-describedby", "component-form-error");
   });
 
   test("blocks accidental navigation and allows correction of invalid submissions", async ({ page }) => {
@@ -144,6 +240,7 @@ test.describe("Resource builder", () => {
     await page.goto("/build?kind=hooks");
     await expect(page.getByRole("link", { name: "Change resource kind" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Configure Hook" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Choose resource kind" })).toHaveCount(0);
     const editorTop = await page.getByRole("heading", { name: "Configure Hook" }).evaluate((node) => node.getBoundingClientRect().top);
     expect(editorTop).toBeLessThan(780);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(321);

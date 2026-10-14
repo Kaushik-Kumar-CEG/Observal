@@ -326,9 +326,17 @@ export default function ComponentsView({ type: activeType }: { type: RegistryTyp
     if (action === "submit") {
       submitDraftMutation.mutate(item.id);
     } else if (item.status === "pending") {
-      startEditMutation.mutate(item.id, {
-        onSuccess: () => { setEditItem(item); setSubmitOpen(true); },
-      });
+      let acquired = false;
+      try {
+        await startEditMutation.mutateAsync(item.id);
+        acquired = true;
+        const fullItem = await registry.get(activeType, item.id);
+        setEditItem(fullItem);
+        setSubmitOpen(true);
+      } catch (error) {
+        if (acquired) cancelEditMutation.mutate(item.id);
+        toast.error(error instanceof Error ? error.message : "Could not load the full submission for editing");
+      }
     } else {
       setEditItem(item);
       setSubmitOpen(true);
@@ -443,19 +451,21 @@ export default function ComponentsView({ type: activeType }: { type: RegistryTyp
               glyph={activeType}
               actions={
                 <>
-                  {(item.status === "draft" || item.status === "rejected" || item.status === "pending" || (activeType === "skills" && item.status === "approved")) && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs"
+                  {(item.status === "draft" || item.status === "rejected") ? (
+                    <Button asChild variant="outline" size="sm" className="h-7 text-xs">
+                      <Link to="/build" search={{ kind: activeType, draft: item.id }}>
+                        <FileEdit className="h-3 w-3 mr-1" /> Continue draft
+                      </Link>
+                    </Button>
+                  ) : (item.status === "pending" || (activeType === "skills" && item.status === "approved")) && (
+                    <Button variant="outline" size="sm" className="h-7 text-xs"
                       disabled={findingFolder || startEditMutation.isPending || loadFolderMutation.isPending}
-                      onClick={() => void openSubmission(item, "edit")}
-                    >
+                      onClick={() => void openSubmission(item, "edit")}>
                       <FileEdit className="h-3 w-3 mr-1" />
                       {item.status === "approved" ? "Manage drafts" : "Edit"}
                     </Button>
                   )}
-                  {(item.status === "draft" || item.status === "rejected" || (activeType === "skills" && item.status === "approved")) && (
+                  {activeType === "skills" && item.status === "approved" && (
                     <Button
                       variant="outline"
                       size="sm"
@@ -464,7 +474,7 @@ export default function ComponentsView({ type: activeType }: { type: RegistryTyp
                       disabled={findingFolder || submitDraftMutation.isPending || submitFolderMutation.isPending}
                     >
                       <Send className="h-3 w-3 mr-1" />
-                      {item.status === "rejected" ? "Resubmit" : item.status === "approved" ? "Submit draft" : "Submit"}
+                      Submit draft
                     </Button>
                   )}
                 </>

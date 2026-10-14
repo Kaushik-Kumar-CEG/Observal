@@ -121,6 +121,13 @@ function AgentBuilderInner() {
 
   /* ── Step state ── */
   const [activeStep, setActiveStep] = useState<StepId>("identity");
+  const stepMainRef = useRef<HTMLElement>(null);
+  const previousStepRef = useRef(activeStep);
+  useEffect(() => {
+    if (previousStepRef.current === activeStep) return;
+    previousStepRef.current = activeStep;
+    stepMainRef.current?.querySelector<HTMLElement>("h2")?.focus();
+  }, [activeStep]);
 
   /* ── Form state ── */
   const [name, setName] = useState("");
@@ -483,11 +490,16 @@ function AgentBuilderInner() {
     setSavingDraft(true);
     try {
       const body = buildRequestBody();
-      if (draftId) {
-        await updateDraft.mutateAsync({ id: draftId, body });
+      let savedId = draftId;
+      if (savedId) {
+        await updateDraft.mutateAsync({ id: savedId, body });
       } else {
         const created = await saveDraft.mutateAsync(body);
-        setDraftId(created.id);
+        savedId = created.id;
+        setDraftId(savedId);
+      }
+      if (savedId && draftParam !== savedId) {
+        await router.navigate({ to: "/agents/builder", search: { draft: savedId }, replace: true });
       }
       try { localStorage.removeItem(DRAFT_STORAGE_KEY); } catch { /* ignore */ }
     } catch (e) {
@@ -632,7 +644,7 @@ function AgentBuilderInner() {
         {/* ── Workspace: main + sidebar ── */}
         <div className="grid grid-cols-1 items-start gap-3.5 lg:grid-cols-[minmax(0,1fr)_310px]">
           {/* ── Main content area ── */}
-          <main className="min-w-0 animate-in">
+          <main ref={stepMainRef} className="min-w-0 animate-in">
             {activeStep === "identity" && (
               <IdentityStage
                 name={name} setName={setName}
@@ -790,7 +802,7 @@ function IdentityStage(props: {
     <section className="rounded-xl bg-card p-5 shadow-sm">
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium">Give the Agent File a stable identity</h2>
+          <h2 tabIndex={-1} className="text-sm font-medium focus:outline-none">Give the Agent File a stable identity</h2>
           <p className="mt-0.5 text-2xs text-muted-foreground">
             This becomes the install name developers use from the CLI.
           </p>
@@ -805,8 +817,9 @@ function IdentityStage(props: {
 
       <div className="grid gap-3.5 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <Label className="text-2xs font-medium">Agent File name</Label>
+          <Label htmlFor="agent-file-name" className="text-2xs font-medium">Agent File name</Label>
           <Input
+            id="agent-file-name"
             className="font-mono"
             value={props.name}
             onChange={(e) => {
@@ -820,12 +833,12 @@ function IdentityStage(props: {
           {props.nameError && <p className="text-2xs text-destructive">{props.nameError}</p>}
         </div>
         <div className="space-y-1.5">
-          <Label className="text-2xs font-medium">Version</Label>
-          <Input className="font-mono" value={props.version} onChange={(e) => props.setVersion(e.target.value)} placeholder="0.4.0" />
+          <Label htmlFor="agent-file-version" className="text-2xs font-medium">Version</Label>
+          <Input id="agent-file-version" className="font-mono" value={props.version} onChange={(e) => props.setVersion(e.target.value)} placeholder="0.4.0" />
         </div>
         <div className="space-y-1.5 sm:col-span-2">
-          <Label className="text-2xs font-medium">Description</Label>
-          <Textarea value={props.description} onChange={(e) => props.setDescription(e.target.value)} placeholder="Plans safe, reversible database and infrastructure migrations." rows={3} className="resize-y" />
+          <Label htmlFor="agent-file-description" className="text-2xs font-medium">Description</Label>
+          <Textarea id="agent-file-description" value={props.description} onChange={(e) => props.setDescription(e.target.value)} placeholder="Plans safe, reversible database and infrastructure migrations." rows={3} className="resize-y" />
         </div>
         <div className="space-y-1.5">
           <Label className="text-2xs font-medium">Publish to</Label>
@@ -889,7 +902,7 @@ function BehaviorStage(props: {
       <section className="rounded-xl bg-card p-5 shadow-sm">
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-sm font-medium">Define how the Agent File should behave</h2>
+            <h2 tabIndex={-1} className="text-sm font-medium focus:outline-none">Define how the Agent File should behave</h2>
             <p className="mt-0.5 text-2xs text-muted-foreground">
               Keep the operating instructions specific, testable, and clear about when to stop.
             </p>
@@ -903,8 +916,11 @@ function BehaviorStage(props: {
         </div>
 
         <div className="space-y-1.5">
-          <Label className="text-2xs font-medium">Agent File prompt</Label>
+          <Label htmlFor="agent-file-prompt" className="text-2xs font-medium">Agent File prompt</Label>
           <Textarea
+            id="agent-file-prompt"
+            aria-invalid={!!props.promptError}
+            aria-describedby={props.promptError ? "agent-file-prompt-error" : undefined}
             value={props.systemPrompt}
             onChange={(e) => { props.setSystemPrompt(e.target.value); if (e.target.value.trim()) props.setPromptError(""); }}
             placeholder="You are a migration planning Agent File for production systems…"
@@ -912,7 +928,7 @@ function BehaviorStage(props: {
             className={cn("min-h-[210px] resize-y font-mono text-2xs", props.promptError && "border-destructive")}
           />
           {props.promptError ? (
-            <p className="text-2xs text-destructive">{props.promptError}</p>
+            <p id="agent-file-prompt-error" className="text-2xs text-destructive">{props.promptError}</p>
           ) : (
             <p className="text-[10px] text-muted-foreground">Required. You can also link a Prompt component in the next step.</p>
           )}
@@ -963,7 +979,7 @@ function ComponentsStage(props: {
     <section className="rounded-xl bg-card p-5 shadow-sm">
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium">Choose building blocks</h2>
+          <h2 tabIndex={-1} className="text-sm font-medium focus:outline-none">Choose building blocks</h2>
           <p className="mt-0.5 text-2xs text-muted-foreground">
             Add only what this Agent File needs. You can reorder selected components before review.
           </p>
@@ -1098,7 +1114,7 @@ review: required`;
       <section className="rounded-xl bg-card p-5 shadow-sm">
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-sm font-medium">Review the package</h2>
+            <h2 tabIndex={-1} className="text-sm font-medium focus:outline-none">Review the package</h2>
             <p className="mt-0.5 text-2xs text-muted-foreground">
               Confirm identity, behavior, compatibility, and ownership before submission.
             </p>
@@ -1108,7 +1124,7 @@ review: required`;
             isReady ? "text-success" : "text-warning",
           )}>
             <span className={cn("h-1.5 w-1.5 rounded-full", isReady ? "bg-success" : "bg-warning")} />
-            {isReady ? "Ready to submit" : "Needs attention"}
+            {isReady ? "Basic checks passed" : "Needs attention"}
           </span>
         </div>
 
@@ -1147,17 +1163,11 @@ review: required`;
       <section className="mt-3 rounded-xl bg-card p-5 shadow-sm">
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-sm font-medium">Package preview</h2>
+            <h2 className="text-sm font-medium">Configuration summary</h2>
             <p className="mt-0.5 text-2xs text-muted-foreground">
-              The exact version that will enter the review queue.
+              An overview of this draft, not generated install files. The server checks submission requirements.
             </p>
           </div>
-          <button
-            type="button"
-            className="rounded-lg px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-surface-raised hover:text-foreground"
-          >
-            View YAML
-          </button>
         </div>
         <pre className="min-h-[150px] rounded-[11px] border border-border bg-surface-raised p-4 font-mono text-2xs leading-relaxed whitespace-pre-wrap">
           {previewYaml}
