@@ -164,7 +164,7 @@ function AgentBuilderInner() {
   const editLoadedRef = useRef(false);
 
   const [selectedComponents, setSelectedComponents] = useState<
-    Record<string, RegistryItem[]>
+    Record<string, (RegistryItem & { version_ref?: string; config_override?: Record<string, unknown> })[]>
   >({
     mcps: [],
     skills: [],
@@ -205,9 +205,10 @@ function AgentBuilderInner() {
 
     if (draftParam) setDraftId(draftParam);
 
-    const agentComponents = (existingAgent as Record<string, unknown>).components;
+    const links = (existingAgent as Record<string, unknown>).component_links;
+    const agentComponents = Array.isArray(links) ? links : (existingAgent as Record<string, unknown>).components;
     if (Array.isArray(agentComponents)) {
-      const grouped: Record<string, RegistryItem[]> = {
+      const grouped: Record<string, (RegistryItem & { version_ref?: string; config_override?: Record<string, unknown> })[]> = {
         mcps: [], skills: [], hooks: [], prompts: [], sandboxes: [],
       };
       for (const comp of agentComponents) {
@@ -216,8 +217,10 @@ function AgentBuilderInner() {
         if (grouped[pluralType]) {
           grouped[pluralType].push({
             id: c.component_id as string,
-            name: (c.name as string) ?? (c.component_id as string),
+            name: (c.component_name as string) || (c.name as string) || (c.component_id as string),
             description: c.description as string | undefined,
+            version_ref: (c.version_ref as string) || (c.version as string | undefined),
+            config_override: c.config_override as Record<string, unknown> | undefined,
           });
         }
       }
@@ -436,11 +439,14 @@ function AgentBuilderInner() {
 
   /* ── Build request body ── */
   function buildRequestBody(versionOverride?: string) {
-    const components: { component_type: string; component_id: string }[] = [];
+    const components: { component_type: string; component_id: string; version?: string; config_override?: Record<string, unknown> }[] = [];
     for (const [type, items] of Object.entries(selectedComponents)) {
       const singularType = TYPE_MAP[type] ?? type;
       for (const item of items) {
-        components.push({ component_type: singularType, component_id: item.id });
+        components.push({ component_type: singularType, component_id: item.id,
+          ...(item.version_ref ? { version: item.version_ref } : {}),
+          ...(item.config_override ? { config_override: item.config_override } : {}),
+        });
       }
     }
     const normalizedCriteria = normalizeSuccessCriteria(successCriteria);

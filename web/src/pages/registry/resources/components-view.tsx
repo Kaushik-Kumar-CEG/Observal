@@ -379,15 +379,8 @@ export default function ComponentsView({ type: activeType }: { type: RegistryTyp
         onLayoutChange={setLayout}
         actions={
           authReady && role && (
-            <Button
-              size="sm"
-              className="h-[34px] shrink-0 rounded-[9px] bg-primary px-3.5 text-xs font-medium text-primary-foreground"
-              onClick={() => {
-                setEditItem(null);
-                setSubmitOpen(true);
-              }}
-            >
-              Create {singular}
+            <Button asChild size="sm" className="h-[34px] shrink-0 rounded-[9px] bg-primary px-3.5 text-xs font-medium text-primary-foreground">
+              <Link to="/build" search={{ kind: activeType }}>Create {singular}</Link>
             </Button>
           )
         }

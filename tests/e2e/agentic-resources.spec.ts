@@ -172,7 +172,7 @@ test.describe("Agentic Resources wayfinding", () => {
         await expect(page.getByRole("link", { name: "Create Agent File" })).toBeVisible();
       } else {
         const name = kind === "sandboxes" ? "Sandbox" : kind === "mcps" ? "MCP Client" : label.slice(0, -1);
-        await expect(page.getByRole("button", { name: `Create ${name}`, exact: true })).toBeVisible();
+        await expect(page.getByRole("link", { name: `Create ${name}`, exact: true })).toHaveAttribute("href", `/build?kind=${kind}`);
       }
     }
     await page.evaluate(() => localStorage.setItem("observal-mode", "dark"));

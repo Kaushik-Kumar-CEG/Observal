@@ -538,9 +538,9 @@ export function useSubmitSkillFolderDraft() {
       qc.invalidateQueries({ queryKey: ["registry", "skills"] });
       qc.invalidateQueries({ queryKey: ["component-versions", "skills", vars.listingId] });
       qc.invalidateQueries({ queryKey: ["review"] });
-      toast.success("Submitted exact folder version for review");
+      toast.success("Submitted exact Skill version for review");
     },
-    onError: (err: Error) => toast.error(err.message || "Failed to submit folder version"),
+    onError: (err: Error) => toast.error(err.message || "Failed to submit Skill version"),
   });
 }
 
