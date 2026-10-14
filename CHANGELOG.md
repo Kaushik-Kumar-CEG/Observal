@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - Browse all six native Agentic Resource kinds with URL-backed discovery and searchable, paginated owner submissions.
+- Build Agent Files and five standalone resource kinds through a dedicated authoring workflow with saved drafts, validation, and review submission.
 - add revision-based, participant-scoped reviews with publication gates, conversations, inbox notifications, web review pages, and `observal review` commands
 - add opt-in, local-only harness inventory to `observal scan`
 - Fork approved agents and registry components into independently owned drafts with visibility-safe provenance, public fork lists, CLI and web workflows.
