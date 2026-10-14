@@ -92,8 +92,9 @@ test.describe("Resource builder", () => {
     await expect(page).toHaveURL(/draft=[a-f0-9-]+/);
     const draftUrl = page.url();
     await page.goto("/resources/prompts?view=my");
-    await expect(page.getByText(name).first()).toBeVisible();
-    await page.getByRole("link", { name: "Continue draft" }).last().click();
+    const row = page.getByText(name, { exact: true }).last().locator("xpath=ancestor::div[contains(@class,'py-3')][1]");
+    await row.getByRole("link", { name: "Continue draft" }).click();
+    await expect(page).toHaveURL(draftUrl);
     await expect(page.getByRole("textbox", { name: "Template *" })).toHaveValue("Keep this unique template");
     await page.getByRole("button", { name: "Save Changes" }).click();
     await page.goto(draftUrl);
