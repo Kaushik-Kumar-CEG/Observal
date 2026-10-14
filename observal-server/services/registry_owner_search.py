@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-# SPDX-License-Identifier: Apache-2.0
-
 """Server-side owner search before pagination, after team visibility checks.
 
 The public catalogue only contains reviewed releases. Owner drafts are never

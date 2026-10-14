@@ -1,7 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-
-<!-- SPDX-License-Identifier: Apache-2.0 -->
 # Agentic resources: implementation plan (pre-code revision 2)
 
 Baseline: upstream `main` ca47a952 (2026-10-14), isolated worktrees `feat/agentic-resources-unified` and `feat/all-resource-builder`. This is a two-PR product change, NOT a new ARD protocol or migration of component tables. Existing `/agents/*`, `/components/*`, `/resources/*`, and canonical namespace/slug deep links remain valid. Issue #1792 (last comment 2026-10-11) requests **agent** builder parity; it does not cover a standalone resource authoring entry point.

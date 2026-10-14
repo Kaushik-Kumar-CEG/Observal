@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-// SPDX-License-Identifier: Apache-2.0
-
 import { expect, test } from "@playwright/test";
 import { loginToWebUI } from "./helpers";
 
