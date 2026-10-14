@@ -623,7 +623,7 @@ async def test_my_agents_filters_owner_and_maps_rating(boundaries):
     sql = _sql(db.execute.await_args_list[0].args[0])
     assert f"agents.created_by = '{USER_ID.hex}'" in sql
     assert "agents.deleted_at IS NULL" in sql
-    assert "ORDER BY agents.created_at DESC" in sql
+    assert "ORDER BY agents.created_at DESC, agents.id DESC" in sql
     assert "OFFSET 3" in sql
 
 
@@ -654,6 +654,7 @@ async def test_archived_agents_maps_creators_and_ratings(boundaries):
     sql = _sql(db.execute.await_args_list[0].args[0])
     assert "agent_versions.status = 'archived'" in sql
     assert "agents.deleted_at IS NULL" in sql
+    assert "ORDER BY agents.created_at DESC, agents.id DESC" in sql
     assert "OFFSET 3" in sql
 
 

@@ -434,7 +434,7 @@ async def my_agents(
         )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     response.headers["X-Total-Count"] = str(total or 0)
-    stmt = stmt.order_by(Agent.created_at.desc())
+    stmt = stmt.order_by(Agent.created_at.desc(), Agent.id.desc())
     if offset:
         stmt = stmt.offset(offset)
     if limit is not None:
@@ -525,7 +525,7 @@ async def archived_agents(
         )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     response.headers["X-Total-Count"] = str(total or 0)
-    stmt = stmt.order_by(Agent.created_at.desc())
+    stmt = stmt.order_by(Agent.created_at.desc(), Agent.id.desc())
     if offset:
         stmt = stmt.offset(offset)
     if limit is not None:
