@@ -560,7 +560,7 @@ async def test_list_agents_builds_scoped_search_queries_and_maps_batch_data(boun
         assert "agents.category = 'testing'" in sql
         assert f"agents.team_id = '{TEAM_ID.hex}'" in sql
         assert "lower(agents.name) LIKE lower('%review%')" in sql
-    assert "ORDER BY" in list_sql
+    assert "agents.created_at DESC, agents.id DESC" in list_sql
     assert "LIMIT 25 OFFSET 5" in list_sql
 
 

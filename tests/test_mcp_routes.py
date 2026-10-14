@@ -879,7 +879,7 @@ class TestListAndDetail:
             assert fragment in count_sql
             assert fragment in data_sql
         assert "SELECT count(*) AS count_1 FROM (SELECT" in count_sql
-        assert " DESC, mcp_listings.created_at DESC" in data_sql
+        assert " DESC, mcp_listings.created_at DESC, mcp_listings.id DESC" in data_sql
         assert " LIMIT " in data_sql
         assert " OFFSET " in data_sql
         assert {"developer-tools", "alice", "needle", TEAM_ID, 25, 50} <= set(data_stmt.compile().params.values())

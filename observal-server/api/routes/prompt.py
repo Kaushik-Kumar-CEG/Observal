@@ -157,7 +157,7 @@ async def list_prompts(
         public_only=public_only,
     )
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
-    order_by = [PromptListing.created_at.desc()]
+    order_by = [PromptListing.created_at.desc(), PromptListing.id.desc()]
     if search_rank is not None:
         order_by.insert(0, search_rank.desc())
     result = await db.execute(stmt.order_by(*order_by).limit(limit).offset(offset))

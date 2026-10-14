@@ -616,7 +616,7 @@ class TestListAndDetail:
             assert fragment in count_sql
             assert fragment in data_sql
         assert "SELECT count(*) AS count_1 FROM (SELECT" in count_sql
-        assert " DESC, skill_listings.created_at DESC" in data_sql
+        assert " DESC, skill_listings.created_at DESC, skill_listings.id DESC" in data_sql
         assert " LIMIT " in data_sql
         assert " OFFSET " in data_sql
         params = data_stmt.compile().params

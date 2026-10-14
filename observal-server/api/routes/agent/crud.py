@@ -328,7 +328,7 @@ async def list_agents(
         composable_for_team_id=composable_for_team_id,
         public_only=public_only,
     )
-    order_by = [Agent.created_at.desc()]
+    order_by = [Agent.created_at.desc(), Agent.id.desc()]
     if search_rank is not None:
         order_by.insert(0, search_rank.desc())
     result = await db.execute(stmt.order_by(*order_by).offset(offset).limit(limit))
