@@ -154,10 +154,9 @@ test("browser resumes and saves the exact existing folder version", async ({ pag
 	await page.goto("/resources/skills?view=my");
 	const row = page.locator("section .divide-y > div").filter({ hasText: name });
 	await expect(row).toBeVisible();
-	await row.getByRole("button", { name: "Edit" }).click();
-	const choice = page.getByRole("dialog");
-	await expect(choice.getByText("Choose the exact folder version")).toBeVisible();
-	await choice.getByRole("button", { name: "Edit selected version" }).click();
+	await row.getByRole("link", { name: "Continue draft" }).click();
+	await expect(page.getByRole("heading", { name: "Edit the exact Skill version" })).toBeVisible();
+	await page.getByRole("link", { name: "Open versioned Skill editor" }).click();
 	const editor = page.getByRole("dialog");
 	await expect(editor.getByRole("tab", { name: "Upload" })).toHaveAttribute("data-state", "active");
 	await expect(editor.getByText("assets/icon.bin")).toBeVisible();
@@ -178,14 +177,7 @@ test("browser resumes and saves the exact existing folder version", async ({ pag
 	expect((await textRes.json()).content).toBe("after\n");
 	const binaryRes = await fetch(`${API_BASE}/api/v1/skills/${draft.listing_id}/versions/${draft.version_id}/files/assets/icon.bin`, { headers: auth });
 	expect(Buffer.from(await binaryRes.arrayBuffer())).toEqual(Buffer.from([0, 255]));
-	await row.getByRole("button", { name: "Submit", exact: true }).click();
-	await expect(page.getByRole("dialog").getByText("Choose the exact folder version")).toBeVisible();
-	if (process.env.OBSERVAL_SKILL_FOLDER_DELIVERY_ENABLED === "true") {
-		await expect(page.getByRole("dialog").getByRole("button", { name: "Submit selected version" })).toBeEnabled();
-	} else {
-		await expect(page.getByRole("dialog").getByRole("status")).toContainText("Complete-folder review is not enabled");
-		await expect(page.getByRole("dialog").getByRole("button", { name: "Submit selected version" })).toBeDisabled();
-	}
+	// Saving the selected folder version does not automatically submit it for review.
 	const current = await fetch(`${API_BASE}/api/v1/skills/${draft.listing_id}/versions`, { headers: auth });
 	expect((await current.json()).items[0].status).toBe("draft");
 });
