@@ -1,0 +1,47 @@
+{
+  "synthetic_draft_only": true,
+  "not_current_or_live": true,
+  "wire_cases": [
+    {
+      "id": "paired-40-calls-overlap-prospective-not-deployed", "http": 200,
+      "body": {
+        "window": {"start": "2026-09-01T00:00:00Z", "end": "2026-09-08T00:00:00Z", "as_of": "2026-09-08T00:01:00Z", "timezone": "UTC", "period": "1w"},
+        "window_anchor": "future-synthetic-anchor",
+        "items": [{"subject_id": "10000000-0000-4000-8000-000000000003", "author_revision": "A1", "user_revision": "U1",
+          "author_usage": {"value": 1, "status": "partial", "reasons": ["unqualified_kinds"], "coverage": {"eligible_sessions": 1, "source_start": "2026-09-01T00:00:00Z", "source_end": "2026-09-08T00:00:00Z", "supported_harnesses": ["verified-synthetic"], "supported_kinds": ["mcp_calls"], "projection": "partial"}},
+          "user_usage": {"value": 1, "status": "partial", "reasons": ["unqualified_kinds"], "coverage": {"eligible_sessions": 1, "source_start": "2026-09-01T00:00:00Z", "source_end": "2026-09-08T00:00:00Z", "supported_harnesses": ["verified-synthetic"], "supported_kinds": ["mcp_calls"], "projection": "partial"}}
+        }]
+      }, "expected_spoken_author": "1 observed traces · Partial coverage", "expected_spoken_user": "1 observed traces · Partial coverage", "requires_40_secondary_calls_one_root": true
+    },
+    {
+      "id": "overlapping-breakdown-prospective-not-deployed", "http": 200,
+      "body": {
+        "subject_id": "10000000-0000-4000-8000-000000000003", "scope": "author",
+        "window": {"start": "2026-09-01T00:00:00Z", "end": "2026-09-08T00:00:00Z", "as_of": "2026-09-08T00:01:00Z", "timezone": "UTC", "period": "1w"},
+        "window_anchor": "future-synthetic-anchor", "revision": "A1", "items": [
+          {"kind": "mcp", "component_id": "10000000-0000-4000-8000-000000000010", "name": "Example A", "author": {"id": "10000000-0000-4000-8000-000000000003", "username": "example", "name": "Example"}, "component_traces": {"value": 1, "status": "supported", "reasons": [], "coverage": {"eligible_sessions": 1, "source_start": "2026-09-01T00:00:00Z", "source_end": "2026-09-08T00:00:00Z", "supported_harnesses": ["verified-synthetic"], "supported_kinds": ["mcp_calls"], "projection": "complete"}}, "mcp_calls": {"value": 20, "status": "supported", "reasons": [], "coverage": {"eligible_sessions": 1, "source_start": "2026-09-01T00:00:00Z", "source_end": "2026-09-08T00:00:00Z", "supported_harnesses": ["verified-synthetic"], "supported_kinds": ["mcp_calls"], "projection": "complete"}}, "confirmed_skill_loads": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}}, "recorded_hook_runs": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}}},
+          {"kind": "mcp", "component_id": "10000000-0000-4000-8000-000000000011", "name": "Example B", "author": {"id": "10000000-0000-4000-8000-000000000003", "username": "example", "name": "Example"}, "component_traces": {"value": 1, "status": "supported", "reasons": [], "coverage": {"eligible_sessions": 1, "source_start": "2026-09-01T00:00:00Z", "source_end": "2026-09-08T00:00:00Z", "supported_harnesses": ["verified-synthetic"], "supported_kinds": ["mcp_calls"], "projection": "complete"}}, "mcp_calls": {"value": 20, "status": "supported", "reasons": [], "coverage": {"eligible_sessions": 1, "source_start": "2026-09-01T00:00:00Z", "source_end": "2026-09-08T00:00:00Z", "supported_harnesses": ["verified-synthetic"], "supported_kinds": ["mcp_calls"], "projection": "complete"}}, "confirmed_skill_loads": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}}, "recorded_hook_runs": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}}}
+        ], "complete": true, "next_cursor": null
+      }, "expected_union_from_paired_case": 1, "row_sum_is_not_union": true
+    },
+    {
+      "id": "detail-after-breakdown", "http": 200,
+      "body": {
+        "subject_id": "10000000-0000-4000-8000-000000000003", "scope": "author",
+        "window": {"start": "2026-09-01T00:00:00Z", "end": "2026-09-08T00:00:00Z", "as_of": "2026-09-08T00:01:00Z", "timezone": "UTC", "period": "1w"},
+        "window_anchor": "future-synthetic-anchor", "revision": "A1",
+        "component": {"kind": "mcp", "component_id": "10000000-0000-4000-8000-000000000010", "name": "Example A", "author": {"id": "10000000-0000-4000-8000-000000000003", "username": "example", "name": "Example"},
+          "component_traces": {"value": 1, "status": "supported", "reasons": [], "coverage": {"eligible_sessions": 1, "source_start": "2026-09-01T00:00:00Z", "source_end": "2026-09-08T00:00:00Z", "supported_harnesses": ["verified-synthetic"], "supported_kinds": ["mcp_calls"], "projection": "complete"}},
+          "mcp_calls": {"value": 20, "status": "supported", "reasons": [], "coverage": {"eligible_sessions": 1, "source_start": "2026-09-01T00:00:00Z", "source_end": "2026-09-08T00:00:00Z", "supported_harnesses": ["verified-synthetic"], "supported_kinds": ["mcp_calls"], "projection": "complete"}},
+          "confirmed_skill_loads": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}},
+          "recorded_hook_runs": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}}
+        }
+      }, "must_match_breakdown_window_revision": true
+    },
+    {"id": "partial-zero", "http": 200, "reading": {"value": 0, "status": "partial", "reasons": ["unknown_root_origin"], "coverage": {"eligible_sessions": 3, "source_start": "2026-09-01T00:00:00Z", "source_end": "2026-09-08T00:00:00Z", "supported_harnesses": ["verified-synthetic"], "supported_kinds": ["mcp_calls"], "projection": "partial"}}, "expected_text": "0 observed traces · Partial coverage", "expected_talkback": "0 observed traces · Partial coverage"},
+    {"id": "unknown-only-null", "http": 200, "reading": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}}, "expected_text": "Not recorded"},
+    {"id": "forbidden-author", "http": 403, "body": null, "must_not_expose": ["count", "coverage", "subject_name", "cohort", "source"]},
+    {"id": "source-erased-stale-page", "http": 409, "body": null, "expect_window_refresh": true},
+    {"id": "suppressed-platform", "http": 200, "active_accounts": null, "prompted_root_sessions": null, "both_readings_equal": true}
+  ]
+}

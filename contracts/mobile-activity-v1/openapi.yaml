@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-
 openapi: 3.1.0
 info:
-  title: Observal mobile activity v1 (negotiation contract)
-  version: 1.0.0-draft
+  title: Observal mobile trace-first activity (backend negotiation ONLY)
+  version: 1.1.0-draft
   description: >-
-    Backend-owned wire contract on a not-yet-merged feature branch. Scoped routes
-    fail closed with unavailable readings until evidence gates pass; no live
-    activity cohort or deployed API is claimed. All readings describe observed, retained,
-    identity-checked client reports, not attested real-world usage.
+    Backend-owned trace-first replacement for the UNDEPLOYED calls-oriented v1
+    draft. Some read-only v1 paths exist in a separate gated branch, but do not
+    satisfy this revised shape; no trace_headlines cohort is qualified or
+    deployed. A headline is one qualified component-attributable logical-root
+    run, NOT a call or a prompted general session. Mobile-owner review required.
 servers:
   - url: /api/v1
 security:
@@ -19,11 +19,7 @@ paths:
     post:
       operationId: authorizeMobileDevice
       security: []
-      description: >-
-        Request a phone grant with explicit client_id=observal-mobile. Without
-        mobile.auth_enabled this returns 503 and issues no device grant.
-        Verification opens in a system browser only after origin association
-        is reviewed; never send the app's bearer token to that URL.
+      description: Explicit client_id=observal-mobile; issuance disabled by default.
       requestBody:
         required: true
         content:
@@ -37,19 +33,12 @@ paths:
                 sso: { type: boolean, default: false }
                 provider: { type: [string, 'null'] }
       responses:
-        '200':
-          description: Ephemeral device challenge; do not log or back up codes.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/DeviceChallenge' }
-        '503': { description: Mobile issuance disabled or temporarily unavailable. }
+        '200': { description: One-use device challenge, content: { application/json: { schema: { $ref: '#/components/schemas/DeviceChallenge' } } } }
+        '503': { description: Mobile issuance disabled or unavailable. }
   /auth/device/token:
     post:
-      operationId: pollMobileDeviceGrant
+      operationId: redeemMobileDeviceGrant
       security: []
-      description: >-
-        RFC 8628 device-code poll. A single approved grant can be redeemed once;
-        authorization_pending and slow_down are transient non-200 errors.
       requestBody:
         required: true
         content:
@@ -62,21 +51,13 @@ paths:
                 device_code: { type: string }
                 grant_type: { type: string, const: 'urn:ietf:params:oauth:grant-type:device_code' }
       responses:
-        '200':
-          description: Mobile-audience access/refresh pair with the viewer's own profile.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/MobileDeviceToken' }
-        '400': { description: Pending, denied, expired or already consumed grant. }
-        '503': { description: Mobile issuance disabled; approved grant consumed without minting tokens. }
+        '200': { description: One-use mobile audience grant, content: { application/json: { schema: { $ref: '#/components/schemas/MobileDeviceToken' } } } }
+        '400': { description: Pending, denied, expired or already consumed. }
+        '503': { description: Mobile issuance disabled or unavailable. }
   /auth/token/refresh:
     post:
       operationId: rotateMobileRefresh
       security: []
-      description: >-
-        Atomically consume one mobile refresh token. Every successor remains
-        mobile audience/read scope and the same device family. Disabling
-        mobile.auth_enabled rejects mobile refresh but not desktop refresh.
       requestBody:
         required: true
         content:
@@ -88,19 +69,13 @@ paths:
               properties:
                 refresh_token: { type: string }
       responses:
-        '200':
-          description: Rotated mobile-scoped token pair.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/MobileTokenPair' }
+        '200': { description: Atomically rotated mobile-audience pair, content: { application/json: { schema: { $ref: '#/components/schemas/MobileTokenPair' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '503': { description: Mobile disabled or token service unavailable. }
+        '503': { description: Mobile disabled or unavailable. }
   /auth/mobile/logout:
     post:
       operationId: logoutMobileDevice
-      description: >-
-        Revoke this phone's device family only; desktop/CLI credentials remain
-        valid. Logout is still allowed when mobile issuance has been disabled.
+      description: Revoke only the phone's device family; allowed after issuance is disabled.
       requestBody:
         required: true
         content:
@@ -117,159 +92,145 @@ paths:
   /mobile-activity/v1/capabilities:
     get:
       operationId: mobileActivityCapabilities
-      description: Authentication required. Origin is the HTTPS request origin; never use server_id alone as a credential key.
+      description: >-
+        Advertise trace_headlines=true ONLY after verified run identity, indexed
+        retained evidence, read controls, scoped mobile auth and a running-instance
+        cohort pass. The draft example is false. Caller HTTPS origin is part of identity.
       responses:
-        '200':
-          description: Capability negotiation; an advertised kind requires a qualified upgraded sender cohort.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Capabilities'
+        '200': { description: Capability, content: { application/json: { schema: { $ref: '#/components/schemas/Capabilities' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
   /mobile-activity/v1/people:
     get:
-      operationId: mobilePeopleSearch
-      description: >-
-        Bounded literal-prefix name/handle search of active accounts; no email,
-        role, activity or completeness claim. No search by email.
+      operationId: mobilePeopleDirectory
+      description: Public active identity only; no email, role or activity permission from following.
       parameters:
         - { name: q, in: query, required: true, schema: { type: string, minLength: 3, maxLength: 64 } }
-        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20, default: 20 } }
+        - { name: cursor, in: query, required: false, schema: { type: string } }
       responses:
-        '200':
-          description: Bounded incomplete first page only.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PeoplePage' }
+        '200': { description: Paged public identity, content: { application/json: { schema: { $ref: '#/components/schemas/PeoplePage' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
-  /mobile-activity/v1/people/summaries:
+  /mobile-activity/v1/people/resolve:
     post:
-      operationId: mobileViewportSummaries
-      description: >-
-        Read-only bounded batch; all subject IDs and scope authorized before any
-        results. POST is for bounded request size, not a mutation. Atomic denial
-        for hidden/deactivated subjects; no per-ID existence oracle.
-      parameters:
-        - $ref: '#/components/parameters/Period'
-        - $ref: '#/components/parameters/Scope'
+      operationId: mobileResolveBookmarkedPeople
+      description: Identity-only cold-start resolution; omit deleted/hidden IDs without old name, role or activity.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: array
-              minItems: 1
-              maxItems: 5
-              uniqueItems: true
-              items: { type: string, format: uuid }
+              type: object
+              additionalProperties: false
+              required: [subject_ids]
+              properties:
+                subject_ids: { type: array, minItems: 1, maxItems: 20, uniqueItems: true, items: { type: string, format: uuid } }
       responses:
-        '200':
-          description: Only authorized subjects in request order; readings may be unavailable.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/SummaryBatch' }
+        '200': { description: Visible identity subset, content: { application/json: { schema: { $ref: '#/components/schemas/PeoplePage' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /mobile-activity/v1/people/summaries:
+    post:
+      operationId: mobilePairedViewport
+      description: >-
+        Maintainer-only paired Author/User readings for a bounded subject viewport.
+        Both scopes for one subject have identical server-pinned window bounds.
+        A window_anchor may be reused for subsequent capped batches under the
+        same viewer, project and period; not an arbitrary-time filter. It pins
+        time only, not global evidence generation. Expiry/project/viewer changes
+        return stale_window; affected subject/scope revision changes return
+        stale_cursor, without invalidating unrelated subjects.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PairedRequest' }
+      responses:
+        '200': { description: Bounded paired readings, content: { application/json: { schema: { $ref: '#/components/schemas/PairedBatch' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Restricted' }
-        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Stale' }
+        '429': { description: Rate limited }
   /mobile-activity/v1/people/{subject_id}/summary:
     get:
-      operationId: personActivitySummary
+      operationId: mobilePersonScopeSummary
       description: >-
-        Self user activity, or trace-authorized admin/maintainer user and author
-        activity subject to trace privacy. Following and original authorship confer
-        no telemetry permission. No raw session identifiers or transcripts.
+        Self User or trace-privileged maintainer Author/User. Reauthorize each
+        request. Author general sessions are redacted unavailable; User sessions
+        are a separate prompted-root measure. Caller cannot select arbitrary time.
       parameters:
-        - $ref: '#/components/parameters/Subject'
-        - $ref: '#/components/parameters/Period'
-        - $ref: '#/components/parameters/Scope'
+        - { $ref: '#/components/parameters/Subject' }
+        - { $ref: '#/components/parameters/Period' }
+        - { $ref: '#/components/parameters/Scope' }
+        - { $ref: '#/components/parameters/WindowAnchor' }
       responses:
-        '200':
-          description: Permission-scoped summary including separately authorized general sessions.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PersonSummary'
+        '200': { description: One scope, content: { application/json: { schema: { $ref: '#/components/schemas/PersonSummary' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Restricted' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Stale' }
   /mobile-activity/v1/people/{subject_id}/{scope}/components:
     get:
-      operationId: mobileSubjectComponents
+      operationId: mobileComponentReachPage
       description: >-
-        Subject/scope authorization is mandatory. Only source-revalidated,
-        verified Pi MCP call observations can appear, as partial lower bounds.
-        The bounded first slice is incomplete; no unstable page cursor.
+        Subject/scope/window-bound authorized rows sorted by distinct root reach,
+        then stable component ID. Rows may overlap; never sum them into the union.
+        A cursor must reach a last page despite unrelated writes or this endpoint
+        must report complete=false and cannot pass full Gate 2.
       parameters:
-        - $ref: '#/components/parameters/Subject'
-        - { name: scope, in: path, required: true, schema: { type: string, enum: [user, author] } }
-        - $ref: '#/components/parameters/Period'
+        - { $ref: '#/components/parameters/Subject' }
+        - { $ref: '#/components/parameters/ScopePath' }
+        - { $ref: '#/components/parameters/Period' }
+        - { $ref: '#/components/parameters/WindowAnchorRequired' }
+        - { $ref: '#/components/parameters/ExpectedRevision' }
+        - { name: cursor, in: query, required: false, schema: { type: string } }
       responses:
-        '200':
-          description: Bounded partial verified component slice, or empty when unqualified.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ComponentPage' }
+        '200': { description: Scoped overlapping rows, content: { application/json: { schema: { $ref: '#/components/schemas/ComponentPage' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Restricted' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Stale' }
   /mobile-activity/v1/people/{subject_id}/{scope}/components/{kind}/{component_id}:
     get:
-      operationId: mobileSubjectComponentDetail
+      operationId: mobileScopedComponentDetail
       description: >-
-        Never authorize by bare component ID. A detail needs the same subject,
-        scope, period, revalidated evidence and current listing visibility;
-        absent/private/unqualified cases are indistinguishable (404).
+        Recheck viewer/subject/scope, current visibility, generation and listing
+        membership. Author requires original submitter plus approval AT event time;
+        independently authorized private/pending self User use does not require
+        public approval. Direct component ID confers no access.
       parameters:
-        - $ref: '#/components/parameters/Subject'
-        - { name: scope, in: path, required: true, schema: { type: string, enum: [user, author] } }
+        - { $ref: '#/components/parameters/Subject' }
+        - { $ref: '#/components/parameters/ScopePath' }
+        - { $ref: '#/components/parameters/Period' }
+        - { $ref: '#/components/parameters/WindowAnchorRequired' }
+        - { $ref: '#/components/parameters/ExpectedRevision' }
         - { name: kind, in: path, required: true, schema: { type: string, enum: [mcp, skill, hook] } }
         - { name: component_id, in: path, required: true, schema: { type: string, format: uuid } }
-        - $ref: '#/components/parameters/Period'
       responses:
-        '200':
-          description: Authorized partial typed detail.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ComponentDetail' }
+        '200': { description: Qualified scoped detail, content: { application/json: { schema: { $ref: '#/components/schemas/ComponentDetail' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Restricted' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Stale' }
   /mobile-activity/v1/published:
     get:
       operationId: mobilePublishedByMe
-      description: >-
-        Bounded visible approved current listings with prospectively captured
-        original author and approval transition. Transferred listings remain
-        attributed to the original submitter; unprovable historical transfers
-        are excluded. This is not a component-use reading.
+      description: Paged currently visible approved original submissions, not activity or a permission grant.
       parameters:
-        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20, default: 20 } }
+        - { name: cursor, in: query, required: false, schema: { type: string } }
       responses:
-        '200':
-          description: Incomplete bounded first slice, no unstable cursor.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PublishedPage' }
+        '200': { description: Published by original author, content: { application/json: { schema: { $ref: '#/components/schemas/PublishedPage' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
   /mobile-activity/v1/platform/overview:
     get:
-      operationId: platformActivityOverview
+      operationId: mobilePlatformOverview
       description: >-
-        Trace-authorized admin/maintainer only when security.trace_privacy allows
-        platform access. Fixed server-anchored UTC day windows; no user, project,
-        harness, component or arbitrary-time filters. No cross-user data for ordinary
-        mobile accounts. Count distinct active account IDs and distinct prompted
-        logical roots independently, never sums of per-person readings. This does
-        not measure all real-world usage or component invocation.
+        Trace-privileged viewer only. Completed UTC-day window, no subject or
+        arbitrary-time filter. Distinct non-deleted active accounts and prompted
+        root runs independently counted, not summed from cards or component calls.
+        Suppress BOTH below ten accounts or unqualified source with identical
+        fully redacted nulls; timing must not distinguish suppressed cohorts.
       parameters:
-        - $ref: '#/components/parameters/Period'
+        - { $ref: '#/components/parameters/Period' }
       responses:
-        '200':
-          description: Privacy-screened platform aggregate.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PlatformOverview'
+        '200': { description: Privacy-screened independent platform context, content: { application/json: { schema: { $ref: '#/components/schemas/PlatformOverview' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Restricted' }
 components:
@@ -278,30 +239,38 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Audience- and scope-limited, read-only mobile credential; never a full account JWT.
+      description: >-
+        Centrally enforced read-only mobile audience/scope, including REST, GraphQL
+        and WebSocket denial of unrelated routes; refresh keeps scope and logout
+        revokes only this phone. Device/SSO issuance DTOs remain a Gate 0 agreement
+        with the separate unmerged scoped-auth branch, not a shipped flow.
   parameters:
-    Subject:
-      name: subject_id
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    Scope:
-      name: scope
+    Subject: { name: subject_id, in: path, required: true, schema: { type: string, format: uuid } }
+    Scope: { name: scope, in: query, required: true, schema: { type: string, enum: [author, user] } }
+    ScopePath: { name: scope, in: path, required: true, schema: { type: string, enum: [author, user] } }
+    Period: { name: period, in: query, required: true, schema: { type: string, enum: [1w, 1m, 3m] } }
+    WindowAnchor:
+      name: window_anchor
+      in: query
+      required: false
+      schema: { type: string, maxLength: 512 }
+      description: Omit for fresh summary, reuse a server-issued paired window only; no client-selected timestamp.
+    WindowAnchorRequired:
+      name: window_anchor
       in: query
       required: true
-      schema: { type: string, enum: [user, author] }
-    Period:
-      name: period
+      schema: { type: string, maxLength: 512 }
+    ExpectedRevision:
+      name: expected_revision
       in: query
       required: true
-      schema: { type: string, enum: [1w, 1m, 3m] }
+      schema: { type: string, maxLength: 512 }
+      description: Card subject/scope revision for first page/detail; mismatch returns 409, never silently switches evidence.
   responses:
-    Unauthorized:
-      description: Missing or expired credential.
-    Restricted:
-      description: Permission denied; no alternate total, coverage, or listing hint.
-    NotFound:
-      description: Subject not visible; indistinguishable from absent subject.
+    Unauthorized: { description: Missing or expired scoped credential; never fall back to demo. }
+    Restricted: { description: Bodyless access denied; no subject/listing existence, cohort, reason or source metadata hint. }
+    NotFound: { description: Not visible, indistinguishable from absent. }
+    Stale: { description: stale_window or stale_cursor; discard related pages/card and refetch. }
   schemas:
     DeviceChallenge:
       type: object
@@ -340,6 +309,175 @@ components:
         refresh_token: { type: string }
         token_type: { type: string, const: bearer }
         expires_in: { type: integer, minimum: 1 }
+    Coverage:
+      type: object
+      additionalProperties: false
+      required: [eligible_sessions, source_start, source_end, supported_harnesses, supported_kinds, projection]
+      properties:
+        eligible_sessions: { type: [integer, 'null'], minimum: 0 }
+        source_start: { type: [string, 'null'], format: date-time }
+        source_end: { type: [string, 'null'], format: date-time }
+        supported_harnesses: { type: array, maxItems: 32, items: { type: string } }
+        supported_kinds: { type: array, maxItems: 3, items: { type: string, enum: [mcp_calls, confirmed_skill_loads, recorded_hook_runs] } }
+        projection: { type: string, enum: [complete, partial, pending, unavailable] }
+    Reading:
+      oneOf:
+        - { $ref: '#/components/schemas/SupportedReading' }
+        - { $ref: '#/components/schemas/PartialReading' }
+        - { $ref: '#/components/schemas/NotRecordedReading' }
+      description: >-
+        Partial is an observed lower bound spoken 'N observed traces · Partial coverage'.
+        Supported zero requires complete declared cohort including zero-positive
+        sessions. Restricted scopes return bodyless HTTP 403 ONLY. No
+        installed-only/capability-only eligibility.
+    ReadingBase:
+      type: object
+      additionalProperties: false
+      required: [value, status, reasons, coverage]
+      properties:
+        value: { type: [integer, 'null'], minimum: 0, maximum: 9007199254740991 }
+        status: { type: string, enum: [supported, partial, not_recorded] }
+        reasons: { type: array, maxItems: 16, items: { type: string } }
+        coverage: { $ref: '#/components/schemas/Coverage' }
+    SupportedReading:
+      allOf:
+        - { $ref: '#/components/schemas/ReadingBase' }
+        - { type: object, properties: { status: { const: supported }, value: { type: integer }, coverage: { type: object, properties: { projection: { const: complete } } } } }
+    PartialReading:
+      allOf:
+        - { $ref: '#/components/schemas/ReadingBase' }
+        - { type: object, properties: { status: { const: partial }, value: { type: integer }, coverage: { type: object, properties: { projection: { const: partial } } } } }
+    NotRecordedReading:
+      allOf:
+        - { $ref: '#/components/schemas/ReadingBase' }
+        - { type: object, properties: { status: { const: not_recorded }, value: { type: 'null' }, coverage: { type: object, properties: { projection: { enum: [pending, unavailable] } } } } }
+    RedactedUnavailable:
+      allOf:
+        - { $ref: '#/components/schemas/Reading' }
+        - type: object
+          properties:
+            value: { type: 'null' }
+            status: { const: not_recorded }
+            reasons: { const: [unavailable] }
+            coverage:
+              type: object
+              properties:
+                eligible_sessions: { type: 'null' }
+                source_start: { type: 'null' }
+                source_end: { type: 'null' }
+                supported_harnesses: { const: [] }
+                supported_kinds: { const: [] }
+                projection: { const: unavailable }
+      description: Shared neutral null for author general sessions and suppressed platform cohort.
+    Window:
+      type: object
+      additionalProperties: false
+      required: [start, end, as_of, timezone, period]
+      properties:
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        as_of: { type: string, format: date-time }
+        timezone: { const: UTC }
+        period: { type: string, enum: [1w, 1m, 3m] }
+      description: Half-open event-time 7/30/90-day bounds; platform ends at completed UTC midnight.
+    Capabilities:
+      type: object
+      additionalProperties: false
+      required: [contract, server_id, project_id, viewer_id, trace_headlines, supported_kinds, platform_overview]
+      properties:
+        contract: { const: mobile-activity-v1 }
+        server_id: { type: string, format: uuid }
+        project_id: { type: string }
+        viewer_id: { type: string, format: uuid }
+        trace_headlines: { type: boolean, description: MUST remain false until later running-instance Gate 1 qualification. }
+        supported_kinds: { type: array, maxItems: 3, items: { type: string, enum: [mcp_calls, confirmed_skill_loads, recorded_hook_runs] } }
+        platform_overview: { type: boolean }
+    PairedRequest:
+      type: object
+      additionalProperties: false
+      required: [subject_ids, period]
+      properties:
+        subject_ids: { type: array, minItems: 1, maxItems: 12, uniqueItems: true, items: { type: string, format: uuid } }
+        period: { type: string, enum: [1w, 1m, 3m] }
+        window_anchor: { type: string, maxLength: 512 }
+    PairedBatch:
+      type: object
+      additionalProperties: false
+      required: [window, window_anchor, items]
+      properties:
+        window: { $ref: '#/components/schemas/Window' }
+        window_anchor: { type: string, maxLength: 512 }
+        items: { type: array, maxItems: 12, items: { $ref: '#/components/schemas/PairedPerson' } }
+      description: >-
+        One viewer/project/period window across batches; anchor pins time, NOT a
+        global evidence revision. Each subject/scope revision invalidates only
+        its own pages; unrelated writes cannot starve other cursors.
+    PairedPerson:
+      type: object
+      additionalProperties: false
+      required: [subject_id, author_revision, user_revision, author_usage, user_usage]
+      properties:
+        subject_id: { type: string, format: uuid }
+        author_revision: { type: string }
+        user_revision: { type: string }
+        author_usage: { $ref: '#/components/schemas/Reading' }
+        user_usage: { $ref: '#/components/schemas/Reading' }
+    PersonSummary:
+      type: object
+      additionalProperties: false
+      required: [subject_id, scope, window, window_anchor, revision, component_trace_union, mcp_calls, confirmed_skill_loads, recorded_hook_runs, active_days_utc, general_sessions]
+      properties:
+        subject_id: { type: string, format: uuid }
+        scope: { type: string, enum: [author, user] }
+        window: { $ref: '#/components/schemas/Window' }
+        window_anchor: { type: string }
+        revision: { type: string }
+        component_trace_union: { $ref: '#/components/schemas/Reading' }
+        mcp_calls: { $ref: '#/components/schemas/Reading' }
+        confirmed_skill_loads: { $ref: '#/components/schemas/Reading' }
+        recorded_hook_runs: { $ref: '#/components/schemas/Reading' }
+        active_days_utc: { $ref: '#/components/schemas/Reading' }
+        general_sessions: { $ref: '#/components/schemas/Reading' }
+      description: >-
+        Author general_sessions MUST be RedactedUnavailable; user sessions
+        require independently verified root prompt at/before in-window activity.
+    ComponentObservation:
+      type: object
+      additionalProperties: false
+      required: [kind, component_id, name, author, component_traces, mcp_calls, confirmed_skill_loads, recorded_hook_runs]
+      properties:
+        kind: { type: string, enum: [mcp, skill, hook] }
+        component_id: { type: string, format: uuid }
+        name: { type: string }
+        author: { $ref: '#/components/schemas/PublicPerson' }
+        component_traces: { $ref: '#/components/schemas/Reading' }
+        mcp_calls: { $ref: '#/components/schemas/Reading' }
+        confirmed_skill_loads: { $ref: '#/components/schemas/Reading' }
+        recorded_hook_runs: { $ref: '#/components/schemas/Reading' }
+    ComponentPage:
+      type: object
+      additionalProperties: false
+      required: [subject_id, scope, window, window_anchor, revision, items, complete, next_cursor]
+      properties:
+        subject_id: { type: string, format: uuid }
+        scope: { type: string, enum: [author, user] }
+        window: { $ref: '#/components/schemas/Window' }
+        window_anchor: { type: string }
+        revision: { type: string }
+        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/ComponentObservation' } }
+        complete: { type: boolean }
+        next_cursor: { type: [string, 'null'] }
+    ComponentDetail:
+      type: object
+      additionalProperties: false
+      required: [subject_id, scope, window, window_anchor, revision, component]
+      properties:
+        subject_id: { type: string, format: uuid }
+        scope: { type: string, enum: [author, user] }
+        window: { $ref: '#/components/schemas/Window' }
+        window_anchor: { type: string }
+        revision: { type: string }
+        component: { $ref: '#/components/schemas/ComponentObservation' }
     PublicPerson:
       type: object
       additionalProperties: false
@@ -351,180 +489,28 @@ components:
     PeoplePage:
       type: object
       additionalProperties: false
-      required: [items, complete]
+      required: [items, complete, next_cursor]
       properties:
         items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/PublicPerson' } }
-        complete: { type: boolean, const: false }
-    SummaryBatch:
-      type: object
-      additionalProperties: false
-      required: [items]
-      properties:
-        items: { type: array, maxItems: 5, items: { $ref: '#/components/schemas/PersonSummary' } }
-    ComponentObservation:
-      type: object
-      additionalProperties: false
-      required: [kind, component_id, name, mcp_calls, activity_traces, active_days_utc]
-      properties:
-        kind: { type: string, const: mcp }
-        component_id: { type: string, format: uuid }
-        name: { type: string }
-        mcp_calls: { $ref: '#/components/schemas/Reading' }
-        activity_traces: { $ref: '#/components/schemas/Reading' }
-        active_days_utc: { $ref: '#/components/schemas/Reading' }
-    ComponentDetail:
-      type: object
-      additionalProperties: false
-      required: [subject_id, scope, window, revision, component]
-      properties:
-        subject_id: { type: string, format: uuid }
-        scope: { type: string, enum: [user, author] }
-        window: { $ref: '#/components/schemas/Window' }
-        revision: { type: string }
-        component: { $ref: '#/components/schemas/ComponentObservation' }
-    ComponentPage:
-      type: object
-      additionalProperties: false
-      required: [subject_id, scope, window, revision, items, complete]
-      properties:
-        subject_id: { type: string, format: uuid }
-        scope: { type: string, enum: [user, author] }
-        window: { $ref: '#/components/schemas/Window' }
-        revision: { type: string }
-        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/ComponentObservation' } }
-        complete: { type: boolean, const: false }
+        complete: { type: boolean }
+        next_cursor: { type: [string, 'null'] }
     PublishedItem:
       type: object
       additionalProperties: false
-      required: [kind, id, name, namespace, slug, is_current_owner]
+      required: [kind, id, name, is_current_owner]
       properties:
         kind: { type: string, enum: [mcp, skill, hook, prompt, sandbox, agent] }
         id: { type: string, format: uuid }
         name: { type: string }
-        namespace: { type: string }
-        slug: { type: string }
         is_current_owner: { type: boolean }
     PublishedPage:
       type: object
       additionalProperties: false
-      required: [items, complete]
+      required: [items, complete, next_cursor]
       properties:
         items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/PublishedItem' } }
-        complete: { type: boolean, const: false }
-    Reading:
-      type: object
-      additionalProperties: false
-      required: [value, status, reasons, coverage]
-      properties:
-        value: { type: [integer, 'null'], minimum: 0 }
-        status: { type: string, enum: [supported, partial, not_recorded, restricted] }
-        reasons:
-          type: array
-          items: { type: string }
-        coverage:
-          type: object
-          additionalProperties: false
-          required: [eligible_sessions, source_start, source_end, supported_harnesses, projection]
-          properties:
-            eligible_sessions: { type: [integer, 'null'], minimum: 0 }
-            source_start: { type: [string, 'null'], format: date-time }
-            source_end: { type: [string, 'null'], format: date-time }
-            supported_harnesses:
-              type: array
-              items: { type: string }
-            projection: { type: string, enum: [complete, partial, pending, unavailable] }
-      description: >-
-        Null means unavailable, never zero. Numeric zero means zero observed in a
-        declared eligible cohort only; partial zero must be labelled 0 observed.
-        Missing source, unsupported client, invalid event time, purges and incomplete
-        retention cannot be advertised as full-window measured zero.
-    PrivacySafeUnavailableReading:
-      type: object
-      additionalProperties: false
-      required: [value, status, reasons, coverage]
-      properties:
-        value: { type: 'null' }
-        status: { type: string, const: not_recorded }
-        reasons:
-          type: array
-          prefixItems: [{ type: string, const: unavailable }]
-          minItems: 1
-          maxItems: 1
-        coverage:
-          type: object
-          additionalProperties: false
-          required: [eligible_sessions, source_start, source_end, supported_harnesses, projection]
-          properties:
-            eligible_sessions: { type: 'null' }
-            source_start: { type: 'null' }
-            source_end: { type: 'null' }
-            supported_harnesses: { type: array, maxItems: 0 }
-            projection: { type: string, const: unavailable }
-      description: >-
-        Shared redacted null reading for a suppressed platform cohort and
-        author-scope general sessions. No denominator, supported-harness set,
-        retention horizon, reason distinguishing a small cohort from purged
-        history, or hidden-listing-specific metadata may be returned.
-    Window:
-      type: object
-      additionalProperties: false
-      required: [start, end, as_of, timezone, period]
-      properties:
-        start: { type: string, format: date-time }
-        end: { type: string, format: date-time }
-        as_of: { type: string, format: date-time }
-        timezone: { type: string, const: UTC }
-        period: { type: string, enum: [1w, 1m, 3m] }
-      description: >-
-        Half-open [start,end) by event time. Person windows are server-pinned.
-        Platform windows end at a fixed completed UTC day boundary to limit
-        time-differencing. 1w/1m/3m are 7/30/90 calendar days.
-    Capabilities:
-      type: object
-      additionalProperties: false
-      required: [contract, server_id, project_id, viewer_id, kinds, platform_overview]
-      properties:
-        contract: { type: string, const: mobile-activity-v1 }
-        server_id: { type: string }
-        project_id: { type: string }
-        viewer_id: { type: string, format: uuid }
-        kinds:
-          type: array
-          items: { type: string, enum: [mcp_calls, confirmed_skill_loads, recorded_hook_runs] }
-        platform_overview: { type: boolean, description: 'Viewer is trace-authorized; not evidence availability.' }
-    PersonSummary:
-      type: object
-      additionalProperties: false
-      required: [subject_id, scope, window, revision, mcp_calls, confirmed_skill_loads, recorded_hook_runs, activity_traces, active_days_utc, general_sessions]
-      properties:
-        subject_id: { type: string, format: uuid }
-        scope: { type: string, enum: [user, author] }
-        window: { $ref: '#/components/schemas/Window' }
-        revision: { type: string, description: 'Opaque freshness marker; reauthorize every read.' }
-        mcp_calls: { $ref: '#/components/schemas/Reading' }
-        confirmed_skill_loads: { $ref: '#/components/schemas/Reading' }
-        recorded_hook_runs: { $ref: '#/components/schemas/Reading' }
-        activity_traces: { $ref: '#/components/schemas/Reading' }
-        active_days_utc: { $ref: '#/components/schemas/Reading' }
-        general_sessions: { $ref: '#/components/schemas/Reading' }
-      allOf:
-        - if:
-            properties:
-              scope: { const: author }
-          then:
-            properties:
-              general_sessions: { $ref: '#/components/schemas/PrivacySafeUnavailableReading' }
-      description: >-
-        General sessions are prompted, logical-root sessions from retained,
-        uploader-bound upgraded Pi sources with in-window root or verified
-        same-project/user/harness linked-child activity. Component
-        traces are a separate union of roots with attributable typed events.
-        Child activity contributes to its verified prompted root without
-        multiplying logical roots; component-call traces also require an
-        independently verified preceding prompt. Unresolved parent chains are unavailable,
-        not silently merged by bare session ID. No general sessions in author scope;
-        that field MUST equal PrivacySafeUnavailableReading in author scope;
-        no denominator or source horizon may be returned in that field.
+        complete: { type: boolean }
+        next_cursor: { type: [string, 'null'] }
     PlatformOverview:
       type: object
       additionalProperties: false
@@ -534,39 +520,7 @@ components:
         revision: { type: string }
         active_accounts: { $ref: '#/components/schemas/Reading' }
         prompted_root_sessions: { $ref: '#/components/schemas/Reading' }
-      allOf:
-        - if:
-            properties:
-              active_accounts:
-                properties:
-                  value: { type: 'null' }
-          then:
-            properties:
-              active_accounts: { $ref: '#/components/schemas/PrivacySafeUnavailableReading' }
-              prompted_root_sessions: { $ref: '#/components/schemas/PrivacySafeUnavailableReading' }
-        - if:
-            properties:
-              prompted_root_sessions:
-                properties:
-                  value: { type: 'null' }
-          then:
-            properties:
-              active_accounts: { $ref: '#/components/schemas/PrivacySafeUnavailableReading' }
-              prompted_root_sessions: { $ref: '#/components/schemas/PrivacySafeUnavailableReading' }
       description: >-
-        Active accounts are DISTINCT current, non-deleted, non-deactivated account
-        IDs with at least one qualifying prompted root in the window. Roots use
-        the verified scoped parent chain; do not sum accounts or roots over
-        component/person reports. Suppress BOTH readings (null/not_recorded,
-        common non-identifying reason) whenever the distinct qualifying account
-        cohort is under 10, even if root count is higher. No per-day buckets,
-        arbitrary end, identifiers or fine-grained filters. Counts exclude erased
-        and deactivated accounts; erasure revokes derived evidence and replay
-        cannot restore it. Retention/purge and unsupported/unlinked sessions
-        make coverage partial or unknown, not measured zero. This coarse gate
-        does not authorize public release or eliminate all differencing risk;
-        only trace-privileged viewers can see it. If either reading is suppressed
-        or source coverage cannot establish a truthful count, both MUST equal
-        PrivacySafeUnavailableReading with the same neutral `unavailable`
-        reason and fully redacted coverage; do not distinguish subthreshold,
-        erased, unsupported or unobserved platform cohorts on this route.
+        If fewer than 10 distinct eligible accounts OR either reading cannot be
+        honestly counted, BOTH are identical RedactedUnavailable. No metadata
+        or suppressed-cohort timing distinguishers and no public permission.
