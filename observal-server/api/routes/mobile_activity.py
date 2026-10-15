@@ -8,12 +8,14 @@ projection is available; registration or current status alone is not evidence.
 """
 
 import hashlib
+import hmac
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
 import jwt
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, select, text
@@ -23,7 +25,7 @@ import services.dynamic_settings as ds
 from api.deps import get_db, get_mobile_user
 from models.user import User, UserRole
 from observal_shared.migration.constants import DEFAULT_PROJECT_ID
-from services.crypto import sign_token, verify_token
+from services.crypto import get_key_manager, sign_token, verify_token
 from services.mobile_activity_query import qualified_zero_subset, trace_component_page, trace_pair_batch, trace_union
 from services.mobile_general_sessions import prompted_roots
 from services.mobile_read_control import readable
@@ -234,17 +236,19 @@ async def _scope_revision(db: AsyncSession, viewer: User, subject: UUID, scope: 
         )
         or 0
     )
-    # Revision is opaque to the phone. Sign a fixed-size fingerprint of ALL
-    # viewer/scope/window/epoch dimensions, not a long JWT containing each
-    # field; the latter exceeded the accepted 512-character query bound on
-    # real ES256 keys and made every detail/page return HTTP 422.
+    # Revision is opaque to the phone. MAC ALL dimensions with the current
+    # server signing key: ECDSA signatures are randomized, so re-signing the
+    # same claims on a detail request never equals the paired-card revision.
+    # A fixed-size MAC fits the accepted query bound and cannot be guessed
+    # without the server key. Key rotation correctly invalidates old cursors.
     fingerprint = hashlib.sha256(
         json.dumps(
             [str(viewer.id), str(subject), scope, str(DEFAULT_PROJECT_ID), anchor, generation, epoch],
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
-    return sign_token({"purpose": "mobile-subject-revision-v1", "fingerprint": fingerprint})
+    private_key = get_key_manager().get_private_key().private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+    return "r1_" + hmac.new(private_key, fingerprint.encode(), hashlib.sha256).hexdigest()
 
 
 def _can_trace(viewer: User, trace_privacy: bool) -> bool:

@@ -105,7 +105,9 @@ async def test_isolated_https_two_scopes_two_components_one_child_root():
         page = await client.get(detail_base, headers=admin, params=query)
         assert page.status_code == 200, (
             page.status_code,
-            [(item.get("loc"), item.get("type")) for item in page.json().get("detail", [])],
+            [(item.get("loc"), item.get("type")) for item in page.json()["detail"]]
+            if isinstance(page.json().get("detail"), list)
+            else page.json().get("detail"),
             len(query["window_anchor"]),
             len(query["expected_revision"]),
         )

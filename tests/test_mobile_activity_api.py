@@ -66,11 +66,17 @@ async def test_signed_revision_and_component_keyset_fit_wire_bounds_and_bind_sco
     init_key_manager(key_dir=str(tmp_path / "keys"), key_password=None)
     viewer = SimpleNamespace(id=uuid.uuid4())
     subject = uuid.uuid4()
-    db = SimpleNamespace(scalar=AsyncMock(side_effect=[10**20, 10**20, 10**20, 10**20]))
+    db = SimpleNamespace(scalar=AsyncMock(side_effect=[10**20] * 6))
     anchor = "x" * 413
     author = await activity._scope_revision(db, viewer, subject, "author", anchor)
+    same_author = await activity._scope_revision(db, viewer, subject, "author", anchor)
     user = await activity._scope_revision(db, viewer, subject, "user", anchor)
-    assert author != user and len(author) <= 512 and len(user) <= 512
+    assert author == same_author and author != user
+    other_viewer_db = SimpleNamespace(scalar=AsyncMock(side_effect=[10**20, 10**20]))
+    assert author != await activity._scope_revision(
+        other_viewer_db, SimpleNamespace(id=uuid.uuid4()), subject, "author", anchor
+    )
+    assert len(author) <= 512 and len(user) <= 512
     binding = activity._page_binding(viewer, subject, "author", anchor, author)
     cursor = activity._cursor({**binding, "last_roots": 10000, "last_id": str(uuid.uuid4())})
     assert len(cursor) <= 512
