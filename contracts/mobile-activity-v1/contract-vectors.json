@@ -1,6 +1,17 @@
 {
   "synthetic_draft_only": true,
   "not_current_or_live": true,
+  "isolated_test_capabilities": {
+    "contract": "mobile-activity-v1",
+    "server_id": "10000000-0000-4000-8000-000000000001",
+    "project_id": "synthetic-disposable-only",
+    "viewer_id": "10000000-0000-4000-8000-000000000003",
+    "trace_headlines": false,
+    "synthetic_test_cohort": true,
+    "supported_kinds": ["mcp_calls"],
+    "platform_overview": true
+  },
+  "never_live_or_supported_due_to_this_flag": true,
   "synthetic_mobile_grant": {
     "device_challenge": {"device_code": "synthetic-do-not-redeem", "user_code": "ABCD-EFGH", "verification_uri": "https://browser.example.invalid/device", "verification_uri_complete": "https://browser.example.invalid/device?code=ABCD-EFGH", "verification_origins": ["https://browser.example.invalid"], "expires_in": 600, "interval": 5},
     "device_token": {"access_token": "synthetic-not-a-jwt", "refresh_token": "synthetic-not-a-jwt", "token_type": "bearer", "client_id": "observal-mobile", "audience": "observal-mobile-activity-v1", "scope": "mobile:read", "expires_in": 3600, "user": {"id": "10000000-0000-4000-8000-000000000003", "email": "example@example.invalid", "name": "Example", "role": "user"}},
@@ -54,7 +65,7 @@
         "items": [
           {"subject_id":"10000000-0000-4000-8000-000000000001","author_revision":"restricted","user_revision":"restricted","author_usage":{"status":"restricted"},"user_usage":{"status":"restricted"}},
           {"subject_id":"10000000-0000-4000-8000-000000000002","author_revision":"restricted","user_revision":"restricted","author_usage":{"status":"restricted"},"user_usage":{"status":"restricted"}},
-          {"subject_id":"10000000-0000-4000-8000-000000000003","author_revision":"restricted","user_revision":"U3","author_usage":{"status":"restricted"},"user_usage":{"value":4000,"status":"partial","reasons":["incomplete_coverage"],"coverage":{"eligible_sessions":4000,"source_start":null,"source_end":null,"supported_harnesses":["verified-synthetic"],"supported_kinds":["mcp_calls"],"projection":"partial"}}},
+          {"subject_id":"10000000-0000-4000-8000-000000000003","author_revision":"restricted","user_revision":"U3","author_usage":{"status":"restricted"},"user_usage":{"value":4000,"status":"partial","reasons":["incomplete_coverage"],"coverage":{"eligible_sessions":null,"source_start":null,"source_end":null,"supported_harnesses":["verified-synthetic"],"supported_kinds":["mcp_calls"],"projection":"partial"}}},
           {"subject_id":"10000000-0000-4000-8000-000000000004","author_revision":"restricted","user_revision":"restricted","author_usage":{"status":"restricted"},"user_usage":{"status":"restricted"}},
           {"subject_id":"10000000-0000-4000-8000-000000000005","author_revision":"restricted","user_revision":"restricted","author_usage":{"status":"restricted"},"user_usage":{"status":"restricted"}},
           {"subject_id":"10000000-0000-4000-8000-000000000006","author_revision":"restricted","user_revision":"restricted","author_usage":{"status":"restricted"},"user_usage":{"status":"restricted"}},

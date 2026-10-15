@@ -3,7 +3,7 @@
 openapi: 3.1.0
 info:
   title: Observal mobile trace-first activity (backend negotiation ONLY)
-  version: 1.1.0-draft
+  version: 1.2.0-draft
   description: >-
     Backend-owned trace-first replacement for the UNDEPLOYED calls-oriented v1
     draft. Some read-only v1 paths exist in a separate gated branch, but do not
@@ -425,13 +425,20 @@ components:
     Capabilities:
       type: object
       additionalProperties: false
-      required: [contract, server_id, project_id, viewer_id, trace_headlines, supported_kinds, platform_overview]
+      required: [contract, server_id, project_id, viewer_id, trace_headlines, synthetic_test_cohort, supported_kinds, platform_overview]
       properties:
         contract: { const: mobile-activity-v1 }
         server_id: { type: string, format: uuid }
         project_id: { type: string }
         viewer_id: { type: string, format: uuid }
         trace_headlines: { type: boolean, description: MUST remain false until later running-instance Gate 1 qualification. }
+        synthetic_test_cohort:
+          type: boolean
+          description: >-
+            Separate isolated-only synthetic HTTP/UI test, NOT live traces. True only
+            for the exact allowlisted server identity and viewer, explicit disposable
+            test acknowledgement, mobile auth and an unblocked isolated read gate.
+            Never interpret it as production origin attestation or Gate 1 approval.
         supported_kinds: { type: array, maxItems: 3, items: { type: string, enum: [mcp_calls, confirmed_skill_loads, recorded_hook_runs] } }
         platform_overview: { type: boolean }
     PairedRequest:

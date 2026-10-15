@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Read-only mobile routes must not infer counts from registry presence."""
 
+import json
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,6 +56,89 @@ def app(monkeypatch):
     monkeypatch.setattr(activity, "trace_component_page", AsyncMock(return_value=None))
     monkeypatch.setattr(activity, "prompted_roots", AsyncMock(return_value=None))
     return application, viewer, other, db, enabled
+
+
+@pytest.mark.asyncio
+async def test_published_keyset_pages_use_same_viewer_and_latest_approval(app, monkeypatch):
+    from api.routes import mobile_activity as activity
+
+    api, viewer, _other, db, _enabled = app
+    values = [
+        {"kind": "mcp", "id": uuid.uuid4(), "name": "A", "namespace": "s", "slug": "a", "is_current_owner": True},
+        {"kind": "skill", "id": uuid.uuid4(), "name": "B", "namespace": "s", "slug": "b", "is_current_owner": False},
+    ]
+    monkeypatch.setattr(activity, "sign_token", lambda claims: json.dumps(claims))
+    monkeypatch.setattr(activity, "verify_token", json.loads)
+
+    async def execute(sql, params):
+        assert ":last_kind" in str(sql) or "last_kind" not in params
+        assert "ORDER BY e.recorded_at DESC,e.id DESC" in str(sql)
+        assert "l.is_private = false" in str(sql)
+        assert params["viewer"] == viewer.id
+        after = params.get("last_kind")
+        candidates = [v for v in values if after is None or (v["kind"], v["id"]) > (after, params["last_id"])]
+        return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: candidates[: params["limit"]]))
+
+    db.execute.side_effect = execute
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
+        first = await c.get("/api/v1/mobile-activity/v1/published?limit=1")
+        assert first.status_code == 200, first.text
+        assert_wire("PublishedPage", first.json())
+        assert len(first.json()["items"]) == 1 and not first.json()["complete"]
+        cursor = first.json()["next_cursor"]
+        second = await c.get("/api/v1/mobile-activity/v1/published", params={"limit": 1, "cursor": cursor})
+        assert second.status_code == 200 and second.json()["complete"] and not second.json()["next_cursor"]
+        assert first.json()["items"][0]["id"] != second.json()["items"][0]["id"]
+        forged = json.loads(cursor)
+        forged["sub"] = str(uuid.uuid4())
+        denied = await c.get("/api/v1/mobile-activity/v1/published", params={"limit": 1, "cursor": json.dumps(forged)})
+        assert denied.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblocked_read(app, monkeypatch):
+    from api.routes import mobile_activity as activity
+
+    api, viewer, _other, db, _enabled = app
+    server = uuid.uuid4()
+    db.scalar.return_value = server
+    settings = {
+        "mobile.synthetic_test_ack": "isolated-disposable-synthetic-only-v1",
+        "mobile.synthetic_test_server_id": str(server),
+        "mobile.synthetic_test_viewer_id": str(viewer.id),
+    }
+    monkeypatch.setattr(activity.ds, "get", AsyncMock(side_effect=lambda key: settings.get(key, "")))
+    states = {"mobile.auth_enabled": True, "mobile.synthetic_test_enabled": True}
+    monkeypatch.setattr(activity.ds, "get_bool", AsyncMock(side_effect=lambda key: states.get(key, False)))
+    barrier = AsyncMock(return_value=False)
+    monkeypatch.setattr(activity, "readable", barrier)
+    observed = AsyncMock(return_value={"roots": 1, "calls": 40, "days": 1})
+    monkeypatch.setattr(activity, "trace_union", observed)
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
+        closed = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert closed.json()["synthetic_test_cohort"] is False
+        assert_wire("Capabilities", closed.json())
+        barrier.return_value = True
+        opened = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert opened.json()["synthetic_test_cohort"] is True
+        assert opened.json()["trace_headlines"] is False
+        assert opened.json()["supported_kinds"] == ["mcp_calls"]
+        assert_wire("Capabilities", opened.json())
+        observed.return_value = None
+        missing_source = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert missing_source.json()["synthetic_test_cohort"] is False
+        observed.return_value = {"roots": 1, "calls": 40, "days": 1}
+        settings["mobile.synthetic_test_server_id"] = str(uuid.uuid4())
+        wrong_server = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert wrong_server.json()["synthetic_test_cohort"] is False
+        settings["mobile.synthetic_test_server_id"] = str(server)
+        settings["mobile.synthetic_test_viewer_id"] = str(uuid.uuid4())
+        wrong_viewer = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert wrong_viewer.json()["synthetic_test_cohort"] is False
+        settings["mobile.synthetic_test_viewer_id"] = str(viewer.id)
+        settings["mobile.synthetic_test_ack"] = ""
+        unacknowledged = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert unacknowledged.json()["synthetic_test_cohort"] is False
 
 
 @pytest.mark.asyncio
@@ -120,14 +204,19 @@ async def test_only_self_verified_zero_subset_is_partial_and_other_kinds_remain_
     monkeypatch.setattr(activity, "qualified_zero_subset", zero)
     async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
         own = await c.get(f"/api/v1/mobile-activity/v1/people/{viewer.id}/summary?scope=user&period=1w")
+        paired = await c.post(
+            "/api/v1/mobile-activity/v1/people/summaries", json={"subject_ids": [str(viewer.id)], "period": "1w"}
+        )
         forbidden = await c.get(f"/api/v1/mobile-activity/v1/people/{other.id}/summary?scope=user&period=1w")
     assert own.status_code == 200
     assert own.json()["mcp_calls"]["value"] == 0
     assert own.json()["mcp_calls"]["status"] == "partial"
+    assert own.json()["mcp_calls"]["coverage"]["eligible_sessions"] == 1
+    assert paired.json()["items"][0]["user_usage"]["coverage"]["eligible_sessions"] == 1
     assert own.json()["confirmed_skill_loads"]["value"] is None
     assert own.json()["general_sessions"]["value"] is None
     assert forbidden.status_code == 403 and forbidden.content == b""
-    assert zero.await_count == 1
+    assert zero.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -146,6 +235,7 @@ async def test_only_positive_evidenced_mcp_metrics_can_be_partial(app, monkeypat
     body = response.json()
     assert body["mcp_calls"]["value"] == 40 and body["mcp_calls"]["status"] == "partial"
     assert body["component_trace_union"]["value"] == body["active_days_utc"]["value"] == 1
+    assert body["component_trace_union"]["coverage"]["eligible_sessions"] is None
     assert body["confirmed_skill_loads"]["value"] is None
     assert body["general_sessions"]["value"] is None
 
@@ -227,6 +317,7 @@ async def test_nested_component_wire_and_direct_id_authorization(app, monkeypatc
     assert_wire("ComponentPage", page.json())
     assert_wire("ComponentDetail", detail.json())
     assert page.json()["items"][0] == detail.json()["component"]
+    assert page.json()["items"][0]["component_traces"]["coverage"]["eligible_sessions"] is None
 
 
 @pytest.mark.asyncio
@@ -251,6 +342,7 @@ async def test_paired_author_and_user_are_independent_root_unions_in_one_batch(a
     assert_wire("PairedBatch", body)
     assert body["items"][0]["author_usage"]["value"] == 10000
     assert body["items"][0]["user_usage"]["value"] == 4000
+    assert body["items"][0]["author_usage"]["coverage"]["eligible_sessions"] is None
     assert body["items"][1]["author_usage"]["value"] is None
     assert private.json()["items"][0]["author_usage"] == {"status": "restricted"}
     assert private.json()["items"][0]["user_usage"]["value"] == 4000

@@ -349,6 +349,12 @@ DEFAULTS: dict[str, str] = {
     # Off until subscription isolation and the aggregate-only API are deployed
     # and verified together. Phone credentials must not expose legacy feeds.
     "mobile.auth_enabled": "false",
+    # Deliberately separate from production trace_headlines: explicit isolated
+    # server + viewer + human test acknowledgement only, never default on.
+    "mobile.synthetic_test_enabled": "false",
+    "mobile.synthetic_test_server_id": "",
+    "mobile.synthetic_test_viewer_id": "",
+    "mobile.synthetic_test_ack": "",
     # Registry policy
     "registry.registered_agents_only": "false",
     # Must be enabled only after all old API/worker processes are drained and

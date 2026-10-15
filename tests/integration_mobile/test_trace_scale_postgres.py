@@ -8,10 +8,12 @@ Never run against a shared or production database. No JSONL/source is stored.
 """
 
 import hashlib
+import json
 import os
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
@@ -28,7 +30,8 @@ LAYER = "v2_" + "b" * 64
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_overlap():
+async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_overlap(monkeypatch):
+    from api.routes import mobile_activity as activity
     from database import async_session
     from services.mobile_activity_query import trace_component_page, trace_pair_batch, trace_union
 
@@ -160,6 +163,16 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
         )
         assert forty == 40  # Forty calls are exactly one distinct root.
         print("scale_union_verified", author, own, flush=True)
+        monkeypatch.setattr(activity, "sign_token", lambda claims: json.dumps(claims))
+        monkeypatch.setattr(activity, "verify_token", json.loads)
+        viewer = SimpleNamespace(id=AUTHOR)
+        published_first = await activity.published_by_me(limit=1, cursor=None, db=db, viewer=viewer)
+        assert len(published_first.items) == 1 and not published_first.complete and published_first.next_cursor
+        published_last = await activity.published_by_me(
+            limit=1, cursor=published_first.next_cursor, db=db, viewer=viewer
+        )
+        assert len(published_last.items) == 1 and published_last.complete and published_last.next_cursor is None
+        assert {published_first.items[0].id, published_last.items[0].id} == {A, B}
         page = await trace_component_page(db, AUTHOR, "author", "default", start, end, limit=1)
         print("scale_first_page", page, flush=True)
         assert page and len(page) == 2
@@ -267,6 +280,8 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
         )
         assert new_review_epoch > review_epoch, (review_epoch, new_review_epoch)  # Version and review-event triggers.
         assert await trace_component_page(db, AUTHOR, "author", "default", start, end, component=B) == []
+        published_now = await activity.published_by_me(limit=20, cursor=None, db=db, viewer=viewer)
+        assert {item.id for item in published_now.items} == {A} and published_now.complete
         await db.execute(text("UPDATE mcp_versions SET status='approved' WHERE id=:id"), {"id": VB})
         before = await db.scalar(
             text(

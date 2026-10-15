@@ -86,6 +86,7 @@ class Capabilities(BaseModel):
     supported_kinds: list[str] = Field(default_factory=list)
     platform_overview: bool
     trace_headlines: Literal[False] = False
+    synthetic_test_cohort: bool = False
 
 
 class PublicPerson(BaseModel):
@@ -164,14 +165,13 @@ class PublishedItem(BaseModel):
     kind: str
     id: UUID
     name: str
-    namespace: str
-    slug: str
     is_current_owner: bool
 
 
 class PublishedPage(BaseModel):
     items: list[PublishedItem]
-    complete: Literal[False] = False  # Bounded first slice only, no unsafe offset cursor.
+    complete: bool
+    next_cursor: str | None = None
 
 
 def _window(period: Period, *, platform: bool = False) -> Window:
@@ -270,7 +270,7 @@ async def _authorize(viewer: User, subject_id: UUID, scope: Scope, db: AsyncSess
     return True
 
 
-def _partial(value: int, eligible_sessions: int) -> Reading:
+def _partial(value: int, eligible_sessions: int | None = None) -> Reading:
     return Reading(
         value=value,
         status="partial",
@@ -291,8 +291,8 @@ def _component(observed: dict) -> ComponentObservation:
         author=PublicPerson(
             id=observed["original_author_id"], username=observed["author_username"], name=observed["author_name"]
         ),
-        component_traces=_partial(observed["roots"], observed["roots"]),
-        mcp_calls=_partial(observed["calls"], observed["roots"]),
+        component_traces=_partial(observed["roots"]),
+        mcp_calls=_partial(observed["calls"]),
     )
 
 
@@ -331,9 +331,9 @@ async def _summary(
         db, subject_id, scope, str(DEFAULT_PROJECT_ID), window.start, window.end, viewer_self=viewer.id == subject_id
     )
     if observed:
-        summary.component_trace_union = _partial(observed["roots"], observed["roots"])
-        summary.mcp_calls = _partial(observed["calls"], observed["roots"])
-        summary.active_days_utc = _partial(observed["days"], observed["roots"])
+        summary.component_trace_union = _partial(observed["roots"])
+        summary.mcp_calls = _partial(observed["calls"])
+        summary.active_days_utc = _partial(observed["days"])
     elif scope == "user" and viewer.id == subject_id:
         zero = await qualified_zero_subset(db, subject_id, str(DEFAULT_PROJECT_ID), window.start, window.end)
         if zero:
@@ -348,12 +348,25 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
     server_id = await db.scalar(text("SELECT server_id FROM mobile_server_identity WHERE singleton = true"))
     if server_id is None:
         raise HTTPException(status_code=503, detail="Server identity unavailable")
+    test_only = (
+        await ds.get_bool("mobile.auth_enabled")
+        and await readable(db, str(DEFAULT_PROJECT_ID))
+        and await ds.get_bool("mobile.synthetic_test_enabled")
+        and await ds.get("mobile.synthetic_test_ack") == "isolated-disposable-synthetic-only-v1"
+        and await ds.get("mobile.synthetic_test_server_id") == str(server_id)
+        and await ds.get("mobile.synthetic_test_viewer_id") == str(viewer.id)
+    )
+    if test_only:
+        window = _window("1w")
+        observed = await trace_union(db, viewer.id, "author", str(DEFAULT_PROJECT_ID), window.start, window.end)
+        test_only = observed is not None and observed["roots"] > 0
     return Capabilities(
         server_id=server_id,
         project_id=str(DEFAULT_PROJECT_ID),
         viewer_id=viewer.id,
-        supported_kinds=[],  # Not advertised until sender/erasure cohort qualifies.
+        supported_kinds=["mcp_calls"] if test_only else [],
         platform_overview=await _trace_allowed(viewer),
+        synthetic_test_cohort=test_only,
     )
 
 
@@ -448,10 +461,8 @@ async def person_summaries(
                 if privileged
                 else "restricted",
                 user_revision=await _scope_revision(db, viewer, subject_id, "user", anchor),
-                author_usage=(_partial(author["roots"], author["roots"]) if author else Reading())
-                if privileged
-                else RestrictedScope(),
-                user_usage=_partial(user["roots"], user["roots"]) if user else Reading(),
+                author_usage=(_partial(author["roots"]) if author else Reading()) if privileged else RestrictedScope(),
+                user_usage=_partial(user["roots"], user.get("eligible_sessions")) if user else Reading(),
             )
         )
     return PairedBatch(window=window, window_anchor=anchor, items=items)
@@ -671,26 +682,55 @@ _PUBLISHED = (
 @router.get("/published", response_model=PublishedPage)
 async def published_by_me(
     limit: int = Query(20, ge=1, le=20),
+    cursor: str | None = Query(None, max_length=512),
     db: AsyncSession = Depends(get_db),
     viewer: User = Depends(get_mobile_user),
 ):
+    binding = {
+        "purpose": "mobile-page-v1",
+        "project": str(DEFAULT_PROJECT_ID),
+        "sub": str(viewer.id),
+        "collection": "published",
+    }
+    params = {"viewer": viewer.id, "limit": limit + 1}
+    after_sql = ""
+    if cursor:
+        page = _read_cursor(cursor, binding)
+        try:
+            last_kind, last_id = page["last_kind"], UUID(page["last_id"])
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(409, "stale_cursor") from exc
+        if last_kind not in {item[0] for item in _PUBLISHED}:
+            raise HTTPException(409, "stale_cursor")
+        after_sql = " WHERE (kind,id)>(:last_kind,CAST(:last_id AS uuid))"
+        params.update(last_kind=last_kind, last_id=last_id)
     branches = []
     for kind, listing, version, version_fk in _PUBLISHED:
         current_owner = "created_by" if kind == "agent" else "submitted_by"
         deleted = "AND l.deleted_at IS NULL" if kind == "agent" else ""
         branches.append(
-            f"SELECT '{kind}' AS kind, l.id, l.name, l.namespace, l.slug, "
+            f"SELECT '{kind}' AS kind, l.id, l.name, "
             f"(l.{current_owner} = :viewer) AS is_current_owner "
             f"FROM mobile_listing_provenance p JOIN {listing} l ON l.id = p.listing_id "
             f"WHERE p.kind = '{kind}' AND p.original_author_id = :viewer "
             f"AND l.is_private = false {deleted} "
-            f"AND EXISTS (SELECT 1 FROM {version} v JOIN mobile_publication_events e "
-            f"ON e.kind = '{kind}' AND e.listing_id = l.id "
-            f"AND e.version_id = v.id AND e.status = 'approved' "
-            f"WHERE v.{version_fk} = l.id AND v.status = 'approved')"
+            f"AND EXISTS (SELECT 1 FROM {version} v "
+            f"WHERE v.{version_fk} = l.id AND v.status = 'approved' "
+            f"AND (SELECT e.status FROM mobile_publication_events e "
+            f"WHERE e.kind = '{kind}' AND e.listing_id=l.id AND e.version_id=v.id "
+            f"ORDER BY e.recorded_at DESC,e.id DESC LIMIT 1)='approved')"
         )
-    # UNION ALL is bounded by the indexed provenance author key. No total or
-    # unsafe offset pagination; caller knows the first slice is incomplete.
-    sql = "SELECT * FROM (" + " UNION ALL ".join(branches) + ") published ORDER BY kind, id LIMIT :limit"
-    rows = (await db.execute(text(sql), {"viewer": viewer.id, "limit": limit})).mappings().all()
-    return PublishedPage(items=[PublishedItem.model_validate(row) for row in rows])
+    # Author-scoped provenance, current approval, and a bound tuple cursor.
+    # Missing/deleted/private rows cannot be recovered from a stale cursor.
+    sql = (
+        "SELECT * FROM (" + " UNION ALL ".join(branches) + ") published" + after_sql + " ORDER BY kind,id LIMIT :limit"
+    )
+    rows = (await db.execute(text(sql), params)).mappings().all()
+    visible = rows[:limit]
+    more = len(rows) > limit
+    next_cursor = (
+        _cursor({**binding, "last_kind": visible[-1]["kind"], "last_id": str(visible[-1]["id"])}) if more else None
+    )
+    return PublishedPage(
+        items=[PublishedItem.model_validate(row) for row in visible], complete=not more, next_cursor=next_cursor
+    )

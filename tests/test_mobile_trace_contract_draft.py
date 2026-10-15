@@ -90,6 +90,11 @@ class TraceDraftContract(unittest.TestCase):
     def test_disabled_capability_and_neutral_responses(self):
         self.check_shape(self.schemas["Capabilities"], self.responses["capabilities"])
         self.assertFalse(self.responses["capabilities"]["trace_headlines"])
+        self.assertFalse(self.responses["capabilities"]["synthetic_test_cohort"])
+        self.check_shape(self.schemas["Capabilities"], self.vectors["isolated_test_capabilities"])
+        self.assertTrue(self.vectors["isolated_test_capabilities"]["synthetic_test_cohort"])
+        self.assertFalse(self.vectors["isolated_test_capabilities"]["trace_headlines"])
+        self.assertTrue(self.vectors["never_live_or_supported_due_to_this_flag"])
         self.check_shape(self.schemas["PairedBatch"], self.responses["paired_viewport"])
         self.check_shape(self.schemas["PlatformOverview"], self.responses["platform_suppressed"])
         self.assertEqual(

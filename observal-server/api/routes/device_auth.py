@@ -87,6 +87,21 @@ def _is_localhost_url(url: str) -> bool:
     return parsed.hostname in ("localhost", "127.0.0.1", "::1") if parsed.hostname else True
 
 
+def _explicit_loopback_https(value: str) -> bool:
+    """Only a configured HTTPS loopback with explicit port is a dev origin."""
+    try:
+        parsed = urlparse(value)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+            and parsed.port is not None
+            and parsed.path in ("", "/")
+            and not (parsed.username or parsed.password or parsed.query or parsed.fragment)
+        )
+    except ValueError:
+        return False
+
+
 def _resolve_frontend_url(request: Request) -> str:
     """Derive the frontend base URL for verification links.
 
@@ -100,7 +115,7 @@ def _resolve_frontend_url(request: Request) -> str:
 
     # 1. Explicitly configured frontend URL
     configured = ds.get_sync("deployment.frontend_url")
-    if configured and not _is_localhost_url(configured):
+    if configured and (not _is_localhost_url(configured) or _explicit_loopback_https(configured)):
         return configured.rstrip("/")
 
     # 2. Derive from public_url if set
@@ -180,7 +195,7 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
         parsed = urlparse(frontend_url)
         safe_local = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
         trusted_public_origin = any(
-            configured and not _is_localhost_url(configured)
+            configured and (not _is_localhost_url(configured) or _explicit_loopback_https(configured))
             for configured in (ds.get_sync("deployment.frontend_url"), ds.get_sync("deployment.public_url"))
         )
         if (not safe_local and not trusted_public_origin) or (

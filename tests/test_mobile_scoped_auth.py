@@ -188,6 +188,33 @@ async def test_mobile_sso_verification_origin_is_browser_initial_only(identity, 
 
 
 @pytest.mark.asyncio
+async def test_explicit_isolated_loopback_https_origin_never_uses_spoofed_forwarded_host(identity, monkeypatch):
+    monkeypatch.setattr(
+        device_auth.ds,
+        "get_sync",
+        lambda key, default=None: "https://localhost:18443" if key == "deployment.frontend_url" else "",
+    )
+    request = SimpleNamespace(
+        headers={"host": "attacker.test", "x-forwarded-host": "attacker.test", "x-forwarded-proto": "http"}
+    )
+    grant = await inspect.unwrap(device_auth.device_authorize)(
+        request, DeviceAuthRequest(client_id=MOBILE_CLIENT_ID), identity.db
+    )
+    assert grant.verification_origins == ["https://localhost:18443"]
+    assert grant.verification_uri.startswith("https://localhost:18443/device")
+    monkeypatch.setattr(
+        device_auth.ds,
+        "get_sync",
+        lambda key, default=None: "https://localhost:18443/redirect" if key == "deployment.frontend_url" else "",
+    )
+    with pytest.raises(HTTPException) as exc:
+        await inspect.unwrap(device_auth.device_authorize)(
+            request, DeviceAuthRequest(client_id=MOBILE_CLIENT_ID), identity.db
+        )
+    assert exc.value.status_code == 503
+
+
+@pytest.mark.asyncio
 async def test_mobile_refresh_is_atomically_single_use_under_concurrent_requests(identity):
     _, refresh, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="race-phone")
     request = SimpleNamespace(headers={})
