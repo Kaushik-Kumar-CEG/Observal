@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-
-"""Negotiated wire examples must obey paired privacy suppression."""
+"""Synthetic trace-first wire must reject impossible and privacy-leaking readings."""
 
 import copy
 import json
@@ -14,34 +13,28 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1] / "contracts/mobile-activity-v1"
 SCHEMA = yaml.safe_load((ROOT / "openapi.yaml").read_text())
 EXAMPLES = json.loads((ROOT / "responses.json").read_text())
-CASES = json.loads((ROOT / "fixtures.json").read_text())["cases"]
+VECTORS = json.loads((ROOT / "contract-vectors.json").read_text())
 
 
-def _validator(schema_name):
+def validator(schema):
     return jsonschema.Draft202012Validator(
-        {"components": SCHEMA["components"], "$ref": f"#/components/schemas/{schema_name}"}
+        {"components": SCHEMA["components"], "$ref": f"#/components/schemas/{schema}"}
     )
 
 
-def _validate(name, schema_name):
-    _validator(schema_name).validate(EXAMPLES[name])
-
-
-def test_examples_validate_against_the_backend_owned_schema():
-    for name, schema in (
-        ("mobile_device_challenge", "DeviceChallenge"),
-        ("mobile_device_token", "MobileDeviceToken"),
-        ("mobile_refresh_token", "MobileTokenPair"),
+def test_disabled_capability_and_paired_synthetic_wire_validate():
+    for name, kind in (
+        ("capabilities", "Capabilities"),
+        ("paired_viewport", "PairedBatch"),
+        ("platform_suppressed", "PlatformOverview"),
     ):
-        _validate(name, schema)
-    for name in ("platform_covered", "platform_suppressed"):
-        _validate(name, "PlatformOverview")
-    _validate("author_scope_no_general_session_leak", "PersonSummary")
-    _validate("people_first_slice", "PeoplePage")
-    _validate("published_original_transfer", "PublishedPage")
-    _validate("components_unqualified", "ComponentPage")
-    _validate("component_observed", "ComponentDetail")
-    assert len(CASES) >= 5
+        validator(kind).validate(EXAMPLES[name])
+    assert EXAMPLES["capabilities"]["trace_headlines"] is False
+    pair = EXAMPLES["paired_viewport"]
+    assert all(
+        item["author_usage"]["status"] == "not_recorded" or item["author_usage"]["status"] == "partial"
+        for item in pair["items"]
+    )
 
 
 @pytest.mark.parametrize("field", ["active_accounts", "prompted_root_sessions"])
@@ -51,40 +44,65 @@ def test_examples_validate_against_the_backend_owned_schema():
         (("coverage", "eligible_sessions"), 3),
         (("coverage", "source_start"), "2026-09-23T00:00:00Z"),
         (("coverage", "supported_harnesses"), ["pi"]),
+        (("coverage", "supported_kinds"), ["mcp_calls"]),
         (("coverage", "projection"), "partial"),
         (("reasons",), ["small_cohort"]),
         (("value",), 3),
     ],
 )
-def test_suppressed_platform_cannot_disclose_count_or_coverage(field, path, leak):
-    reading = EXAMPLES["platform_suppressed"][field]
-    assert reading["reasons"] == ["unavailable"]
-    assert reading["coverage"] == {
-        "eligible_sessions": None,
-        "source_start": None,
-        "source_end": None,
-        "supported_harnesses": [],
-        "projection": "unavailable",
-    }
+def test_suppressed_platform_pair_cannot_expose_count_or_metadata(field, path, leak):
     broken = copy.deepcopy(EXAMPLES["platform_suppressed"])
     cursor = broken[field]
     for key in path[:-1]:
         cursor = cursor[key]
     cursor[path[-1]] = leak
     with pytest.raises(jsonschema.ValidationError):
-        _validator("PlatformOverview").validate(broken)
+        validator("PlatformOverview").validate(broken)
 
 
-@pytest.mark.parametrize("leak", ["source_start", "source_end", "eligible_sessions", "supported_harnesses"])
-def test_author_general_sessions_cannot_disclose_another_person_coverage(leak):
-    broken = copy.deepcopy(EXAMPLES["author_scope_no_general_session_leak"])
-    broken["general_sessions"]["coverage"][leak] = ["pi"] if leak == "supported_harnesses" else 1
-    with pytest.raises(jsonschema.ValidationError):
-        _validator("PersonSummary").validate(broken)
-
-
-def test_platform_must_suppress_both_readings_together():
+def test_platform_values_suppress_together():
     broken = copy.deepcopy(EXAMPLES["platform_suppressed"])
-    broken["active_accounts"] = EXAMPLES["platform_covered"]["active_accounts"]
+    paired = next(v for v in VECTORS["wire_cases"] if v["id"].startswith("paired-40"))
+    broken["active_accounts"] = paired["body"]["items"][0]["author_usage"]
     with pytest.raises(jsonschema.ValidationError):
-        _validator("PlatformOverview").validate(broken)
+        validator("PlatformOverview").validate(broken)
+
+
+@pytest.mark.parametrize(
+    ("path", "leak"),
+    [
+        (("author_usage", "value"), 0),
+        (("author_usage", "coverage"), {"projection": "partial"}),
+        (("author_usage", "reasons"), ["small_cohort"]),
+        (("author_revision",), "private-epoch-hash"),
+        (("user_revision",), "private-epoch-hash"),
+    ],
+)
+def test_mixed_batch_restricted_scope_cannot_expose_metadata(path, leak):
+    vector = next(v for v in VECTORS["wire_cases"] if v["id"].startswith("mixed-twelve-"))
+    broken = copy.deepcopy(vector["body"])
+    row = broken["items"][0]
+    target = row
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = leak
+    with pytest.raises(jsonschema.ValidationError):
+        validator("PairedBatch").validate(broken)
+
+
+def test_wire_supports_independently_allowed_author_with_forbidden_user():
+    mixed = next(v for v in VECTORS["wire_cases"] if v["id"].startswith("mixed-twelve-"))
+    paired = next(v for v in VECTORS["wire_cases"] if v["id"].startswith("paired-40"))
+    future_policy = copy.deepcopy(mixed["body"])
+    future_policy["items"][0]["author_revision"] = "A1"
+    future_policy["items"][0]["author_usage"] = paired["body"]["items"][0]["author_usage"]
+    validator("PairedBatch").validate(future_policy)
+    assert future_policy["items"][0]["user_usage"] == {"status": "restricted"}
+
+
+def test_restricted_reading_is_never_a_body_value():
+    sample = copy.deepcopy(EXAMPLES["platform_suppressed"]["active_accounts"])
+    sample["status"] = "restricted"
+    sample["value"] = 0
+    with pytest.raises(jsonschema.ValidationError):
+        validator("Reading").validate(sample)
