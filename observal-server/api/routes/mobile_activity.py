@@ -213,8 +213,12 @@ def _paired_window(viewer: User, period: Period, anchor: str | None) -> tuple[Wi
         end = datetime.fromisoformat(claims["end"])
         if end.tzinfo is None:
             raise ValueError("window timezone missing")
-        as_of = datetime.fromtimestamp(claims["iat"], UTC)
-        return Window(start=end - timedelta(days=_DAYS[period]), end=end, as_of=as_of, period=period), anchor
+        # iat has whole-second precision but the signed end retains
+        # microseconds. Reconstruct as_of from that exact end, or the phone
+        # correctly rejects end > as_of on every anchored detail/page.
+        if int(end.timestamp()) != claims["iat"]:
+            raise ValueError("window issue/end mismatch")
+        return Window(start=end - timedelta(days=_DAYS[period]), end=end, as_of=end, period=period), anchor
     except (ValueError, TypeError, KeyError, jwt.InvalidTokenError) as exc:
         raise HTTPException(status_code=409, detail="stale_window") from exc
 
@@ -358,11 +362,23 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
         and await ds.get_bool("mobile.synthetic_test_enabled")
         and await ds.get("mobile.synthetic_test_ack") == "isolated-disposable-synthetic-only-v1"
         and await ds.get("mobile.synthetic_test_server_id") == str(server_id)
-        and await ds.get("mobile.synthetic_test_viewer_id") == str(viewer.id)
     )
+    # Distinct, explicitly configured test principals: admin Author and the
+    # ordinary actor's own User scope. A follow alone never qualifies anyone.
+    author_viewer = (
+        await ds.get("mobile.synthetic_test_viewer_id") == str(viewer.id) and await _trace_allowed(viewer)
+        if test_only
+        else False
+    )
+    self_user_viewer = (
+        await ds.get("mobile.synthetic_test_self_user_viewer_id") == str(viewer.id) if test_only else False
+    )
+    test_only = test_only and (author_viewer or self_user_viewer)
     if test_only:
         window = _window("1w")
-        observed = await trace_union(db, viewer.id, "author", str(DEFAULT_PROJECT_ID), window.start, window.end)
+        observed = await trace_union(
+            db, viewer.id, "author" if author_viewer else "user", str(DEFAULT_PROJECT_ID), window.start, window.end
+        )
         test_only = observed is not None and observed["roots"] > 0
     return Capabilities(
         server_id=server_id,

@@ -127,6 +127,7 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
     from api.routes import mobile_activity as activity
 
     api, viewer, _other, db, _enabled = app
+    viewer.role = UserRole.super_admin
     server = uuid.uuid4()
     db.scalar.return_value = server
     settings = {
@@ -166,6 +167,63 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
         settings["mobile.synthetic_test_ack"] = ""
         unacknowledged = await c.get("/api/v1/mobile-activity/v1/capabilities")
         assert unacknowledged.json()["synthetic_test_cohort"] is False
+
+
+@pytest.mark.asyncio
+async def test_synthetic_self_user_viewer_requires_exact_identity_source_and_denies_other_scopes(app, monkeypatch):
+    from api.routes import mobile_activity as activity
+
+    api, viewer, other, db, _enabled = app
+    viewer.role = UserRole.user
+    server = uuid.uuid4()
+    db.scalar.return_value = server
+    settings = {
+        "mobile.synthetic_test_ack": "isolated-disposable-synthetic-only-v1",
+        "mobile.synthetic_test_server_id": str(server),
+        "mobile.synthetic_test_viewer_id": str(other.id),
+        "mobile.synthetic_test_self_user_viewer_id": str(viewer.id),
+    }
+    monkeypatch.setattr(activity.ds, "get", AsyncMock(side_effect=lambda key: settings.get(key, "")))
+    monkeypatch.setattr(
+        activity.ds,
+        "get_bool",
+        AsyncMock(side_effect=lambda key: key in {"mobile.auth_enabled", "mobile.synthetic_test_enabled"}),
+    )
+    monkeypatch.setattr(activity, "readable", AsyncMock(return_value=True))
+    source = AsyncMock(return_value={"roots": 1, "calls": 40, "days": 1})
+    monkeypatch.setattr(activity, "trace_union", source)
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as client:
+        allowed = await client.get("/api/v1/mobile-activity/v1/capabilities")
+        assert allowed.status_code == 200 and allowed.json()["synthetic_test_cohort"] is True
+        assert allowed.json()["trace_headlines"] is False
+        assert allowed.json()["supported_kinds"] == ["mcp_calls"]
+        assert source.await_args.args[2] == "user"
+        denied = await client.get(f"/api/v1/mobile-activity/v1/people/{other.id}/summary?scope=user&period=1w")
+        assert denied.status_code == 403 and denied.content == b""
+        denied = await client.get(f"/api/v1/mobile-activity/v1/people/{viewer.id}/summary?scope=author&period=1w")
+        assert denied.status_code == 403 and denied.content == b""
+        source.return_value = None
+        assert (await client.get("/api/v1/mobile-activity/v1/capabilities")).json()["synthetic_test_cohort"] is False
+        source.return_value = {"roots": 1, "calls": 40, "days": 1}
+        settings["mobile.synthetic_test_server_id"] = str(uuid.uuid4())
+        assert (await client.get("/api/v1/mobile-activity/v1/capabilities")).json()["synthetic_test_cohort"] is False
+        settings["mobile.synthetic_test_server_id"] = str(server)
+        settings["mobile.synthetic_test_self_user_viewer_id"] = str(uuid.uuid4())
+        assert (await client.get("/api/v1/mobile-activity/v1/capabilities")).json()["synthetic_test_cohort"] is False
+
+
+@pytest.mark.asyncio
+async def test_paired_window_anchor_preserves_end_as_of_microseconds(tmp_path):
+    from api.routes import mobile_activity as activity
+
+    init_key_manager(key_dir=str(tmp_path / "keys"), key_password=None)
+    viewer = SimpleNamespace(id=uuid.uuid4())
+    initial, anchor = activity._paired_window(viewer, "1w", None)
+    anchored, reused = activity._paired_window(viewer, "1w", anchor)
+    assert reused == anchor
+    assert anchored == initial
+    assert anchored.start <= anchored.end == anchored.as_of
+    assert anchored.end.microsecond != 0 or initial.end.microsecond == 0
 
 
 @pytest.mark.asyncio

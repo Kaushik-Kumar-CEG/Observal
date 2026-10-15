@@ -354,6 +354,7 @@ DEFAULTS: dict[str, str] = {
     "mobile.synthetic_test_enabled": "false",
     "mobile.synthetic_test_server_id": "",
     "mobile.synthetic_test_viewer_id": "",
+    "mobile.synthetic_test_self_user_viewer_id": "",
     "mobile.synthetic_test_ack": "",
     # Registry policy
     "registry.registered_agents_only": "false",

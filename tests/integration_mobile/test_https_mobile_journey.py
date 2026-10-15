@@ -113,6 +113,8 @@ async def test_isolated_https_two_scopes_two_components_one_child_root():
             len(query["expected_revision"]),
         )
         assert page.json()["complete"] is True
+        for item in (batch.json(), page.json()):
+            assert item["window"]["start"] <= item["window"]["end"] <= item["window"]["as_of"]
         assert len(page.json()["items"]) == 2
         ids = {r["component_id"] for r in page.json()["items"]}
         assert ids == set(fixture["component_ids"])
@@ -122,11 +124,20 @@ async def test_isolated_https_two_scopes_two_components_one_child_root():
             got = await client.get(f"{detail_base}/mcp/{row['component_id']}", headers=admin, params=query)
             assert got.status_code == 200 and got.json()["component"] == row
             assert got.json()["window"] == page.json()["window"]
+        author_summary = await client.get(
+            f"/api/v1/mobile-activity/v1/people/{maintainer['id']}/summary",
+            headers=admin,
+            params={"scope": "author", **query},
+        )
+        assert author_summary.status_code == 200
+        assert author_summary.json()["window"] == page.json()["window"]
         ordinary_pair = await _mobile_pair(client, ordinary)
         member = {"Authorization": "Bearer " + ordinary_pair["access_token"]}
         ordinary_caps = await client.get("/api/v1/mobile-activity/v1/capabilities", headers=member)
         assert ordinary_caps.status_code == 200
-        assert ordinary_caps.json()["synthetic_test_cohort"] is False
+        assert ordinary_caps.json()["synthetic_test_cohort"] is True
+        assert ordinary_caps.json()["supported_kinds"] == ["mcp_calls"]
+        assert ordinary_caps.json()["trace_headlines"] is False
         mixed = await client.post(
             "/api/v1/mobile-activity/v1/people/summaries",
             headers=member,
@@ -147,6 +158,14 @@ async def test_isolated_https_two_scopes_two_components_one_child_root():
         )
         assert user_page.status_code == 200 and user_page.json()["complete"]
         assert {item["component_id"] for item in user_page.json()["items"]} == ids
+        assert user_page.json()["window"]["end"] <= user_page.json()["window"]["as_of"]
+        month = await client.post(
+            "/api/v1/mobile-activity/v1/people/summaries",
+            headers=member,
+            json={"subject_ids": [ordinary["id"]], "period": "1m"},
+        )
+        assert month.status_code == 200 and month.json()["items"][0]["user_usage"]["value"] == 1
+        assert month.json()["window"]["period"] == "1m"
         assert {item["component_traces"]["value"] for item in user_page.json()["items"]} == {1}
         for row in user_page.json()["items"]:
             detail = await client.get(
