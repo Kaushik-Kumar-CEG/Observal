@@ -432,6 +432,24 @@ async def person_summaries(
         if set(rows.all()) != set(subject_ids):
             raise HTTPException(status_code=404, detail="Not found")
     window, anchor = _paired_window(viewer, request.period, request.window_anchor)
+    # The paired self-zero fallback must not bypass the shared project read
+    # barrier while retention/erasure is in progress. Do this before ANY
+    # source-derived value, cohort, or scope revision is returned.
+    if not await readable(db, str(DEFAULT_PROJECT_ID)):
+        return PairedBatch(
+            window=window,
+            window_anchor=anchor,
+            items=[
+                PairedPerson(
+                    subject_id=subject_id,
+                    author_revision="unqualified" if privileged else "restricted",
+                    user_revision="unqualified" if privileged or subject_id == viewer.id else "restricted",
+                    author_usage=Reading() if privileged else RestrictedScope(),
+                    user_usage=Reading() if privileged or subject_id == viewer.id else RestrictedScope(),
+                )
+                for subject_id in subject_ids
+            ],
+        )
     # Never look up other people's existence or facts for an unprivileged
     # mixed batch; the neutral status is identical for absent and forbidden IDs.
     permitted_ids = subject_ids if privileged else [viewer.id]

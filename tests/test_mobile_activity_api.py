@@ -164,6 +164,34 @@ async def test_platform_and_cross_person_restricted_before_lookup(app):
 
 
 @pytest.mark.asyncio
+async def test_blocked_paired_read_returns_no_zero_cohort_or_scope_revision(app, monkeypatch):
+    from api.routes import mobile_activity as activity
+
+    api, viewer, other, _db, _enabled = app
+    zero = AsyncMock(return_value={"roots": 0, "calls": 0, "days": 0, "eligible_sessions": 1})
+    revisions = AsyncMock(return_value="must-never-disclose")
+    monkeypatch.setattr(activity, "qualified_zero_subset", zero)
+    monkeypatch.setattr(activity, "_scope_revision", revisions)
+    monkeypatch.setattr(activity, "readable", AsyncMock(return_value=False))
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
+        response = await c.post(
+            "/api/v1/mobile-activity/v1/people/summaries",
+            json={"subject_ids": [str(viewer.id), str(other.id)], "period": "1w"},
+        )
+    assert response.status_code == 200
+    assert_wire("PairedBatch", response.json())
+    self_row, foreign = response.json()["items"]
+    assert self_row["user_usage"]["value"] is None
+    assert self_row["user_usage"]["coverage"]["eligible_sessions"] is None
+    assert self_row["user_revision"] == "unqualified"
+    assert self_row["author_usage"] == {"status": "restricted"}
+    assert foreign["author_usage"] == foreign["user_usage"] == {"status": "restricted"}
+    assert foreign["author_revision"] == foreign["user_revision"] == "restricted"
+    zero.assert_not_awaited()
+    revisions.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_self_readings_are_never_unqualified_zeros(app):
     api, viewer, other, db, enabled = app
     async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
