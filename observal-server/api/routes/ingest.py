@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-FileCopyrightText: 2026 Lokesh <lokeshselvam7025@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Session JSONL ingest endpoint."""
@@ -8,9 +9,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger as optic
 from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import text
 
 from api.deps import require_role
 from api.ratelimit import limiter
+from database import async_session
 from models.user import User, UserRole
 from observal_shared.migration.constants import DEFAULT_PROJECT_ID
 
@@ -247,6 +250,22 @@ async def ingest_session(
                 req.total_line_count,
                 req.total_offset,
             )
+
+    # Durable projection request is committed after the ClickHouse checkpoint.
+    # A transient Postgres failure makes the client retry the idempotent push;
+    # never acknowledge new Pi evidence without a replayable work item.
+    if req.harness == "pi" and len(req.session_id) <= 256 and (result.ingested > 0 or req.final):
+        async with async_session() as db:
+            await db.execute(
+                text(
+                    "INSERT INTO mobile_projection_queue(project_id,user_id,harness,session_id) "
+                    "VALUES (:project,:user,'pi',:session) "
+                    "ON CONFLICT (project_id,user_id,harness,session_id) DO UPDATE "
+                    "SET requested_at=now(),attempts=0"
+                ),
+                {"project": project_id, "user": current_user.id, "session": req.session_id},
+            )
+            await db.commit()
 
     # Notify WebSocket subscribers so the frontend gets instant turn updates.
     # Publish to both a session-specific channel (for detail viewers, O(1) fan-out)

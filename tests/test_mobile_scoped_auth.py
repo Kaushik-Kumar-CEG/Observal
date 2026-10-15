@@ -116,7 +116,7 @@ async def test_device_grant_creates_scope_preserving_read_only_phone_tokens(iden
 
 @pytest.mark.asyncio
 async def test_mobile_bearer_denied_by_legacy_telemetry_and_admin_routes(identity):
-    from api.routes.admin import users as _users  # noqa: F401  # registers the admin route
+    from api.routes.admin import users as _users
     from api.routes.admin._router import router as admin_router
     from api.routes.layer_snapshot import router as snapshot_router
     from api.routes.sessions import router as sessions_router
@@ -124,6 +124,11 @@ async def test_mobile_bearer_denied_by_legacy_telemetry_and_admin_routes(identit
     app = FastAPI()
     for router in (snapshot_router, sessions_router, admin_router):
         app.include_router(router)
+    # Other tests can reload the shared admin router module during collection,
+    # leaving an older router instance empty. Bind the real endpoint on this
+    # isolated test app if that happens; 404 is not an auth-denial assertion.
+    if not any(route.path == "/api/v1/admin/users" for route in app.routes):
+        app.add_api_route("/api/v1/admin/users", _users.list_users, methods=["GET"])
     app.dependency_overrides[deps.get_db] = lambda: identity.db
     phone, _, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="phone-test")
     headers = {"Authorization": f"Bearer {phone}"}
@@ -135,6 +140,15 @@ async def test_mobile_bearer_denied_by_legacy_telemetry_and_admin_routes(identit
         ):
             response = await client.get(path, headers=headers)
             assert response.status_code == 401, (path, response.status_code)
+
+
+@pytest.mark.asyncio
+async def test_mobile_dependency_cannot_be_reused_on_an_unrelated_endpoint(identity):
+    phone, _, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="phone-test")
+    request = SimpleNamespace(url=SimpleNamespace(path="/api/v1/admin/users"), state=SimpleNamespace())
+    with pytest.raises(HTTPException) as exc:
+        await deps.get_mobile_user(request, f"Bearer {phone}", identity.db)
+    assert exc.value.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -168,7 +182,9 @@ async def test_disable_rollout_burns_approved_phone_grant_and_blocks_active_read
         )
     assert exc.value.status_code == 503
     assert await identity.redis.get(f"device_auth:{created.device_code}") is None
-    mobile_request = SimpleNamespace(url=SimpleNamespace(path="/api/v1/mobile/activity"), state=SimpleNamespace())
+    mobile_request = SimpleNamespace(
+        url=SimpleNamespace(path="/api/v1/mobile-activity/v1/capabilities"), state=SimpleNamespace()
+    )
     with pytest.raises(HTTPException) as exc:
         await deps.get_mobile_user(mobile_request, f"Bearer {phone_access}", identity.db)
     assert exc.value.status_code == 503

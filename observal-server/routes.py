@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 amogh-dongre <amoghdongre16@gmail.com>
 # SPDX-FileCopyrightText: 2026 Lokesh <lokeshselvam7025@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 from fastapi import FastAPI
@@ -37,6 +38,8 @@ from api.routes.logs_stream import router as logs_stream_router
 from api.routes.mcp import router as mcp_router
 from api.routes.mcp_webhook_sync import router as mcp_webhook_sync_router
 from api.routes.mcp_webhook_sync import webhook_router as mcp_webhook_receiver_router
+from api.routes.mobile_activity import router as mobile_activity_router
+from api.routes.mobile_evidence import router as mobile_evidence_router
 from api.routes.preview import router as preview_router
 from api.routes.prompt import router as prompt_router
 from api.routes.recommendations import router as recommendations_router
@@ -92,6 +95,8 @@ REST_ROUTERS = (
     teams_router,
     inbox_router,
     layer_snapshot_router,
+    mobile_activity_router,
+    mobile_evidence_router,
     logs_stream_router,
     audit_router,
     users_router,

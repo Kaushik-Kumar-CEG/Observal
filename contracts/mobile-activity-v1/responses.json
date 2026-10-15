@@ -1,0 +1,67 @@
+{
+  "notice": "Synthetic DTO examples only, NOT live observations or deployment confirmation.",
+  "mobile_device_challenge": {
+    "device_code": "nonredeemable-synthetic-device-code", "user_code": "DEMO-NOOP",
+    "verification_uri": "https://example.invalid/device", "verification_uri_complete": "https://example.invalid/device?user_code=DEMO-NOOP",
+    "expires_in": 600, "interval": 5
+  },
+  "mobile_device_token": {
+    "access_token": "noncredential-synthetic-access", "refresh_token": "noncredential-synthetic-refresh", "expires_in": 3600,
+    "user": {"id": "11111111-1111-4111-8111-111111111111", "email": "synthetic@example.invalid", "name": "Synthetic User", "role": "user"}
+  },
+  "mobile_refresh_token": {
+    "access_token": "noncredential-synthetic-rotated-access", "refresh_token": "noncredential-synthetic-rotated-refresh", "token_type": "bearer", "expires_in": 3600
+  },
+  "people_first_slice": {
+    "items": [{"id": "11111111-1111-4111-8111-111111111111", "username": "synthetic_author", "name": "Synthetic Author"}],
+    "complete": false
+  },
+  "published_original_transfer": {
+    "items": [{"kind": "agent", "id": "22222222-2222-4222-8222-222222222222", "name": "Synthetic agent", "namespace": "new_owner", "slug": "synthetic-agent", "is_current_owner": false}],
+    "complete": false
+  },
+  "components_unqualified": {
+    "subject_id": "11111111-1111-4111-8111-111111111111",
+    "scope": "user",
+    "window": {"start": "2026-09-23T00:00:00Z", "end": "2026-09-30T00:00:00Z", "as_of": "2026-09-30T00:10:00Z", "timezone": "UTC", "period": "1w"},
+    "revision": "unqualified",
+    "items": [],
+    "complete": false
+  },
+  "component_observed": {
+    "subject_id": "11111111-1111-4111-8111-111111111111",
+    "scope": "user",
+    "window": {"start": "2026-09-23T00:00:00Z", "end": "2026-09-30T00:00:00Z", "as_of": "2026-09-30T00:10:00Z", "timezone": "UTC", "period": "1w"},
+    "revision": "observed-partial",
+    "component": {
+      "kind": "mcp", "component_id": "22222222-2222-4222-8222-222222222222", "name": "Synthetic MCP",
+      "mcp_calls": {"value": 40, "status": "partial", "reasons": ["observed_qualified_only", "incomplete_coverage"], "coverage": {"eligible_sessions": 1, "source_start": null, "source_end": null, "supported_harnesses": ["pi"], "projection": "partial"}},
+      "activity_traces": {"value": 1, "status": "partial", "reasons": ["observed_qualified_only", "incomplete_coverage"], "coverage": {"eligible_sessions": 1, "source_start": null, "source_end": null, "supported_harnesses": ["pi"], "projection": "partial"}},
+      "active_days_utc": {"value": 1, "status": "partial", "reasons": ["observed_qualified_only", "incomplete_coverage"], "coverage": {"eligible_sessions": 1, "source_start": null, "source_end": null, "supported_harnesses": ["pi"], "projection": "partial"}}
+    }
+  },
+  "platform_covered": {
+    "window": {"start": "2026-09-23T00:00:00Z", "end": "2026-09-30T00:00:00Z", "as_of": "2026-09-30T00:10:00Z", "timezone": "UTC", "period": "1w"},
+    "revision": "observed-partial",
+    "active_accounts": {"value": 12, "status": "partial", "reasons": ["observed_prompted_roots", "incomplete_coverage"], "coverage": {"eligible_sessions": 40, "source_start": null, "source_end": null, "supported_harnesses": ["pi"], "projection": "partial"}},
+    "prompted_root_sessions": {"value": 40, "status": "partial", "reasons": ["observed_prompted_roots", "incomplete_coverage"], "coverage": {"eligible_sessions": 40, "source_start": null, "source_end": null, "supported_harnesses": ["pi"], "projection": "partial"}}
+  },
+  "platform_suppressed": {
+    "window": {"start": "2026-09-23T00:00:00Z", "end": "2026-09-30T00:00:00Z", "as_of": "2026-09-30T00:10:00Z", "timezone": "UTC", "period": "1w"},
+    "revision": "unqualified",
+    "active_accounts": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"}},
+    "prompted_root_sessions": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"}}
+  },
+  "author_scope_no_general_session_leak": {
+    "subject_id": "11111111-1111-4111-8111-111111111111",
+    "scope": "author",
+    "window": {"start": "2026-09-23T00:00:00Z", "end": "2026-09-30T00:00:00Z", "as_of": "2026-09-30T00:10:00Z", "timezone": "UTC", "period": "1w"},
+    "revision": "observed-partial",
+    "mcp_calls": {"value": 40, "status": "partial", "reasons": ["observed_qualified_only", "incomplete_coverage"], "coverage": {"eligible_sessions": 1, "source_start": null, "source_end": null, "supported_harnesses": ["pi"], "projection": "partial"}},
+    "confirmed_skill_loads": {"value": null, "status": "not_recorded", "reasons": ["unsupported_sender"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"}},
+    "recorded_hook_runs": {"value": null, "status": "not_recorded", "reasons": ["unsupported_sender"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"}},
+    "activity_traces": {"value": 1, "status": "partial", "reasons": ["observed_qualified_only", "incomplete_coverage"], "coverage": {"eligible_sessions": 1, "source_start": null, "source_end": null, "supported_harnesses": ["pi"], "projection": "partial"}},
+    "active_days_utc": {"value": 1, "status": "partial", "reasons": ["observed_qualified_only", "incomplete_coverage"], "coverage": {"eligible_sessions": 1, "source_start": null, "source_end": null, "supported_harnesses": ["pi"], "projection": "partial"}},
+    "general_sessions": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"}}
+  }
+}
