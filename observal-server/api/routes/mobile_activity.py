@@ -7,22 +7,25 @@ readings intentionally remain null until a qualified, retained and revocable
 projection is available; registration or current status alone is not evidence.
 """
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import jwt
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import services.dynamic_settings as ds
 from api.deps import get_db, get_mobile_user
-from models.mcp import McpListing
 from models.user import User, UserRole
 from observal_shared.migration.constants import DEFAULT_PROJECT_ID
-from services.mobile_activity_query import qualified_components, qualified_observations
+from services.crypto import sign_token, verify_token
+from services.mobile_activity_query import trace_component_page, trace_pair_batch, trace_union
 from services.mobile_general_sessions import prompted_roots
+from services.mobile_read_control import readable
 
 router = APIRouter(prefix="/api/v1/mobile-activity/v1", tags=["mobile-activity"])
 Period = Literal["1w", "1m", "3m"]
@@ -35,6 +38,7 @@ class Coverage(BaseModel):
     source_start: datetime | None = None
     source_end: datetime | None = None
     supported_harnesses: list[str] = Field(default_factory=list)
+    supported_kinds: list[str] = Field(default_factory=list)
     projection: Literal["partial", "unavailable"] = "unavailable"
 
 
@@ -57,11 +61,12 @@ class PersonSummary(BaseModel):
     subject_id: UUID
     scope: Scope
     window: Window
+    window_anchor: str
     revision: str
+    component_trace_union: Reading = Field(default_factory=Reading)
     mcp_calls: Reading = Field(default_factory=Reading)
     confirmed_skill_loads: Reading = Field(default_factory=Reading)
     recorded_hook_runs: Reading = Field(default_factory=Reading)
-    activity_traces: Reading = Field(default_factory=Reading)
     active_days_utc: Reading = Field(default_factory=Reading)
     general_sessions: Reading = Field(default_factory=Reading)
 
@@ -78,8 +83,9 @@ class Capabilities(BaseModel):
     server_id: UUID
     project_id: str
     viewer_id: UUID
-    kinds: list[str] = Field(default_factory=list)
+    supported_kinds: list[str] = Field(default_factory=list)
     platform_overview: bool
+    trace_headlines: Literal[False] = False
 
 
 class PublicPerson(BaseModel):
@@ -90,35 +96,66 @@ class PublicPerson(BaseModel):
 
 class PeoplePage(BaseModel):
     items: list[PublicPerson]
-    complete: Literal[False] = False  # No cursor; never imply a complete directory.
+    complete: bool
+    next_cursor: str | None = None
 
 
-class SummaryBatch(BaseModel):
-    items: list[PersonSummary]
+class ResolveRequest(BaseModel):
+    subject_ids: list[UUID] = Field(min_length=1, max_length=20)
+
+
+class PairedRequest(BaseModel):
+    subject_ids: list[UUID] = Field(min_length=1, max_length=12)
+    period: Period
+    window_anchor: str | None = Field(None, max_length=512)
+
+
+class RestrictedScope(BaseModel):
+    # Explicit denial, not Not recorded: never include a value, source or cohort.
+    status: Literal["restricted"] = "restricted"
+
+
+class PairedPerson(BaseModel):
+    subject_id: UUID
+    author_revision: str
+    user_revision: str
+    author_usage: Reading | RestrictedScope = Field(default_factory=Reading)
+    user_usage: Reading | RestrictedScope = Field(default_factory=Reading)
+
+
+class PairedBatch(BaseModel):
+    window: Window
+    window_anchor: str
+    items: list[PairedPerson]
 
 
 class ComponentObservation(BaseModel):
     kind: Literal["mcp"] = "mcp"
     component_id: UUID
     name: str
+    author: PublicPerson
+    component_traces: Reading
     mcp_calls: Reading
-    activity_traces: Reading
-    active_days_utc: Reading
+    confirmed_skill_loads: Reading = Field(default_factory=Reading)
+    recorded_hook_runs: Reading = Field(default_factory=Reading)
 
 
 class ComponentPage(BaseModel):
     subject_id: UUID
     scope: Scope
     window: Window
+    window_anchor: str
     revision: str
     items: list[ComponentObservation] = Field(default_factory=list)
-    complete: Literal[False] = False  # No stable cursor yet.
+    complete: bool = False
+    next_cursor: str | None = None
 
 
 class ComponentDetail(BaseModel):
     subject_id: UUID
     scope: Scope
     window: Window
+    window_anchor: str
     revision: str
     component: ComponentObservation
 
@@ -143,6 +180,73 @@ def _window(period: Period, *, platform: bool = False) -> Window:
     return Window(start=end - timedelta(days=_DAYS[period]), end=end, as_of=now, period=period)
 
 
+def _paired_window(viewer: User, period: Period, anchor: str | None) -> tuple[Window, str]:
+    if anchor is None:
+        window = _window(period)
+        issued = int(window.as_of.timestamp())
+        token = sign_token(
+            {
+                "purpose": "mobile-paired-window-v1",
+                "sub": str(viewer.id),
+                "project": str(DEFAULT_PROJECT_ID),
+                "period": period,
+                "end": window.end.isoformat(),
+                "iat": issued,
+                "exp": issued + 900,
+            }
+        )
+        if len(token) > 512:
+            raise HTTPException(status_code=503, detail="Window anchor unavailable")
+        return window, token
+    try:
+        claims = verify_token(anchor)
+        if (
+            claims.get("purpose") != "mobile-paired-window-v1"
+            or claims.get("sub") != str(viewer.id)
+            or claims.get("project") != str(DEFAULT_PROJECT_ID)
+            or claims.get("period") != period
+        ):
+            raise ValueError("window scope mismatch")
+        end = datetime.fromisoformat(claims["end"])
+        if end.tzinfo is None:
+            raise ValueError("window timezone missing")
+        as_of = datetime.fromtimestamp(claims["iat"], UTC)
+        return Window(start=end - timedelta(days=_DAYS[period]), end=end, as_of=as_of, period=period), anchor
+    except (ValueError, TypeError, KeyError, jwt.InvalidTokenError) as exc:
+        raise HTTPException(status_code=409, detail="stale_window") from exc
+
+
+async def _scope_revision(db: AsyncSession, viewer: User, subject: UUID, scope: Scope, anchor: str) -> str:
+    epoch = (
+        await db.scalar(
+            text(
+                "SELECT epoch FROM mobile_scope_epochs WHERE project_id=:project AND subject_id=:subject AND scope=:scope"
+            ),
+            {"project": str(DEFAULT_PROJECT_ID), "subject": subject, "scope": scope},
+        )
+        or 0
+    )
+    generation = (
+        await db.scalar(
+            text("SELECT generation FROM mobile_read_controls WHERE project_id=:project"),
+            {"project": str(DEFAULT_PROJECT_ID)},
+        )
+        or 0
+    )
+    return sign_token(
+        {
+            "purpose": "mobile-subject-revision-v1",
+            "sub": str(viewer.id),
+            "subject": str(subject),
+            "scope": scope,
+            "project": str(DEFAULT_PROJECT_ID),
+            "anchor": hashlib.sha256(anchor.encode()).hexdigest(),
+            "generation": generation,
+            "epoch": epoch,
+        }
+    )
+
+
 def _can_trace(viewer: User, trace_privacy: bool) -> bool:
     return viewer.role == UserRole.super_admin or (viewer.role == UserRole.admin and not trace_privacy)
 
@@ -158,11 +262,12 @@ async def _subject(db: AsyncSession, subject_id: UUID) -> User:
     return subject
 
 
-async def _authorize(viewer: User, subject_id: UUID, scope: Scope, db: AsyncSession) -> None:
+async def _authorize(viewer: User, subject_id: UUID, scope: Scope, db: AsyncSession) -> bool:
     # Do not reveal whether a different subject exists to unauthorized viewers.
     if (scope == "author" or subject_id != viewer.id) and not await _trace_allowed(viewer):
-        raise HTTPException(status_code=403, detail="Restricted")
+        return False
     await _subject(db, subject_id)
+    return True
 
 
 def _partial(value: int, eligible_sessions: int) -> Reading:
@@ -170,30 +275,50 @@ def _partial(value: int, eligible_sessions: int) -> Reading:
         value=value,
         status="partial",
         reasons=["observed_qualified_only", "incomplete_coverage"],
-        coverage=Coverage(eligible_sessions=eligible_sessions, supported_harnesses=["pi"], projection="partial"),
+        coverage=Coverage(
+            eligible_sessions=eligible_sessions,
+            supported_harnesses=["pi"],
+            supported_kinds=["mcp_calls"],
+            projection="partial",
+        ),
     )
 
 
-def _component(component_id: UUID, name: str, observed: dict) -> ComponentObservation:
+def _component(observed: dict) -> ComponentObservation:
     return ComponentObservation(
-        component_id=component_id,
-        name=name,
-        mcp_calls=_partial(observed["calls"], observed["eligible_sessions"]),
-        activity_traces=_partial(observed["roots"], observed["eligible_sessions"]) if observed["roots"] else Reading(),
-        active_days_utc=_partial(observed["days"], observed["eligible_sessions"]) if observed["days"] else Reading(),
+        component_id=observed["id"],
+        name=observed["name"],
+        author=PublicPerson(
+            id=observed["original_author_id"], username=observed["author_username"], name=observed["author_name"]
+        ),
+        component_traces=_partial(observed["roots"], observed["roots"]),
+        mcp_calls=_partial(observed["calls"], observed["roots"]),
     )
 
 
-async def _summary(subject_id: UUID, scope: Scope, period: Period, db: AsyncSession) -> PersonSummary:
-    # Revision does not promise a frozen snapshot; every read revalidates the
-    # source and visibility. The UI must refetch on focus/permission changes.
-    summary = PersonSummary(subject_id=subject_id, scope=scope, window=_window(period), revision="unqualified")
-    if scope == "user":
-        general = await prompted_roots(
-            db, str(DEFAULT_PROJECT_ID), summary.window.start, summary.window.end, subject=subject_id
+async def _summary(
+    subject_id: UUID,
+    scope: Scope,
+    period: Period,
+    db: AsyncSession,
+    viewer: User,
+    anchor: str | None = None,
+) -> PersonSummary:
+    window, token = _paired_window(viewer, period, anchor)
+    if not await readable(db, str(DEFAULT_PROJECT_ID)):
+        return PersonSummary(
+            subject_id=subject_id, scope=scope, window=window, window_anchor=token, revision="unqualified"
         )
+    summary = PersonSummary(
+        subject_id=subject_id,
+        scope=scope,
+        window=window,
+        window_anchor=token,
+        revision=await _scope_revision(db, viewer, subject_id, scope, token),
+    )
+    if scope == "user":
+        general = await prompted_roots(db, str(DEFAULT_PROJECT_ID), window.start, window.end, subject=subject_id)
         if general:
-            summary.revision = "observed-partial"
             summary.general_sessions = Reading(
                 value=general["roots"],
                 status="partial",
@@ -202,19 +327,13 @@ async def _summary(subject_id: UUID, scope: Scope, period: Period, db: AsyncSess
                     eligible_sessions=general["eligible_sessions"], supported_harnesses=["pi"], projection="partial"
                 ),
             )
-    observed = await qualified_observations(
-        db, subject_id, scope, str(DEFAULT_PROJECT_ID), summary.window.start, summary.window.end
+    observed = await trace_union(
+        db, subject_id, scope, str(DEFAULT_PROJECT_ID), window.start, window.end, viewer_self=viewer.id == subject_id
     )
-    if observed is None:
-        return summary
-    # Positive lower bounds only. No supported zero, complete-window claim or
-    # unsupported skill/hook/general-session extrapolation from MCP calls.
-    summary.mcp_calls = _partial(observed["calls"], observed["eligible_sessions"])
-    if observed["roots"]:
-        summary.activity_traces = _partial(observed["roots"], observed["eligible_sessions"])
-    if observed["days"]:
-        summary.active_days_utc = _partial(observed["days"], observed["eligible_sessions"])
-    summary.revision = "observed-partial"
+    if observed:
+        summary.component_trace_union = _partial(observed["roots"], observed["roots"])
+        summary.mcp_calls = _partial(observed["calls"], observed["roots"])
+        summary.active_days_utc = _partial(observed["days"], observed["roots"])
     return summary
 
 
@@ -227,7 +346,7 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
         server_id=server_id,
         project_id=str(DEFAULT_PROJECT_ID),
         viewer_id=viewer.id,
-        kinds=[],  # Not advertised until evidence + sender cohort is qualified.
+        supported_kinds=[],  # Not advertised until sender/erasure cohort qualifies.
         platform_overview=await _trace_allowed(viewer),
     )
 
@@ -237,8 +356,10 @@ async def platform_overview(
     period: Period, db: AsyncSession = Depends(get_db), viewer: User = Depends(get_mobile_user)
 ):
     if not await _trace_allowed(viewer):
-        raise HTTPException(status_code=403, detail="Restricted")
+        return Response(status_code=403)
     result = PlatformOverview(window=_window(period, platform=True), revision="unqualified")
+    if not await readable(db, str(DEFAULT_PROJECT_ID)):
+        return result
     general = await prompted_roots(db, str(DEFAULT_PROJECT_ID), result.window.start, result.window.end)
     if general is None or general["active_accounts"] < 10:
         return result  # Same redacted shape for suppressed, purged, unsupported.
@@ -266,56 +387,165 @@ async def person_summary(
     subject_id: UUID,
     scope: Scope,
     period: Period,
+    window_anchor: str | None = Query(None, max_length=512),
     db: AsyncSession = Depends(get_db),
     viewer: User = Depends(get_mobile_user),
 ):
-    await _authorize(viewer, subject_id, scope, db)
-    return await _summary(subject_id, scope, period, db)
+    if not await _authorize(viewer, subject_id, scope, db):
+        return Response(status_code=403)
+    return await _summary(subject_id, scope, period, db, viewer, window_anchor)
 
 
-@router.post("/people/summaries", response_model=SummaryBatch)
+@router.post("/people/summaries", response_model=PairedBatch)
 async def person_summaries(
-    subject_ids: list[UUID],
-    scope: Scope,
-    period: Period,
+    request: PairedRequest,
     db: AsyncSession = Depends(get_db),
     viewer: User = Depends(get_mobile_user),
 ):
-    if not subject_ids or len(subject_ids) > 5 or len(set(subject_ids)) != len(subject_ids):
-        raise HTTPException(status_code=422, detail="One to five distinct subjects required")
-    if (scope == "author" or any(subject_id != viewer.id for subject_id in subject_ids)) and not await _trace_allowed(
-        viewer
-    ):
-        raise HTTPException(status_code=403, detail="Restricted")
-    rows = await db.scalars(select(User.id).where(User.id.in_(subject_ids), User.auth_provider != "deactivated"))
-    if set(rows.all()) != set(subject_ids):
-        raise HTTPException(status_code=404, detail="Not found")
-    return SummaryBatch(items=[await _summary(subject_id, scope, period, db) for subject_id in subject_ids])
+    subject_ids = request.subject_ids
+    if len(set(subject_ids)) != len(subject_ids):
+        raise HTTPException(status_code=422, detail="Distinct subjects required")
+    privileged = await _trace_allowed(viewer)
+    if not privileged and viewer.id not in subject_ids:
+        return Response(status_code=403)
+    if privileged:
+        rows = await db.scalars(select(User.id).where(User.id.in_(subject_ids), User.auth_provider != "deactivated"))
+        if set(rows.all()) != set(subject_ids):
+            raise HTTPException(status_code=404, detail="Not found")
+    window, anchor = _paired_window(viewer, request.period, request.window_anchor)
+    # Never look up other people's existence or facts for an unprivileged
+    # mixed batch; the neutral status is identical for absent and forbidden IDs.
+    permitted_ids = subject_ids if privileged else [viewer.id]
+    authors, users = await trace_pair_batch(
+        db, permitted_ids, viewer.id, str(DEFAULT_PROJECT_ID), window.start, window.end, include_author=privileged
+    )
+    items = []
+    for subject_id in subject_ids:
+        if not privileged and subject_id != viewer.id:
+            items.append(
+                PairedPerson(
+                    subject_id=subject_id,
+                    author_revision="restricted",
+                    user_revision="restricted",
+                    author_usage=RestrictedScope(),
+                    user_usage=RestrictedScope(),
+                )
+            )
+            continue
+        author, user = authors.get(subject_id), users.get(subject_id)
+        items.append(
+            PairedPerson(
+                subject_id=subject_id,
+                author_revision=await _scope_revision(db, viewer, subject_id, "author", anchor)
+                if privileged
+                else "restricted",
+                user_revision=await _scope_revision(db, viewer, subject_id, "user", anchor),
+                author_usage=(_partial(author["roots"], author["roots"]) if author else Reading())
+                if privileged
+                else RestrictedScope(),
+                user_usage=_partial(user["roots"], user["roots"]) if user else Reading(),
+            )
+        )
+    return PairedBatch(window=window, window_anchor=anchor, items=items)
+
+
+def _cursor(claims: dict) -> str:
+    token = sign_token({"purpose": "mobile-page-v1", "project": str(DEFAULT_PROJECT_ID), **claims})
+    if len(token) > 512:
+        raise HTTPException(503, "Cursor unavailable")
+    return token
+
+
+def _read_cursor(token: str, expected: dict) -> dict:
+    try:
+        claims = verify_token(token)
+        if any(claims.get(key) != value for key, value in expected.items()):
+            raise ValueError("cursor scope changed")
+        return claims
+    except (ValueError, TypeError, jwt.InvalidTokenError) as exc:
+        raise HTTPException(409, "stale_cursor") from exc
 
 
 @router.get("/people", response_model=PeoplePage)
 async def people_search(
     q: str = Query(min_length=3, max_length=64),
     limit: int = Query(20, ge=1, le=20),
+    cursor: str | None = Query(None, max_length=512),
     db: AsyncSession = Depends(get_db),
     viewer: User = Depends(get_mobile_user),
 ):
-    del viewer
     term = q.strip()
     if len(term) < 3:
         raise HTTPException(status_code=422, detail="Search term too short")
-    # Literal prefix, no email/role search. Index-friendly for a bounded first page.
     pattern = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    key = {
+        "sub": str(viewer.id),
+        "q": hashlib.sha256(term.casefold().encode()).hexdigest(),
+        "purpose": "mobile-page-v1",
+        "project": str(DEFAULT_PROJECT_ID),
+    }
+    order = ()
+    if cursor:
+        page = _read_cursor(cursor, key)
+        order = (
+            or_(
+                User.username > page["last_name"],
+                and_(User.username == page["last_name"], User.id > UUID(page["last_id"])),
+            ),
+        )
     rows = await db.scalars(
         select(User)
         .where(
             User.auth_provider != "deactivated",
-            (User.username.ilike(pattern, escape="\\") | User.name.ilike(pattern, escape="\\")),
+            or_(User.username.ilike(pattern, escape="\\"), User.name.ilike(pattern, escape="\\")),
+            *order,
         )
         .order_by(User.username, User.id)
-        .limit(limit)
+        .limit(limit + 1)
     )
-    return PeoplePage(items=[PublicPerson.model_validate(row, from_attributes=True) for row in rows.all()])
+    found = rows.all()
+    page_items = found[:limit]
+    next_cursor = (
+        _cursor({**key, "last_name": page_items[-1].username, "last_id": str(page_items[-1].id)})
+        if len(found) > limit
+        else None
+    )
+    return PeoplePage(
+        items=[PublicPerson.model_validate(row, from_attributes=True) for row in page_items],
+        complete=next_cursor is None,
+        next_cursor=next_cursor,
+    )
+
+
+@router.post("/people/resolve", response_model=PeoplePage)
+async def resolve_people(
+    request: ResolveRequest, db: AsyncSession = Depends(get_db), viewer: User = Depends(get_mobile_user)
+):
+    del viewer
+    if len(set(request.subject_ids)) != len(request.subject_ids):
+        raise HTTPException(422, "Distinct subjects required")
+    rows = await db.scalars(select(User).where(User.id.in_(request.subject_ids), User.auth_provider != "deactivated"))
+    indexed = {row.id: row for row in rows.all()}
+    return PeoplePage(
+        items=[
+            PublicPerson.model_validate(indexed[ident], from_attributes=True)
+            for ident in request.subject_ids
+            if ident in indexed
+        ],
+        complete=True,
+    )
+
+
+def _page_binding(viewer: User, subject: UUID, scope: Scope, anchor: str, revision: str) -> dict:
+    return {
+        "sub": str(viewer.id),
+        "subject": str(subject),
+        "scope": scope,
+        "anchor": hashlib.sha256(anchor.encode()).hexdigest(),
+        "revision": hashlib.sha256(revision.encode()).hexdigest(),
+        "purpose": "mobile-page-v1",
+        "project": str(DEFAULT_PROJECT_ID),
+    }
 
 
 @router.get("/people/{subject_id}/{scope}/components", response_model=ComponentPage)
@@ -323,20 +553,56 @@ async def components(
     subject_id: UUID,
     scope: Scope,
     period: Period,
+    window_anchor: str = Query(max_length=512),
+    expected_revision: str = Query(max_length=512),
+    cursor: str | None = Query(None, max_length=512),
     db: AsyncSession = Depends(get_db),
     viewer: User = Depends(get_mobile_user),
 ):
-    await _authorize(viewer, subject_id, scope, db)
-    window = _window(period)
-    rows = await qualified_components(db, subject_id, scope, str(DEFAULT_PROJECT_ID), window.start, window.end)
-    if rows is None:
-        return ComponentPage(subject_id=subject_id, scope=scope, window=window, revision="unqualified")
+    if not await _authorize(viewer, subject_id, scope, db):
+        return Response(status_code=403)
+    window, anchor = _paired_window(viewer, period, window_anchor)
+    if not await readable(db, str(DEFAULT_PROJECT_ID)):
+        return ComponentPage(
+            subject_id=subject_id, scope=scope, window=window, window_anchor=anchor, revision="unqualified"
+        )
+    revision = await _scope_revision(db, viewer, subject_id, scope, anchor)
+    if revision != expected_revision:
+        raise HTTPException(409, "stale_cursor")
+    binding = _page_binding(viewer, subject_id, scope, anchor, revision)
+    after = None
+    if cursor:
+        claims = _read_cursor(cursor, binding)
+        try:
+            after = (int(claims["last_roots"]), UUID(claims["last_id"]))
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(409, "stale_cursor") from exc
+    found = await trace_component_page(
+        db,
+        subject_id,
+        scope,
+        str(DEFAULT_PROJECT_ID),
+        window.start,
+        window.end,
+        viewer_self=viewer.id == subject_id,
+        after=after,
+    )
+    if found is None:
+        return ComponentPage(subject_id=subject_id, scope=scope, window=window, window_anchor=anchor, revision=revision)
+    items = [_component(row) for row in found[:20]]
+    more = len(found) > 20
+    next_cursor = (
+        _cursor({**binding, "last_roots": found[19]["roots"], "last_id": str(found[19]["id"])}) if more else None
+    )
     return ComponentPage(
         subject_id=subject_id,
         scope=scope,
         window=window,
-        revision="observed-partial",
-        items=[_component(row["id"], row["name"], row) for row in rows],
+        window_anchor=anchor,
+        revision=revision,
+        items=items,
+        complete=not more,
+        next_cursor=next_cursor,
     )
 
 
@@ -347,27 +613,39 @@ async def component_detail(
     kind: Literal["mcp", "skill", "hook"],
     component_id: UUID,
     period: Period,
+    window_anchor: str = Query(max_length=512),
+    expected_revision: str = Query(max_length=512),
     db: AsyncSession = Depends(get_db),
     viewer: User = Depends(get_mobile_user),
 ):
-    await _authorize(viewer, subject_id, scope, db)
-    if kind != "mcp":
-        raise HTTPException(status_code=404, detail="Not found")
-    window = _window(period)
-    observed = await qualified_observations(
-        db, subject_id, scope, str(DEFAULT_PROJECT_ID), window.start, window.end, component_id
+    if not await _authorize(viewer, subject_id, scope, db):
+        return Response(status_code=403)
+    if kind != "mcp" or not await readable(db, str(DEFAULT_PROJECT_ID)):
+        raise HTTPException(404, "Not found")
+    window, anchor = _paired_window(viewer, period, window_anchor)
+    revision = await _scope_revision(db, viewer, subject_id, scope, anchor)
+    if revision != expected_revision:
+        raise HTTPException(409, "stale_cursor")
+    found = await trace_component_page(
+        db,
+        subject_id,
+        scope,
+        str(DEFAULT_PROJECT_ID),
+        window.start,
+        window.end,
+        viewer_self=viewer.id == subject_id,
+        component=component_id,
+        limit=1,
     )
-    if observed is None:
-        raise HTTPException(status_code=404, detail="Not found")
-    listing = await db.scalar(select(McpListing).where(McpListing.id == component_id, McpListing.is_private.is_(False)))
-    if listing is None:
-        raise HTTPException(status_code=404, detail="Not found")
+    if not found:
+        raise HTTPException(404, "Not found")
     return ComponentDetail(
         subject_id=subject_id,
         scope=scope,
         window=window,
-        revision="observed-partial",
-        component=_component(listing.id, listing.name, observed),
+        window_anchor=anchor,
+        revision=revision,
+        component=_component(found[0]),
     )
 
 

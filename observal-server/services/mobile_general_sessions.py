@@ -7,6 +7,7 @@ partial positives; if no roots qualify or the candidate page overflows the
 reading is unknown, never a fabricated zero.
 """
 
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
@@ -165,6 +166,27 @@ async def prompted_roots(
             if len(parents) > 1:
                 break
             if not parents:
+                try:
+                    header = json.loads(lines[0]["raw_line"])
+                except (KeyError, ValueError, TypeError):
+                    break
+                if not isinstance(header, dict) or header.get("type") != "session" or header.get("id") != current:
+                    break
+                witnessed = await db.scalar(
+                    text(
+                        "SELECT 1 FROM mobile_run_instances WHERE project_id=:project AND user_id=:user "
+                        "AND harness='pi' AND session_id=:session AND root_verified=true "
+                        "AND source_status IN ('complete','partial') AND header_hash=:hash LIMIT 1"
+                    ),
+                    {
+                        "project": project,
+                        "user": uuid.UUID(user_id),
+                        "session": current,
+                        "hash": hashlib.sha256(lines[0]["raw_line"].encode()).hexdigest(),
+                    },
+                )
+                if not witnessed:
+                    break
                 for row in lines:
                     if row["event_type"] != "user_prompt":
                         continue
@@ -187,7 +209,10 @@ async def prompted_roots(
                 # A full source with no validated prompt does not contribute
                 # a root; partial failures never erase other proven roots.
                 break
-            current = parents.pop()
+            # Bare parent IDs are not incarnation-scoped linkage. A child
+            # cannot qualify until both run nonces and launcher association
+            # are independently bound; never use this legacy chain for counts.
+            break
     if not roots:
         return None
     return {

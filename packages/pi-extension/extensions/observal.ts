@@ -50,6 +50,9 @@ export interface PendingBatch {
 interface CursorEntry {
   offset: number;
   line_count: number;
+  run_incarnation?: string;
+  run_header_hash?: string;
+  source_identity?: string;
   finalized?: boolean;
   last_pushed_at?: number;
   local_valid?: boolean;
@@ -81,6 +84,9 @@ interface ObservalState {
   generation: number;
   layerHash: string | null;
   layerSnapshot: LayerSnapshot | null;
+  runIncarnation?: string;
+  runHeaderHash?: string;
+  identityConflict?: boolean;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -681,20 +687,63 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function writeCursor(sessionId: string, offset: number, lineCount: number, finalized = false): boolean {
+  function writeCursor(sessionId: string, offset: number, lineCount: number, finalized = false, run?: CursorEntry): boolean {
     try {
       fs.mkdirSync(OBSERVAL_DIR, { recursive: true });
       let data: Record<string, CursorEntry> = {};
       if (fs.existsSync(SYNC_STATE_PATH)) {
         data = JSON.parse(fs.readFileSync(SYNC_STATE_PATH, "utf-8"));
       }
-      data[sessionId] = { offset, line_count: lineCount, finalized, last_pushed_at: Date.now() };
+      data[sessionId] = { ...data[sessionId], ...run, offset, line_count: lineCount, finalized, last_pushed_at: Date.now() };
       const temporary = `${SYNC_STATE_PATH}.${process.pid}.${Date.now()}.tmp`;
       fs.writeFileSync(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
       fs.renameSync(temporary, SYNC_STATE_PATH);
       return true;
     } catch {
       return false;
+    }
+  }
+
+  function ensureRunIdentity(s: ObservalState): void {
+    if (!s.sessionFile || s.identityConflict) return;
+    try {
+      const stat = fs.statSync(s.sessionFile);
+      if (!stat.isFile()) return;
+      const fd = fs.openSync(s.sessionFile, "r");
+      let first: string;
+      try {
+        const buffer = Buffer.alloc(4096);
+        const length = fs.readSync(fd, buffer, 0, buffer.length, 0);
+        const end = buffer.indexOf(10, 0);
+        if (end < 0 || end >= length) return;
+        first = buffer.toString("utf-8", 0, end);
+      } finally {
+        fs.closeSync(fd);
+      }
+      const header = JSON.parse(first);
+      if (header?.type !== "session" || header?.id !== s.sessionId ||
+          typeof header.timestamp !== "string" || !Number.isFinite(Date.parse(header.timestamp)) ||
+          !/[Zz]|[+-]\d\d:\d\d$/.test(header.timestamp)) return;
+      const hash = sha256(Buffer.from(first));
+      const identity = sha256(Buffer.from(JSON.stringify([path.resolve(s.sessionFile), stat.ino, hash])));
+      const cursor = readCursor(s.sessionId);
+      if ((cursor.source_identity && cursor.source_identity !== identity) ||
+          (cursor.line_count > 0 && !cursor.run_incarnation) ||
+          (s.runIncarnation && s.runIncarnation !== cursor.run_incarnation)) {
+        s.identityConflict = true;
+        return;
+      }
+      const run = cursor.run_incarnation ?? crypto.randomUUID();
+      if (cursor.run_header_hash && cursor.run_header_hash !== hash) {
+        s.identityConflict = true;
+        return;
+      }
+      if (!cursor.run_incarnation && !writeCursor(s.sessionId, cursor.offset, cursor.line_count, false,
+            { run_incarnation: run, run_header_hash: hash, source_identity: identity, offset: 0, line_count: 0 })) return;
+      s.runIncarnation = run;
+      s.runHeaderHash = hash;
+    } catch {
+      // Missing/invalid source remains legacy-only. Never invent an incarnation.
     }
   }
 
@@ -846,6 +895,8 @@ export default function (pi: ExtensionAPI) {
     opts: { final: boolean; repairAttempted?: boolean },
   ): Promise<void> {
     if (!s.config || !s.sessionFile) return;
+    ensureRunIdentity(s);
+    if (s.identityConflict) return; // Same session ID, different source: no replay or overwrite.
 
     const gen = ++s.generation;
 
@@ -921,6 +972,10 @@ export default function (pi: ExtensionAPI) {
           session_hash: audit?.hash,
           hashed_line_count: audit?.lineCount,
         };
+        if (s.runIncarnation && s.runHeaderHash) {
+          payload.run_incarnation = s.runIncarnation;
+          payload.run_header_hash = s.runHeaderHash;
+        }
         const finalCapabilities = capabilitiesForSession(s);
         if (finalCapabilities.length > 0) payload.capabilities_used = finalCapabilities;
         const pending: PendingBatch = {
@@ -969,6 +1024,10 @@ export default function (pi: ExtensionAPI) {
               }
             : {}),
         };
+        if (s.runIncarnation && s.runHeaderHash) {
+          payload.run_incarnation = s.runIncarnation;
+          payload.run_header_hash = s.runHeaderHash;
+        }
         const chunkCapabilities = capabilitiesForSession(s);
         if (chunkCapabilities.length > 0) payload.capabilities_used = chunkCapabilities;
         const pending: PendingBatch = {

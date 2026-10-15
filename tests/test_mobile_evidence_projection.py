@@ -52,8 +52,10 @@ def test_forty_independently_linked_calls_one_logical_root():
     rows += [_row(1, {"role": "assistant", "content": [_call(f"c{i}") for i in range(40)]})]
     rows += [_row(i + 2, _result(f"c{i}")) for i in range(40)]
     extracted = PiInvocationExtractor().extract(rows)
-    facts, partial = _matched(extracted, rows, {_HASH: {"alpha": _COMPONENT}})
+    verified = uuid.uuid4()
+    facts, partial = _matched(extracted, rows, {_HASH: {"alpha": _COMPONENT}}, verified_root=verified)
     assert len(facts) == 40 and not partial
+    assert {r["root_run_incarnation"] for r in facts} == {verified}
     assert len({(r["source_line_offset"], r["block_key"]) for r in facts}) == 40
     assert {r["root_session_id"] for r in facts} == {"session-1"}
     assert len({r["event_time"].date() for r in facts}) == 1
@@ -64,6 +66,11 @@ def test_unprompted_calls_have_no_qualified_root_or_trace():
     rows = [_row(0, {"role": "assistant", "content": [_call("id")]}), _row(1, _result("id"))]
     facts, partial = _matched(PiInvocationExtractor().extract(rows), rows, {_HASH: {"alpha": _COMPONENT}})
     assert len(facts) == 1 and facts[0]["root_session_id"] is None and partial
+    verified = uuid.uuid4()
+    attributed, partial = _matched(
+        PiInvocationExtractor().extract(rows), rows, {_HASH: {"alpha": _COMPONENT}}, verified_root=verified
+    )
+    assert len(attributed) == 1 and attributed[0]["root_run_incarnation"] == verified and not partial
 
 
 def test_missing_source_time_cannot_inherit_clickhouse_time():

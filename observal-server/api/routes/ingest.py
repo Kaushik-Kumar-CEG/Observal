@@ -6,6 +6,8 @@
 
 """Session JSONL ingest endpoint."""
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger as optic
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -95,6 +97,9 @@ class SessionIngestRequest(BaseModel):
     total_credits: float | None = Field(None, ge=0)
     # Claude Code subagent attribution: set when this session is a subagent
     parent_session_id: str | None = Field(None, max_length=MAX_SHORT_STRING_LENGTH)
+    # Optional upgraded Pi identity; legacy senders remain unqualified.
+    run_incarnation: UUID | None = None
+    run_header_hash: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
     # Discovery resources the CLI's capability lock attributes to this session
     capabilities_used: list[CapabilityUsed] | None = Field(None, max_length=MAX_CAPABILITIES_PER_PUSH)
 
@@ -166,6 +171,20 @@ async def ingest_session(
 
     user_id = str(current_user.id)
     project_id = DEFAULT_PROJECT_ID
+
+    if req.harness == "pi" or req.run_incarnation is not None or req.run_header_hash is not None:
+        from services.mobile_run_identity import admit_pi_run
+
+        await admit_pi_run(
+            project=str(project_id),
+            user=current_user.id,
+            session=req.session_id,
+            harness=req.harness,
+            start_offset=req.start_offset,
+            lines=req.lines,
+            run_incarnation=req.run_incarnation,
+            run_header_hash=req.run_header_hash,
+        )
 
     optic.debug(
         "ingest request: session={}, harness={}, lines={}, offset={}, final={}",

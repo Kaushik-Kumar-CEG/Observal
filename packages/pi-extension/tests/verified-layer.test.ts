@@ -20,7 +20,7 @@ fs.writeFileSync(path.join(piHome, "mcp.json"), JSON.stringify({ mcpServers: { a
 const id = "a11c01d1-1111-4111-8111-111111111111";
 const pin = { id, type: "mcp", name: sentinel, version: "1.2.3", local_name: "alpha", secret: sentinel };
 const sessionFile = path.join(home, "session.jsonl");
-fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", timestamp: new Date().toISOString() })}\n`);
+fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: "pi-v2", timestamp: new Date().toISOString() })}\n`);
 const canonical = JSON.stringify([[id, "1.2.3", "alpha"]]);
 const v2 = `v2_${crypto.createHash("sha256").update(canonical).digest("hex")}`;
 const manifestRequests: string[] = [];
@@ -72,11 +72,15 @@ assert(snapshotRequests.length > 0);
 assert(snapshotRequests.every((body) => !body.includes(sentinel)), "legacy snapshot must omit secret-bearing lockfile names and local file contents");
 assert.deepEqual(JSON.parse(snapshotRequests[0]).pinned_versions, { agents: [], standalone: [] });
 assert.equal(ingestPayloads[0].layer_hash, v2, "only acknowledged mapping is eligible for v2");
+assert.match(String(ingestPayloads[0].run_incarnation), /^[0-9a-f-]{36}$/);
+assert.match(String(ingestPayloads[0].run_header_hash), /^[0-9a-f]{64}$/);
 accept = false;
 await handlers.get("session_start")!({ reason: "start" }, context);
 fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: "next" } })}\n`);
 await handlers.get("agent_end")!({}, context);
 assert.equal(ingestPayloads.at(-1)?.layer_hash?.startsWith("v2_"), false, "bad receipt stays legacy");
+assert.equal(ingestPayloads.at(-1)?.run_incarnation, ingestPayloads[0].run_incarnation,
+  "same retained source keeps a single incarnation across reconnects");
 
 accept = true;
 const uploaded = manifestRequests.length;

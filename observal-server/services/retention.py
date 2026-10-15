@@ -142,6 +142,14 @@ async def run_retention_purge(ctx: dict | None = None):
         optic.info("skipping retention purge while insights are in flight")
         return
 
+    if trace_days or max_trace_count:
+        # The control-store commit MUST precede any asynchronous CH mutation.
+        # If Postgres fails, abort the purge instead of exposing stale derived
+        # facts while ClickHouse is deleting their source.
+        from services.mobile_read_control import deny_before_purge
+
+        await deny_before_purge(str(DEFAULT_PROJECT_ID))
+
     now = datetime.now(UTC)
     stats: dict[str, object] = {}
     if trace_days:

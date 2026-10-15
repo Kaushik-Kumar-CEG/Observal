@@ -152,7 +152,7 @@ async def qualified_observations(
     stats_sql = (
         "SELECT count(*) AS calls, "
         "count(DISTINCT (e.user_id, e.session_id)) AS eligible_sessions, "
-        "count(DISTINCT (e.user_id, e.root_session_id)) FILTER (WHERE e.root_session_id IS NOT NULL) AS roots, "
+        "count(DISTINCT (e.user_id, e.root_run_incarnation)) FILTER (WHERE e.root_run_incarnation IS NOT NULL) AS roots, "
         "count(DISTINCT (e.event_time AT TIME ZONE 'UTC')::date) AS days " + _VISIBLE + predicate + restrict
     )
     row = (await db.execute(text(stats_sql), params)).one()
@@ -177,7 +177,7 @@ async def qualified_components(
         await db.execute(
             text(
                 "SELECT l.id,l.name,count(*) AS calls,count(DISTINCT(e.user_id,e.session_id)) AS eligible_sessions,"
-                "count(DISTINCT(e.user_id,e.root_session_id)) FILTER (WHERE e.root_session_id IS NOT NULL) AS roots,"
+                "count(DISTINCT(e.user_id,e.root_run_incarnation)) FILTER (WHERE e.root_run_incarnation IS NOT NULL) AS roots,"
                 "count(DISTINCT(e.event_time AT TIME ZONE 'UTC')::date) AS days "
                 + _VISIBLE
                 + predicate
@@ -200,3 +200,175 @@ async def qualified_components(
         )
         for row in rows
     ]
+
+
+# The prospective trace-first path reads indexed PG facts only. Existing v1
+# functions above retain their bounded source revalidation until the project
+# read-control/TTL/erasure gate is qualified. This is NOT a third projector.
+_TRACE_FROM = """
+FROM mobile_evidence_events e
+JOIN mobile_run_instances run ON run.project_id=e.project_id AND run.user_id=e.user_id
+ AND run.harness=e.harness AND run.run_incarnation=e.root_run_incarnation
+ AND run.root_verified=true AND run.source_status IN ('complete','partial')
+JOIN mobile_layer_components map ON map.project_id=e.project_id AND map.user_id=e.user_id
+ AND map.harness=e.harness AND map.layer_hash=e.layer_hash AND map.alias=e.alias AND map.component_id=e.component_id
+JOIN mobile_session_publications pub ON pub.project_id=e.project_id AND pub.user_id=e.user_id
+ AND pub.harness=e.harness AND pub.session_id=e.session_id AND pub.status IN ('complete','partial')
+JOIN mcp_listings l ON l.id=e.component_id
+JOIN mobile_listing_provenance p ON p.kind='mcp' AND p.listing_id=l.id
+JOIN users origin ON origin.id=p.original_author_id AND origin.auth_provider!='deactivated'
+JOIN mcp_versions v ON v.id=map.version_id AND v.listing_id=l.id
+JOIN users actor ON actor.id=e.user_id AND actor.auth_provider!='deactivated'
+LEFT JOIN (
+  SELECT pe.listing_id,pe.version_id,pe.status,pe.recorded_at,
+   lead(pe.recorded_at) OVER (PARTITION BY pe.listing_id,pe.version_id
+                             ORDER BY pe.recorded_at,pe.id) AS next_recorded_at
+  FROM mobile_publication_events pe WHERE pe.kind='mcp'
+) approval ON approval.listing_id=l.id AND approval.version_id=v.id
+ AND approval.recorded_at<=e.event_time
+ AND (approval.next_recorded_at IS NULL OR approval.next_recorded_at>e.event_time)
+WHERE e.project_id=:project AND e.harness='pi' AND e.event_time>=:start AND e.event_time<:end
+ AND e.root_run_incarnation IS NOT NULL
+"""
+_TRACE_APPROVED = " AND approval.status='approved'"
+
+
+def _trace_scope(scope: Scope, *, viewer_self: bool) -> str:
+    public = "l.is_private=false AND v.status IN ('approved','archived')" + _TRACE_APPROVED
+    if scope == "author":
+        return " AND p.original_author_id=:subject AND " + public
+    # A private self-owned listing is visible only to the owner reading their
+    # own User scope. An admin viewing another user never inherits that access.
+    if viewer_self:
+        return " AND e.user_id=:subject AND ((" + public + ") OR (l.is_private=true AND l.submitted_by=:subject))"
+    return " AND e.user_id=:subject AND " + public
+
+
+async def trace_union(
+    db: AsyncSession,
+    subject: uuid.UUID,
+    scope: Scope,
+    project: str,
+    start: datetime,
+    end: datetime,
+    *,
+    viewer_self: bool = False,
+) -> dict | None:
+    """Partial-only distinct actor/root union; no source JSONL per card.
+
+    None is *not recorded*, never a measured zero. Full-window supported zero
+    awaits an instrumented all-kind zero-positive eligibility cohort.
+    """
+    from services.mobile_read_control import readable
+
+    if not await readable(db, project):
+        return None
+    sql = (
+        "SELECT count(DISTINCT (e.user_id,e.root_run_incarnation)) AS roots, "
+        "count(*) AS calls,count(DISTINCT (e.event_time AT TIME ZONE 'UTC')::date) AS days "
+        + _TRACE_FROM
+        + _trace_scope(scope, viewer_self=viewer_self)
+    )
+    row = (await db.execute(text(sql), {"project": project, "subject": subject, "start": start, "end": end})).one()
+    return {"roots": row.roots, "calls": row.calls, "days": row.days} if row.roots else None
+
+
+async def trace_pair_batch(
+    db: AsyncSession,
+    subjects: list[uuid.UUID],
+    viewer: uuid.UUID,
+    project: str,
+    start: datetime,
+    end: datetime,
+    *,
+    include_author: bool = True,
+) -> tuple[dict[uuid.UUID, dict], dict[uuid.UUID, dict]]:
+    """Two grouped indexed scans per viewport; no per-follow JSONL or N+1 fact reads."""
+    from services.mobile_read_control import readable
+
+    if not await readable(db, project):
+        return {}, {}
+    params = {"project": project, "subjects": subjects, "viewer": viewer, "start": start, "end": end}
+    aggregates = (
+        "count(DISTINCT (e.user_id,e.root_run_incarnation)) AS roots, "
+        "count(*) AS calls,count(DISTINCT (e.event_time AT TIME ZONE 'UTC')::date) AS days "
+    )
+    public = "(l.is_private=false AND v.status IN ('approved','archived')" + _TRACE_APPROVED + ")"
+    author_sql = (
+        "SELECT p.original_author_id AS subject,"
+        + aggregates
+        + _TRACE_FROM
+        + " AND p.original_author_id=ANY(CAST(:subjects AS uuid[])) AND "
+        + public
+        + " GROUP BY p.original_author_id"
+    )
+    # Self-owned private components appear only in this viewer's own User
+    # scope, not on another user's User activity viewed by an administrator.
+    user_sql = (
+        "SELECT e.user_id AS subject,"
+        + aggregates
+        + _TRACE_FROM
+        + " AND e.user_id=ANY(CAST(:subjects AS uuid[])) AND ("
+        + public
+        + " OR (e.user_id=:viewer AND l.is_private=true AND l.submitted_by=:viewer))"
+        + " GROUP BY e.user_id"
+    )
+    authors = (
+        {
+            row.subject: {"roots": row.roots, "calls": row.calls, "days": row.days}
+            for row in (await db.execute(text(author_sql), params)).all()
+            if row.roots
+        }
+        if include_author
+        else {}
+    )
+    users = {
+        row.subject: {"roots": row.roots, "calls": row.calls, "days": row.days}
+        for row in (await db.execute(text(user_sql), params)).all()
+        if row.roots
+    }
+    return authors, users
+
+
+async def trace_component_page(
+    db: AsyncSession,
+    subject: uuid.UUID,
+    scope: Scope,
+    project: str,
+    start: datetime,
+    end: datetime,
+    *,
+    viewer_self: bool = False,
+    after: tuple[int, uuid.UUID] | None = None,
+    component: uuid.UUID | None = None,
+    limit: int = 20,
+) -> list[dict] | None:
+    """Indexed PG fact aggregation with stable reach/id keyset, 21-row probe."""
+    from services.mobile_read_control import readable
+
+    if not await readable(db, project):
+        return None
+    params = {"project": project, "subject": subject, "start": start, "end": end, "limit": limit + 1}
+    component_sql = ""
+    if component is not None:
+        component_sql = " AND l.id=:component"
+        params["component"] = component
+    after_sql = ""
+    if after:
+        after_sql = (
+            " HAVING count(DISTINCT (e.user_id,e.root_run_incarnation))<:after_roots OR "
+            "(count(DISTINCT (e.user_id,e.root_run_incarnation))=:after_roots AND l.id>:after_id)"
+        )
+        params.update(after_roots=after[0], after_id=after[1])
+    sql = (
+        "SELECT l.id,l.name,p.original_author_id,origin.username AS author_username, "
+        "origin.name AS author_name, "
+        "count(DISTINCT (e.user_id,e.root_run_incarnation)) AS roots, count(*) AS calls "
+        + _TRACE_FROM
+        + _trace_scope(scope, viewer_self=viewer_self)
+        + component_sql
+        + " GROUP BY l.id,l.name,p.original_author_id,origin.username,origin.name"
+        + after_sql
+        + " ORDER BY roots DESC,l.id LIMIT :limit"
+    )
+    return [dict(row._mapping) for row in (await db.execute(text(sql), params)).all()]

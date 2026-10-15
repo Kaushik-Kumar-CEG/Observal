@@ -43,37 +43,16 @@ def _revision(rows: list[dict], *, retained_suffix: bool = False) -> str | None:
     ).hexdigest()
 
 
-def _matched(extracted, rows: list[dict], mappings: dict[str, dict[str, uuid.UUID]]) -> tuple[list[dict], bool]:
+def _matched(
+    extracted, rows: list[dict], mappings: dict[str, dict[str, uuid.UUID]], *, verified_root: uuid.UUID | None = None
+) -> tuple[list[dict], bool]:
     """Only result-linked calls with a unique server alias and valid time qualify."""
     valid = []
     partial = bool(extracted.malformed_source_records)
     now = datetime.now(UTC)
     by_offset = {r["line_offset"]: r for r in rows}
-    # A parent-free source is not automatically a prompted logical root. Its
-    # actual user prompt must precede the invocation in this retained source.
-    prompts: set[int] = set()
-    if rows[0]["line_offset"] == 0 and not any(r.get("parent_session_id") for r in rows):
-        for row in rows:
-            if row.get("event_type") != "user_prompt":
-                continue
-            try:
-                raw = json.loads(row["raw_line"])
-            except (ValueError, TypeError, KeyError):
-                continue
-            message = raw.get("message") if isinstance(raw, dict) else None
-            stamp = raw.get("timestamp") if isinstance(raw, dict) else None
-            if (
-                isinstance(message, dict)
-                and message.get("role") == "user"
-                and message.get("content")
-                and isinstance(stamp, str)
-            ):
-                try:
-                    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-                if parsed.tzinfo is not None and 1971 <= parsed.year < 2100:
-                    prompts.add(row["line_offset"])
+    # A parent-free source or a preceding prompt does not attest root origin.
+    # Only a separately verified incarnation/lineage witness may count reach.
     for call in extracted.invocations:
         source = by_offset.get(call.source_line_offset)
         alias = call.mcp_server
@@ -89,9 +68,13 @@ def _matched(extracted, rows: list[dict], mappings: dict[str, dict[str, uuid.UUI
         ):
             partial = True
             continue
-        # Child-to-root linkage is NOT inferred from a bare parent ID. The
-        # first implementation marks child reach unknown while retaining calls.
-        root = source["session_id"] if any(offset <= call.source_line_offset for offset in prompts) else None
+        root = (
+            source["session_id"]
+            if verified_root is not None
+            and rows[0]["line_offset"] == 0
+            and not any(r.get("parent_session_id") for r in rows)
+            else None
+        )
         valid.append(
             {
                 "source_line_offset": call.source_line_offset,
@@ -100,6 +83,7 @@ def _matched(extracted, rows: list[dict], mappings: dict[str, dict[str, uuid.UUI
                 "layer_hash": source["layer_hash"],
                 "alias": alias,
                 "root_session_id": root,
+                "root_run_incarnation": verified_root if root is not None else None,
                 "event_time": stamp,
                 "result_state": call.result_state,
             }
@@ -148,6 +132,28 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         )
         status = "pending_source"
         valid: list[dict] = []
+        run = (
+            await db.execute(
+                text(
+                    "SELECT run_incarnation,header_hash,root_verified FROM mobile_run_instances "
+                    "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session FOR UPDATE"
+                ),
+                scope,
+            )
+        ).first()
+        run_incarnation = None
+        if run and revision is not None and first_source_offset == 0 and rows:
+            try:
+                header = json.loads(rows[0]["raw_line"])
+            except (ValueError, TypeError, KeyError):
+                header = None
+            if (
+                isinstance(header, dict)
+                and header.get("type") == "session"
+                and header.get("id") == session
+                and hashlib.sha256(rows[0]["raw_line"].encode()).hexdigest() == run.header_hash
+            ):
+                run_incarnation = run.run_incarnation
         if revision is not None:
             hashes = {r.get("layer_hash") for r in rows}
             if all(isinstance(digest, str) and digest.startswith("v2_") for digest in hashes):
@@ -172,12 +178,55 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                         mapping.setdefault(digest, {})[alias] = component
                 if all(len(mapping.get(digest, {})) == expected.get(digest, -1) for digest in hashes):
                     extraction = PiInvocationExtractor().extract(rows)
-                    valid, partial = _matched(extraction, rows, mapping)
+                    valid, partial = _matched(
+                        extraction,
+                        rows,
+                        mapping,
+                        verified_root=run_incarnation if run_incarnation and run.root_verified else None,
+                    )
                     status = "partial" if partial or first_source_offset else "complete"
                 else:
                     status = "pending_mapping"
             else:
                 status = "legacy_layer"
+        current = (
+            await db.execute(
+                text(
+                    "SELECT source_revision,status,first_source_offset FROM mobile_session_publications "
+                    "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
+                ),
+                scope,
+            )
+        ).first()
+        if current and (current.source_revision, current.status, current.first_source_offset) == (
+            revision or "unknown",
+            status,
+            first_source_offset,
+        ):
+            # Backfill and retention replay unchanged sources frequently. Do not
+            # invalidate a subject's pagination because an unrelated scan ran.
+            count = await db.scalar(
+                text(
+                    "SELECT count(*) FROM mobile_evidence_events WHERE project_id=:project AND user_id=:user "
+                    "AND harness=:harness AND session_id=:session"
+                ),
+                scope,
+            )
+            await db.rollback()
+            return {"status": status, "matched": count or 0}
+        old_components = (
+            (
+                await db.execute(
+                    text(
+                        "SELECT DISTINCT component_id FROM mobile_evidence_events WHERE project_id=:project "
+                        "AND user_id=:user AND harness=:harness AND session_id=:session"
+                    ),
+                    scope,
+                )
+            )
+            .scalars()
+            .all()
+        )
         # A source repair, deletion or mapping invalidation revokes the old
         # generation instead of leaving formerly attributed events readable.
         await db.execute(
@@ -191,11 +240,12 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
             await db.execute(
                 text(
                     "INSERT INTO mobile_evidence_events(project_id,user_id,harness,session_id,source_line_offset,"
-                    "block_key,layer_hash,alias,component_id,root_session_id,event_time,result_state) "
+                    "block_key,layer_hash,alias,component_id,root_session_id,run_incarnation,root_run_incarnation,"
+                    "event_time,result_state) "
                     "VALUES (:project,:user,:harness,:session,:source_line_offset,:block_key,:layer_hash,:alias,"
-                    ":component_id,:root_session_id,:event_time,:result_state)"
+                    ":component_id,:root_session_id,:run_incarnation,:root_run_incarnation,:event_time,:result_state)"
                 ),
-                {**scope, **fact},
+                {**scope, **fact, "run_incarnation": run_incarnation},
             )
         await db.execute(
             text(
@@ -207,6 +257,40 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
             ),
             {**scope, "revision": revision or "unknown", "status": status, "first_source_offset": first_source_offset},
         )
+        changed_components = set(old_components) | {fact["component_id"] for fact in valid}
+        subjects = {(owner, "user")}
+        if changed_components:
+            authors = (
+                (
+                    await db.execute(
+                        text(
+                            "SELECT DISTINCT original_author_id FROM mobile_listing_provenance "
+                            "WHERE kind='mcp' AND listing_id=ANY(:ids)"
+                        ),
+                        {"ids": list(changed_components)},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            subjects.update((author, "author") for author in authors)
+        for subject, subject_scope in subjects:
+            await db.execute(
+                text(
+                    "INSERT INTO mobile_scope_epochs(project_id,subject_id,scope,epoch) "
+                    "VALUES (:project,:subject,:scope,1) ON CONFLICT (project_id,subject_id,scope) "
+                    "DO UPDATE SET epoch=mobile_scope_epochs.epoch+1"
+                ),
+                {"project": project, "subject": subject, "scope": subject_scope},
+            )
+        if run is not None:
+            await db.execute(
+                text(
+                    "UPDATE mobile_run_instances SET source_status=:status "
+                    "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
+                ),
+                {**scope, "status": status if run_incarnation else "pending"},
+            )
         # ClickHouse and Postgres have no shared transaction. Recheck source
         # after publication preparation; a racing append/repair retries instead
         # of committing an already-stale generation.

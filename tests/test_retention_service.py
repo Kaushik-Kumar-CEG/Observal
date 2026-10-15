@@ -135,6 +135,7 @@ async def test_run_retention_purge_uses_default_project_and_settings():
         ),
         patch("services.retention._has_data", new=AsyncMock(return_value=True)),
         patch("services.retention._has_inflight_insights", new=AsyncMock(return_value=False)),
+        patch("services.mobile_read_control.deny_before_purge", new=AsyncMock()) as deny,
         patch("services.retention._purge_time_based", new=AsyncMock(return_value={})) as purge_time,
         patch("services.retention._purge_session_stats_orphans", new=AsyncMock()),
         patch("services.retention._purge_count_based", new=AsyncMock(return_value=1)) as purge_count,
@@ -144,6 +145,27 @@ async def test_run_retention_purge_uses_default_project_and_settings():
 
         await run_retention_purge()
 
+    deny.assert_awaited_once_with("default")
     assert purge_time.await_args.args[0] == "default"
     purge_count.assert_awaited_once_with("default", 5000)
     purge_reports.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retention_aborts_source_delete_when_mobile_barrier_fails():
+    with (
+        patch("services.retention.ds.get_bool", new=AsyncMock(return_value=True)),
+        patch(
+            "services.retention.ds.get_int",
+            new=AsyncMock(side_effect=lambda key, default=0: 7 if key == "retention.trace_days" else 0),
+        ),
+        patch("services.retention._has_data", new=AsyncMock(return_value=True)),
+        patch("services.retention._has_inflight_insights", new=AsyncMock(return_value=False)),
+        patch("services.mobile_read_control.deny_before_purge", new=AsyncMock(side_effect=RuntimeError("db down"))),
+        patch("services.retention._purge_time_based", new=AsyncMock()) as purge,
+    ):
+        from services.retention import run_retention_purge
+
+        with pytest.raises(RuntimeError, match="db down"):
+            await run_retention_purge()
+        purge.assert_not_awaited()

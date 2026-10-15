@@ -36,14 +36,23 @@ class Result:
 
 
 class Db:
-    def __init__(self, surviving=None):
+    def __init__(self, surviving=None, *, witness=True):
         self.surviving = surviving if surviving is not None else [SUBJECT]
+        self.witness = witness
 
     async def scalars(self, query):
         return Result(self.surviving)
 
     async def scalar(self, query, params):
+        if "mobile_run_instances" in str(query):
+            return 1 if self.witness else None
         return 1 if params["hash"] == "v2_" + "a" * 64 else None
+
+
+def session_header(session_id, timestamp):
+    row = line(0, "session_start", timestamp)
+    row["raw_line"] = json.dumps({"type": "session", "id": session_id, "timestamp": timestamp})
+    return row
 
 
 def line(offset, kind, timestamp, *, parent=None, content="prompt"):
@@ -63,7 +72,7 @@ def line(offset, kind, timestamp, *, parent=None, content="prompt"):
 async def test_pre_window_prompt_and_three_linked_children_count_one_root(monkeypatch):
     yesterday = (END - timedelta(days=1)).isoformat()
     early = (START - timedelta(days=1)).isoformat()
-    rows = {"root": [line(0, "user_prompt", early)]}
+    rows = {"root": [session_header("root", early), line(1, "user_prompt", early)]}
     for i in range(3):
         rows[f"child-{i}"] = [line(0, "assistant_text", yesterday, parent="root")]
     monkeypatch.setattr(
@@ -75,14 +84,14 @@ async def test_pre_window_prompt_and_three_linked_children_count_one_root(monkey
         general, "_rows", AsyncMock(side_effect=lambda project, user, harness, session: rows.get(session))
     )
     actual = await general.prompted_roots(Db(), "default", START, END, subject=SUBJECT)
-    assert actual == {"active_accounts": 1, "roots": 1, "eligible_sessions": 3}
+    assert actual is None, "bare child-to-parent ID cannot validate the root incarnation"
 
 
 @pytest.mark.asyncio
 async def test_unprompted_and_purged_unrelated_sessions_do_not_erase_positive_root(monkeypatch):
     yesterday = (END - timedelta(days=1)).isoformat()
     rows = {
-        "prompted": [line(0, "user_prompt", yesterday)],
+        "prompted": [session_header("prompted", yesterday), line(1, "user_prompt", yesterday)],
         "unprompted": [line(0, "assistant_text", yesterday)],
         "purged-prefix": [line(42, "assistant_text", yesterday)],
     }
@@ -97,6 +106,7 @@ async def test_unprompted_and_purged_unrelated_sessions_do_not_erase_positive_ro
         "roots": 1,
         "eligible_sessions": 1,
     }
+    assert await general.prompted_roots(Db(witness=False), "default", START, END, subject=SUBJECT) is None
 
 
 @pytest.mark.asyncio
@@ -119,14 +129,15 @@ async def test_purged_parent_invalid_time_and_deactivated_user_cannot_create_num
 @pytest.mark.asyncio
 async def test_legacy_or_unregistered_sender_cannot_create_general_or_platform_count(monkeypatch):
     timestamp = (END - timedelta(days=1)).isoformat()
-    row = line(0, "user_prompt", timestamp)
+    row = line(1, "user_prompt", timestamp)
+    header = session_header("root", timestamp)
     monkeypatch.setattr(
         general, "_query", AsyncMock(return_value=Response([{"user_id": str(SUBJECT), "session_id": "root"}]))
     )
-    monkeypatch.setattr(general, "_rows", AsyncMock(return_value=[row]))
-    row["layer_hash"] = "legacy-hash"
+    monkeypatch.setattr(general, "_rows", AsyncMock(return_value=[header, row]))
+    header["layer_hash"] = row["layer_hash"] = "legacy-hash"
     assert await general.prompted_roots(Db(), "default", START, END, subject=SUBJECT) is None
-    row["layer_hash"] = "v2_" + "b" * 64
+    header["layer_hash"] = row["layer_hash"] = "v2_" + "b" * 64
     assert await general.prompted_roots(Db(), "default", START, END) is None
 
 
