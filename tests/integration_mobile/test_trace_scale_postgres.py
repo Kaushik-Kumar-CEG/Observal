@@ -265,6 +265,14 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
         no_author, _ = await trace_pair_batch(db, [AUTHOR], AUTHOR, "default", start, end, include_author=False)
         assert not no_author
         await db.execute(text("UPDATE mcp_listings SET is_private=false WHERE id=:id"), {"id": A})
+        await db.execute(
+            text("UPDATE mcp_listings SET submitted_by=:new_owner WHERE id=:id"), {"id": A, "new_owner": OTHER}
+        )
+        originally_published = await activity.published_by_me(limit=20, cursor=None, db=db, viewer=viewer)
+        assert any(item.id == A and item.is_current_owner is False for item in originally_published.items)
+        current_only = await activity.published_by_me(limit=20, cursor=None, db=db, viewer=SimpleNamespace(id=OTHER))
+        assert all(item.id != A for item in current_only.items)
+        await db.execute(text("UPDATE mcp_listings SET submitted_by=:author WHERE id=:id"), {"id": A, "author": AUTHOR})
         review_epoch = await db.scalar(
             text(
                 "SELECT epoch FROM mobile_scope_epochs WHERE project_id='default' AND subject_id=:id AND scope='author'"

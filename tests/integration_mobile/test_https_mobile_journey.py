@@ -124,6 +124,29 @@ async def test_isolated_https_two_scopes_two_components_one_child_root():
         own, denied = mixed.json()["items"]
         assert own["user_usage"]["value"] == 1 and own["author_usage"] == {"status": "restricted"}
         assert denied["author_usage"] == denied["user_usage"] == {"status": "restricted"}
+        user_page = await client.get(
+            f"/api/v1/mobile-activity/v1/people/{ordinary['id']}/user/components",
+            headers=member,
+            params={
+                "period": "1w",
+                "window_anchor": mixed.json()["window_anchor"],
+                "expected_revision": own["user_revision"],
+            },
+        )
+        assert user_page.status_code == 200 and user_page.json()["complete"]
+        assert {item["component_id"] for item in user_page.json()["items"]} == ids
+        assert {item["component_traces"]["value"] for item in user_page.json()["items"]} == {1}
+        for row in user_page.json()["items"]:
+            detail = await client.get(
+                f"/api/v1/mobile-activity/v1/people/{ordinary['id']}/user/components/mcp/{row['component_id']}",
+                headers=member,
+                params={
+                    "period": "1w",
+                    "window_anchor": mixed.json()["window_anchor"],
+                    "expected_revision": own["user_revision"],
+                },
+            )
+            assert detail.status_code == 200 and detail.json()["component"] == row
         fully_denied = await client.post(
             "/api/v1/mobile-activity/v1/people/summaries",
             headers=member,

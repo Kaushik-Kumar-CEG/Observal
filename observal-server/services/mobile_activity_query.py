@@ -311,6 +311,9 @@ async def trace_union(
         + _TRACE_FROM
         + _trace_scope(scope, viewer_self=viewer_self)
     )
+    # A concentrated original author otherwise provokes one nested lookup per
+    # event into run, publication and account tables (10K+ repeated lookups).
+    await db.execute(text("SET LOCAL enable_nestloop=off"))
     row = (await db.execute(text(sql), {"project": project, "subject": subject, "start": start, "end": end})).one()
     return {"roots": row.roots, "calls": row.calls, "days": row.days} if row.roots else None
 
@@ -414,4 +417,5 @@ async def trace_component_page(
         + after_sql
         + " ORDER BY roots DESC,l.id LIMIT :limit"
     )
+    await db.execute(text("SET LOCAL enable_nestloop=off"))
     return [dict(row._mapping) for row in (await db.execute(text(sql), params)).all()]
