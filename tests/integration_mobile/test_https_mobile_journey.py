@@ -103,7 +103,13 @@ async def test_isolated_https_two_scopes_two_components_one_child_root():
         }
         detail_base = f"/api/v1/mobile-activity/v1/people/{maintainer['id']}/author/components"
         page = await client.get(detail_base, headers=admin, params=query)
-        assert page.status_code == 200 and page.json()["complete"] is True
+        assert page.status_code == 200, (
+            page.status_code,
+            [(item.get("loc"), item.get("type")) for item in page.json().get("detail", [])],
+            len(query["window_anchor"]),
+            len(query["expected_revision"]),
+        )
+        assert page.json()["complete"] is True
         assert len(page.json()["items"]) == 2
         ids = {r["component_id"] for r in page.json()["items"]}
         assert ids == set(fixture["component_ids"])

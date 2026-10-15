@@ -11,12 +11,13 @@ from unittest.mock import AsyncMock
 import jsonschema
 import pytest
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from api.deps import get_db, get_mobile_user
 from api.routes.mobile_activity import router
 from models.user import UserRole
+from services.crypto import init_key_manager
 
 _CONTRACT = yaml.safe_load(
     (Path(__file__).resolve().parents[1] / "contracts/mobile-activity-v1/openapi.yaml").read_text()
@@ -56,6 +57,26 @@ def app(monkeypatch):
     monkeypatch.setattr(activity, "trace_component_page", AsyncMock(return_value=None))
     monkeypatch.setattr(activity, "prompted_roots", AsyncMock(return_value=None))
     return application, viewer, other, db, enabled
+
+
+@pytest.mark.asyncio
+async def test_signed_revision_and_component_keyset_fit_wire_bounds_and_bind_scope(tmp_path):
+    from api.routes import mobile_activity as activity
+
+    init_key_manager(key_dir=str(tmp_path / "keys"), key_password=None)
+    viewer = SimpleNamespace(id=uuid.uuid4())
+    subject = uuid.uuid4()
+    db = SimpleNamespace(scalar=AsyncMock(side_effect=[10**20, 10**20, 10**20, 10**20]))
+    anchor = "x" * 413
+    author = await activity._scope_revision(db, viewer, subject, "author", anchor)
+    user = await activity._scope_revision(db, viewer, subject, "user", anchor)
+    assert author != user and len(author) <= 512 and len(user) <= 512
+    binding = activity._page_binding(viewer, subject, "author", anchor, author)
+    cursor = activity._cursor({**binding, "last_roots": 10000, "last_id": str(uuid.uuid4())})
+    assert len(cursor) <= 512
+    with pytest.raises(HTTPException) as exc:
+        activity._read_cursor(cursor, activity._page_binding(viewer, subject, "user", anchor, user))
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio

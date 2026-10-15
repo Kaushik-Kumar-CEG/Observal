@@ -8,6 +8,7 @@ projection is available; registration or current status alone is not evidence.
 """
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
@@ -233,18 +234,17 @@ async def _scope_revision(db: AsyncSession, viewer: User, subject: UUID, scope: 
         )
         or 0
     )
-    return sign_token(
-        {
-            "purpose": "mobile-subject-revision-v1",
-            "sub": str(viewer.id),
-            "subject": str(subject),
-            "scope": scope,
-            "project": str(DEFAULT_PROJECT_ID),
-            "anchor": hashlib.sha256(anchor.encode()).hexdigest(),
-            "generation": generation,
-            "epoch": epoch,
-        }
-    )
+    # Revision is opaque to the phone. Sign a fixed-size fingerprint of ALL
+    # viewer/scope/window/epoch dimensions, not a long JWT containing each
+    # field; the latter exceeded the accepted 512-character query bound on
+    # real ES256 keys and made every detail/page return HTTP 422.
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            [str(viewer.id), str(subject), scope, str(DEFAULT_PROJECT_ID), anchor, generation, epoch],
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return sign_token({"purpose": "mobile-subject-revision-v1", "fingerprint": fingerprint})
 
 
 def _can_trace(viewer: User, trace_privacy: bool) -> bool:
@@ -574,15 +574,15 @@ async def resolve_people(
 
 
 def _page_binding(viewer: User, subject: UUID, scope: Scope, anchor: str, revision: str) -> dict:
-    return {
-        "sub": str(viewer.id),
-        "subject": str(subject),
-        "scope": scope,
-        "anchor": hashlib.sha256(anchor.encode()).hexdigest(),
-        "revision": hashlib.sha256(revision.encode()).hexdigest(),
-        "purpose": "mobile-page-v1",
-        "project": str(DEFAULT_PROJECT_ID),
-    }
+    # All inputs remain bound, but a short digest leaves room for the keyset
+    # tuple inside the signed 512-character cursor query limit.
+    digest = hashlib.sha256(
+        json.dumps(
+            [str(viewer.id), str(subject), scope, str(DEFAULT_PROJECT_ID), anchor, revision],
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return {"binding": digest, "purpose": "mobile-page-v1", "project": str(DEFAULT_PROJECT_ID)}
 
 
 @router.get("/people/{subject_id}/{scope}/components", response_model=ComponentPage)
