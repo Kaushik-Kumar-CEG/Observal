@@ -10,6 +10,7 @@ MOBILE_TEST_ORDINARY and MOBILE_TEST_FIXTURE. Origin must be HTTPS loopback.
 
 import json
 import os
+import ssl
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
@@ -75,7 +76,7 @@ async def test_isolated_https_two_scopes_two_components_one_child_root():
     assert fixture["marker"] == "synthetic-mobile-https-v1"
     async with httpx.AsyncClient(
         base_url=origin,
-        verify=os.environ["MOBILE_TEST_CA"],
+        verify=ssl.create_default_context(cafile=os.environ["MOBILE_TEST_CA"]),
         timeout=30,
         headers={"User-Agent": "Observal-Android-Isolated/1.0"},
     ) as client:
@@ -123,6 +124,9 @@ async def test_isolated_https_two_scopes_two_components_one_child_root():
             assert got.json()["window"] == page.json()["window"]
         ordinary_pair = await _mobile_pair(client, ordinary)
         member = {"Authorization": "Bearer " + ordinary_pair["access_token"]}
+        ordinary_caps = await client.get("/api/v1/mobile-activity/v1/capabilities", headers=member)
+        assert ordinary_caps.status_code == 200
+        assert ordinary_caps.json()["synthetic_test_cohort"] is False
         mixed = await client.post(
             "/api/v1/mobile-activity/v1/people/summaries",
             headers=member,
