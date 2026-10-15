@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com> -->
+<!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Usage reporting
@@ -10,6 +11,8 @@ Observal can send aggregate usage reports to the Observal-operated collector at 
 A super administrator can open **Admin > Settings > Usage Reporting**, which appears near the top of the settings page, to enter the company name and save the reporting configuration. Setting **Deployment Public URL** adds the deployment hostname to reports; without it the hostname is reported as `unknown`. The available frequencies are every six hours, daily, and weekly. Every six hours is the default. The same panel can disable reporting, change the frequency, preview the exact payload, and send a test report.
 
 Only a super administrator can change the company identity, frequency, or consent setting.
+
+The first upgrade to 1.15.1 or later resets usage reporting to its defaults (on, every six hours) on every existing installation, including installations where it was previously switched off. A super administrator can switch it off again after the upgrade.
 
 Disabling the switch stops scheduled delivery immediately. It does not remove reports already received by Observal. Contact the Observal maintainers with the installation ID shown in the panel to request deletion.
 

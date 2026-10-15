@@ -3,7 +3,7 @@
 """Prospective, deletion-safe mobile original author and publication transitions.
 
 Revision ID: 045_mobile_provenance
-Revises: 044_review_orphan_authors
+Revises: 045_usage_ping_default_on
 """
 
 import uuid
@@ -14,7 +14,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from alembic import op
 
 revision = "045_mobile_provenance"
-down_revision = "044_review_orphan_authors"
+down_revision = "045_usage_ping_default_on"
 branch_labels = None
 depends_on = None
 
