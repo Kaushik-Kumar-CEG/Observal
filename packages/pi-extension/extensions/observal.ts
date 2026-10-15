@@ -119,13 +119,15 @@ export default function (pi: ExtensionAPI) {
     state = initState(ctx);
 
     if (state.config && state.layerSnapshot) {
-      uploadLayerSnapshot(state.config, state.layerSnapshot)
-        .then((ok) => {
-          if (!ok && ctx.hasUI) ctx.ui.notify("Layer snapshot upload failed", "warning");
-        })
-        .catch((err) => {
-          if (ctx.hasUI) ctx.ui.notify(`Layer snapshot upload failed: ${err.message}`, "warning");
-        });
+      // Never report a v2 identity until the legacy snapshot and uploader-bound
+      // allowlisted mapping have both been acknowledged by this server/account.
+      try {
+        const snapshotOk = await uploadLayerSnapshot(state.config, state.layerSnapshot);
+        if (snapshotOk) await uploadVerifiedLayer(state.config, state);
+        else if (ctx.hasUI) ctx.ui.notify("Layer snapshot upload failed", "warning");
+      } catch {
+        // Offline sessions continue with the legacy unqualified hash.
+      }
     }
 
     // On fresh startup, attempt crash recovery (fire-and-forget)
@@ -252,7 +254,9 @@ export default function (pi: ExtensionAPI) {
 
           state.layerSnapshot = buildPiLayerSnapshot();
           state.layerHash = state.layerSnapshot.hash;
-          if (!(await uploadLayerSnapshot(state.config, state.layerSnapshot))) {
+          if (await uploadLayerSnapshot(state.config, state.layerSnapshot)) {
+            await uploadVerifiedLayer(state.config, state);
+          } else {
             ctx.ui.notify("Layer snapshot upload failed", "warning");
           }
         }
@@ -511,7 +515,9 @@ export default function (pi: ExtensionAPI) {
       hash: layerHash,
       harnesses: { pi: manifest },
       lockfile_hash: computeLockfileHash(),
-      pinned_versions: readPinnedVersions(),
+      // Free-form lockfile names can contain user secrets. Verified identity
+      // pins travel only in the independently allowlisted v2 manifest.
+      pinned_versions: { agents: [], standalone: [] },
       drift: { is_canonical: true, drifted_files: [] },
     };
   }
@@ -583,39 +589,52 @@ export default function (pi: ExtensionAPI) {
     return registry ? sha256(Buffer.from(JSON.stringify(registry))).slice(0, 16) : "0".repeat(16);
   }
 
-  function readPinnedVersions(): Record<string, unknown> {
+  function registeredMcpPins(): Array<{ id: string; version: string; alias: string }> {
+    const section = currentRegistryLockfile()?.harnesses?.pi;
+    if (!section || typeof section !== "object") return [];
+    // A lockfile may also contain Claude/Codex registrations. Only aliases
+    // present in the ACTIVE Pi config can qualify a Pi session's v2 identity.
+    let active: Record<string, unknown>;
     try {
-      const registry = currentRegistryLockfile();
-      if (!registry) return { agents: [], standalone: [] };
-      const agents: Record<string, unknown>[] = [];
-      const standalone: Record<string, unknown>[] = [];
-      for (const [harness, section] of Object.entries((registry.harnesses ?? {}) as Record<string, any>)) {
-        for (const agent of section.agents ?? []) {
-          // Never spread a lockfile object into a request: component settings
-          // may embed remote credentials or user-owned environment overrides.
-          agents.push({
-            id: agent.id, name: agent.name, version: agent.version,
-            scope: agent.scope, local_name: agent.local_name,
-            qualified_name: agent.qualified_name, harness,
-            components: Array.isArray(agent.components) ? agent.components.map((component: any) => ({
-              id: component.id, type: component.type, name: component.name,
-              version: component.version, scope: component.scope,
-              local_name: component.local_name, qualified_name: component.qualified_name,
-            })) : [],
-          });
-        }
-        for (const item of section.standalone ?? []) {
-          standalone.push({
-            id: item.id, type: item.type, name: item.name, version: item.version,
-            scope: item.scope, local_name: item.local_name,
-            qualified_name: item.qualified_name, harness,
-          });
-        }
-      }
-      return { agents, standalone };
+      const configPath = path.join(os.homedir(), ".pi", "agent", "mcp.json");
+      if (fs.statSync(configPath).size > MAX_LAYER_FILE_SIZE) return [];
+      const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      active = parsed?.mcpServers;
+      if (!active || typeof active !== "object" || Array.isArray(active)) return [];
     } catch {
-      return { agents: [], standalone: [] };
+      return [];
     }
+    const pins: Array<{ id: string; version: string; alias: string }> = [];
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const alias = /^[A-Za-z0-9_-]{1,128}$/;
+    const version = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,49}$/;
+    for (const pin of [...(section.standalone ?? []), ...(section.agents ?? []).flatMap((agent: any) => agent.components ?? [])]) {
+      if (pin.type !== "mcp") continue;
+      const native = pin.local_name;
+      if (typeof pin.id !== "string" || !uuid.test(pin.id) ||
+          typeof pin.version !== "string" || !version.test(pin.version) ||
+          typeof native !== "string" || !alias.test(native) ||
+          !Object.hasOwn(active, native)) return [];
+      pins.push({ id: pin.id.toLowerCase(), version: pin.version, alias: native });
+    }
+    const unique = [...new Map(pins.map((pin) => [pin.id, pin])).values()];
+    if (unique.length !== pins.length || unique.length > 100 ||
+        new Set(unique.map((pin) => pin.alias)).size !== unique.length) return [];
+    return unique.sort((a, b) => {
+      const left = JSON.stringify([a.id, a.version, a.alias]);
+      const right = JSON.stringify([b.id, b.version, b.alias]);
+      return left < right ? -1 : left > right ? 1 : 0;
+    });
+  }
+
+  async function uploadVerifiedLayer(config: ObservalConfig, s: ObservalState): Promise<void> {
+    const pins = registeredMcpPins();
+    if (!pins.length) return;
+    const canonical = pins.map((pin) => [pin.id, pin.version, pin.alias]);
+    const hash = `v2_${sha256(Buffer.from(JSON.stringify(canonical)))}`;
+    const receipt = await postJsonWithTimeout(config, "/api/v1/mobile-evidence/v1/layers",
+      JSON.stringify({ harness: "pi", components: pins }));
+    if (receipt?.hash === hash && receipt?.mapped_components === pins.length) s.layerHash = hash;
   }
 
   function needsLayerUpload(hash: string): boolean {

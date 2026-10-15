@@ -1,0 +1,50 @@
+{
+  "notice": "Synthetic identities and counts only. No live account data. These are negotiated DTO fixtures, not evidence of shipped endpoints.",
+  "cases": [
+    {
+      "id": "forty_calls_one_root",
+      "expected": {"mcp_calls": 40, "activity_traces": 1, "active_days_utc": 1, "general_sessions": 1},
+      "description": "40 distinct in-window qualified MCP events in a single prompted root; never 40 sessions."
+    },
+    {
+      "id": "installed_only",
+      "expected": {"mcp_calls": null, "status": "not_recorded"},
+      "description": "An installation or capability lock is not a verified runtime call or eligible zero."
+    },
+    {
+      "id": "partial_no_support",
+      "expected": {"mcp_calls": null, "status": "not_recorded", "general_sessions": 1},
+      "description": "General prompted sessions may be observed while component telemetry is unsupported."
+    },
+    {
+      "id": "cross_user_denial",
+      "expected": {"http_status": 403},
+      "description": "A follower's bookmark grants no access to named other-person activity."
+    },
+    {
+      "id": "stale_server",
+      "expected": {"transport_status": "outdated_server"},
+      "description": "No v1 capabilities response; live mode cannot replace unavailable data with demo figures."
+    },
+    {
+      "id": "platform_distinct_accounts_roots",
+      "expected": {"active_accounts": 12, "prompted_root_sessions": 40},
+      "description": "12 distinct eligible accounts generated 40 prompted roots; neither equals component calls. Only trace-privileged viewer and covered cohort."
+    },
+    {
+      "id": "platform_small_cohort",
+      "expected": {"active_accounts": null, "prompted_root_sessions": null, "status": "not_recorded", "reasons": ["unavailable"], "eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"},
+      "description": "Under 10 qualifying accounts, suppress both values, even if many roots. No per-person subtraction or precise filtered platform endpoint."
+    },
+    {
+      "id": "author_scope_general_sessions_unavailable",
+      "expected": {"general_sessions": null, "status": "not_recorded", "reasons": ["unavailable"], "eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"},
+      "description": "Author usage never carries another person's general-session denominator or retention status."
+    },
+    {
+      "id": "platform_purged_unknown",
+      "expected": {"active_accounts": null, "prompted_root_sessions": null, "status": "not_recorded", "reasons": ["unavailable"], "eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "projection": "unavailable"},
+      "description": "A fully purged window cannot be interpreted as zero active people or zero roots."
+    }
+  ]
+}

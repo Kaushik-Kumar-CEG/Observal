@@ -682,60 +682,19 @@ def build_upload_payload(harness: str | None = None, project_dir: str | None = N
 
     from observal_cli.lockfile import compute_lockfile_hash, read_registry_lockfile
 
-    # Embed exact version pins from lockfile
+    # The local lockfile can contain arbitrary free-form names that may carry
+    # secrets. Only the separately validated v2 manifest sends registry pins.
     _, registry = read_registry_lockfile()
-    pinned_versions = _extract_pinned_versions(registry)
-
-    # Determine canonical vs dirty state
     drift_info = _compute_drift(registry, harnesses_section)
+    drift_info = {"is_canonical": drift_info["is_canonical"], "drifted_files": []}
 
     return {
         "hash": layer_hash,
         "harnesses": harnesses_section,
         "lockfile_hash": compute_lockfile_hash(),
-        "pinned_versions": pinned_versions,
+        "pinned_versions": {"agents": [], "standalone": []},
         "drift": drift_info,
     }
-
-
-def _extract_pinned_versions(lockfile_data: dict) -> dict:
-    """Extract exact semver pins from the lockfile for embedding in snapshot.
-
-    Returns:
-    {
-        "agents": [{"name": "x", "version": "1.2.0", "harness": "claude-code", "components": [...]}],
-        "standalone": [{"type": "mcp", "name": "y", "version": "2.0.0", "harness": "cursor"}]
-    }
-    """
-    agents: list[dict] = []
-    standalone: list[dict] = []
-
-    for harness_name, ide_section in lockfile_data.get("harnesses", {}).items():
-        for agent in ide_section.get("agents", []):
-            agents.append(
-                {
-                    "name": agent.get("name", ""),
-                    "id": agent.get("id", ""),
-                    "version": agent.get("version"),
-                    "harness": harness_name,
-                    "components": [
-                        {"type": c.get("type"), "name": c.get("name"), "version": c.get("version")}
-                        for c in agent.get("components", [])
-                    ],
-                }
-            )
-        for item in ide_section.get("standalone", []):
-            standalone.append(
-                {
-                    "type": item.get("type", ""),
-                    "name": item.get("name", ""),
-                    "id": item.get("id", ""),
-                    "version": item.get("version"),
-                    "harness": harness_name,
-                }
-            )
-
-    return {"agents": agents, "standalone": standalone}
 
 
 def _compute_drift(lockfile_data: dict, harnesses_section: dict[str, list[dict]]) -> dict:

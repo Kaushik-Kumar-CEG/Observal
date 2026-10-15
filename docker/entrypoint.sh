@@ -56,12 +56,13 @@ async def init():
 
 asyncio.run(init())
 "
-    # No migration data exists on a genuinely empty database. Stamp ONLY after
-    # the transactional model schema creation succeeded; never as an upgrade
-    # failure fallback. An interruption before stamp leaves unversioned tables
-    # and the next init refuses instead of guessing the schema is complete.
-    echo "Recording freshly created schema revision..."
-    /app/.venv/bin/python -m alembic stamp head
+    # Historical migrations predate the declarative schema. Prospective
+    # provenance tables/triggers must run even on fresh databases; they are not
+    # part of Base.metadata. Stamp the last historical revision, then upgrade.
+    # An interruption before the stamp leaves unversioned tables and fails safe.
+    echo "Recording historical schema revision and applying prospective migrations..."
+    /app/.venv/bin/python -m alembic stamp 044_review_orphan_authors
+    /app/.venv/bin/python -m alembic upgrade head
     ;;
 versioned)
     echo "Running database migrations..."

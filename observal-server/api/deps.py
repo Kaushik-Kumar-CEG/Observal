@@ -181,10 +181,13 @@ async def get_mobile_user(
         or payload.get("scope") != MOBILE_SCOPE
     ):
         raise HTTPException(status_code=403, detail="Mobile credential required")
+    path = request.url.path
+    if not (path.startswith("/api/v1/mobile-activity/v1/") or path == "/api/v1/auth/mobile/logout"):
+        raise HTTPException(status_code=403, detail="Mobile route required")
     user = await _authenticate_via_jwt(token, db, allow_mobile=True)
     if not user or user.auth_provider == "deactivated":
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    if request.url.path != "/api/v1/auth/mobile/logout" and not await ds.get_bool("mobile.auth_enabled"):
+    if path != "/api/v1/auth/mobile/logout" and not await ds.get_bool("mobile.auth_enabled"):
         raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
     request.state.audit_user = user
     await _enforce_password_change(request, user)

@@ -11,6 +11,7 @@ from observal_cli.sessions import base
 
 def test_cli_snapshot_outgoing_body_omits_secret_file(monkeypatch, tmp_path):
     secret = "outbound-cli-settings-credential-sentinel"
+    lock_name_secret = "outbound-cli-lockfile-name-credential-sentinel"
     path = tmp_path / "settings.local.json"
     path.write_text('{"api_key":"' + secret + '"}')
     monkeypatch.setattr(
@@ -19,8 +20,36 @@ def test_cli_snapshot_outgoing_body_omits_secret_file(monkeypatch, tmp_path):
     monkeypatch.setattr(layer, "_load_hash_cache", lambda: {})
     monkeypatch.setattr(layer, "_save_hash_cache", lambda _cache: None)
     monkeypatch.setattr(layer, "_get_observal_managed_files", lambda *_args: set())
-    monkeypatch.setattr("observal_cli.lockfile.read_registry_lockfile", lambda: (None, {}))
+    monkeypatch.setattr(
+        "observal_cli.lockfile.read_registry_lockfile",
+        lambda: (
+            None,
+            {
+                "harnesses": {
+                    "claude-code": {
+                        "agents": [],
+                        "standalone": [
+                            {
+                                "type": "mcp",
+                                "id": "11111111-1111-4111-8111-111111111111",
+                                "version": "1.0.0",
+                                "name": lock_name_secret,
+                            }
+                        ],
+                    }
+                }
+            },
+        ),
+    )
     monkeypatch.setattr("observal_cli.lockfile.compute_lockfile_hash", lambda: "none")
+    monkeypatch.setattr(
+        layer,
+        "_compute_drift",
+        lambda *_args: {
+            "is_canonical": False,
+            "drifted_files": [{"path": lock_name_secret, "component": lock_name_secret}],
+        },
+    )
     monkeypatch.setattr(layer, "needs_upload", lambda _hash: True)
     monkeypatch.setattr(layer, "save_local_snapshot", lambda _payload: None)
 
@@ -51,4 +80,7 @@ def test_cli_snapshot_outgoing_body_omits_secret_file(monkeypatch, tmp_path):
     file_entry = payload["harnesses"]["claude-code"][0]
     assert file_entry["hash"].startswith("sha256-")
     assert "content" not in file_entry
+    assert payload["pinned_versions"] == {"agents": [], "standalone": []}
+    assert payload["drift"] == {"is_canonical": False, "drifted_files": []}
     assert secret not in str(payload)
+    assert lock_name_secret not in str(payload)
