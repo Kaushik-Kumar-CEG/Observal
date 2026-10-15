@@ -117,6 +117,16 @@ await handlers.get("session_start")!({ reason: "resume" }, context);
 await handlers.get("agent_end")!({}, context);
 assert.equal(ingestPayloads.at(-1)?.run_origin, undefined,
   "a fresh-looking unclaimed source resumed by Pi is not an interactive new-root witness");
+activeSessionId = "pi-child";
+activeSessionFile = path.join(home, "child.jsonl");
+fs.writeFileSync(activeSessionFile, `${JSON.stringify({ type: "session", id: activeSessionId,
+  timestamp: new Date().toISOString(), parentSession: sessionFile })}\n`);
+await handlers.get("session_start")!({ reason: "new" }, context);
+await handlers.get("agent_end")!({}, context);
+assert.equal(ingestPayloads.at(-1)?.run_origin, undefined, "a parented child must not claim a root");
+assert.equal(ingestPayloads.at(-1)?.parent_session_id, "pi-v2");
+assert.equal(ingestPayloads.at(-1)?.parent_run_incarnation, ingestPayloads[0].run_incarnation);
+assert.equal(ingestPayloads.at(-1)?.parent_header_hash, ingestPayloads[0].run_header_hash);
 server.close();
 fs.rmSync(home, { recursive: true, force: true });
 console.log("verified layer sender ok");

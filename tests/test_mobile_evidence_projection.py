@@ -4,8 +4,12 @@
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
-from jobs.mobile_evidence import _matched, _revision, _zero_activities
+import pytest
+
+from jobs.mobile_evidence import _matched, _qualified_lineage, _revision, _zero_activities
 from services.session_parsers.pi_invocations import PiInvocationExtractor
 
 _COMPONENT = uuid.uuid4()
@@ -92,6 +96,38 @@ def test_forty_independently_linked_calls_one_logical_root():
     assert _revision(rows) == _revision(list(rows)), "identical retries keep one revision"
 
 
+@pytest.mark.asyncio
+async def test_child_chain_only_resolves_causal_scoped_qualified_root():
+    start = datetime.now(UTC)
+    root = uuid.uuid4()
+    scope = {"project": "default", "user": uuid.uuid4(), "harness": "pi", "session": "child"}
+    parent = SimpleNamespace(
+        session_id="parent",
+        run_incarnation=root,
+        header_hash="a" * 64,
+        started_at=start,
+        parent_session_id=None,
+        parent_run_incarnation=None,
+        parent_header_hash=None,
+        origin_witness="pi_session_start_root_v1",
+        root_verified=True,
+        source_status="complete",
+    )
+
+    class Db:
+        async def execute(self, _sql, params):
+            assert params["parent"] == "parent" and params["user"] == scope["user"]
+            return SimpleNamespace(first=lambda: parent)
+
+    run = SimpleNamespace(parent_session_id="parent", parent_run_incarnation=root, parent_header_hash="a" * 64)
+    assert await _qualified_lineage(Db(), scope, run, start + timedelta(seconds=1)) == ("parent", root, start)
+    parent.started_at = start + timedelta(seconds=2)
+    assert await _qualified_lineage(Db(), scope, run, start + timedelta(seconds=1)) is None
+    parent.started_at = start
+    parent.root_verified = False
+    assert await _qualified_lineage(Db(), scope, run, start + timedelta(seconds=1)) is None
+
+
 def test_unprompted_calls_have_no_qualified_root_or_trace():
     rows = [_row(0, {"role": "assistant", "content": [_call("id")]}), _row(1, _result("id"))]
     facts, partial = _matched(PiInvocationExtractor().extract(rows), rows, {_HASH: {"alpha": _COMPONENT}})
@@ -126,6 +162,37 @@ def test_child_call_keeps_event_but_does_not_guess_parent_root():
     ]
     facts, partial = _matched(PiInvocationExtractor().extract(rows), rows, {_HASH: {"alpha": _COMPONENT}})
     assert len(facts) == 1 and facts[0]["root_session_id"] is None and partial
+
+
+def test_child_requires_bound_parent_root_and_events_cannot_predate_child_start():
+    root = uuid.uuid4()
+    rows = [
+        _row(0, {"role": "assistant", "content": [_call("child")]}, parent="parent"),
+        _row(1, _result("child"), parent="parent"),
+    ]
+    extracted = PiInvocationExtractor().extract(rows)
+    blocked, partial = _matched(extracted, rows, {_HASH: {"alpha": _COMPONENT}}, verified_root=root)
+    assert len(blocked) == 1 and blocked[0]["root_run_incarnation"] is None and partial
+    facts, partial = _matched(
+        extracted,
+        rows,
+        {_HASH: {"alpha": _COMPONENT}},
+        verified_root=root,
+        allow_child=True,
+        root_session_id="parent",
+        root_start=datetime(2026, 10, 1, 11, 59, tzinfo=UTC),
+    )
+    assert len(facts) == 1 and not partial
+    assert facts[0]["root_session_id"] == "parent" and facts[0]["root_run_incarnation"] == root
+    forged, partial = _matched(
+        extracted,
+        rows,
+        {_HASH: {"alpha": _COMPONENT}},
+        verified_root=root,
+        allow_child=True,
+        root_start=datetime(2026, 10, 1, 12, 1, tzinfo=UTC),
+    )
+    assert not forged and partial
 
 
 def test_unknown_time_is_not_defaulted_into_selected_window():

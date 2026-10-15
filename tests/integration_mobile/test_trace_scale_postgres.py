@@ -173,6 +173,43 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
         sample = [AUTHOR, OTHER] + [
             uuid.UUID(hashlib.md5(f"mobile-scale-author:{n}".encode()).hexdigest()) for n in range(3, 101)
         ]
+        if os.getenv("MOBILE_TRACE_EXPLAIN") == "1":
+            from services.mobile_activity_query import _TRACE_APPROVED, _TRACE_FROM
+
+            sql = (
+                "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) "
+                "SELECT p.original_author_id, count(DISTINCT (e.user_id,e.root_run_incarnation)) AS roots, "
+                "count(*) AS calls,count(DISTINCT (e.event_time AT TIME ZONE 'UTC')::date) AS days "
+                + _TRACE_FROM
+                + " AND p.original_author_id=:subject AND l.is_private=false "
+                "AND v.status IN ('approved','archived') " + _TRACE_APPROVED + " GROUP BY p.original_author_id"
+            )
+            plan = (
+                await db.execute(text(sql), {"project": "default", "start": start, "end": end, "subject": AUTHOR})
+            ).scalar_one()[0]
+
+            def walk(node, depth=0):
+                print(
+                    "plan",
+                    depth,
+                    node["Node Type"],
+                    node.get("Relation Name"),
+                    round(node.get("Actual Total Time", 0), 1),
+                    "ms loops",
+                    node.get("Actual Loops"),
+                    "rows",
+                    node.get("Actual Rows"),
+                    "temp",
+                    node.get("Temp Read Blocks", 0),
+                    node.get("Temp Written Blocks", 0),
+                    flush=True,
+                )
+                for child in node.get("Plans", []):
+                    if depth < 7:
+                        walk(child, depth + 1)
+
+            print("plan_total_ms", round(plan["Execution Time"], 1), flush=True)
+            walk(plan["Plan"])
         durations = []
         for _ in range(3):
             for index in range(0, len(sample), 12):
@@ -190,6 +227,47 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
             "max_ms=",
             round(max(durations), 1),
         )
+        # A private original-author listing is not a visible Author reading.
+        # Its rows are visible in the submitter's own User scope only, not to
+        # an administrator/other viewer inspecting that same actor.
+        privacy_epoch = await db.scalar(
+            text(
+                "SELECT epoch FROM mobile_scope_epochs WHERE project_id='default' AND subject_id=:id AND scope='author'"
+            ),
+            {"id": AUTHOR},
+        )
+        await db.execute(text("UPDATE mcp_listings SET is_private=true WHERE id=:id"), {"id": A})
+        bumped = await db.scalar(
+            text(
+                "SELECT epoch FROM mobile_scope_epochs WHERE project_id='default' AND subject_id=:id AND scope='author'"
+            ),
+            {"id": AUTHOR},
+        )
+        assert bumped == (privacy_epoch or 0) + 1, (privacy_epoch, bumped)
+        authors, users = await trace_pair_batch(db, [AUTHOR, OTHER], AUTHOR, "default", start, end)
+        assert authors[AUTHOR]["roots"] == 2000 and OTHER not in authors, authors
+        assert users[AUTHOR]["roots"] == 4000 and users[OTHER]["roots"] == 1200, users
+        _, other_view = await trace_pair_batch(db, [AUTHOR], OTHER, "default", start, end)
+        assert other_view[AUTHOR]["roots"] == 800, other_view
+        no_author, _ = await trace_pair_batch(db, [AUTHOR], AUTHOR, "default", start, end, include_author=False)
+        assert not no_author
+        await db.execute(text("UPDATE mcp_listings SET is_private=false WHERE id=:id"), {"id": A})
+        review_epoch = await db.scalar(
+            text(
+                "SELECT epoch FROM mobile_scope_epochs WHERE project_id='default' AND subject_id=:id AND scope='author'"
+            ),
+            {"id": AUTHOR},
+        )
+        await db.execute(text("UPDATE mcp_versions SET status='pending' WHERE id=:id"), {"id": VB})
+        new_review_epoch = await db.scalar(
+            text(
+                "SELECT epoch FROM mobile_scope_epochs WHERE project_id='default' AND subject_id=:id AND scope='author'"
+            ),
+            {"id": AUTHOR},
+        )
+        assert new_review_epoch > review_epoch, (review_epoch, new_review_epoch)  # Version and review-event triggers.
+        assert await trace_component_page(db, AUTHOR, "author", "default", start, end, component=B) == []
+        await db.execute(text("UPDATE mcp_versions SET status='approved' WHERE id=:id"), {"id": VB})
         before = await db.scalar(
             text(
                 "SELECT epoch FROM mobile_scope_epochs WHERE project_id='default' AND subject_id=:id AND scope='author'"

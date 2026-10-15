@@ -53,6 +53,9 @@ interface CursorEntry {
   run_incarnation?: string;
   run_header_hash?: string;
   run_origin?: "pi_session_start_root_v1";
+  parent_session_id?: string;
+  parent_run_incarnation?: string;
+  parent_header_hash?: string;
   source_identity?: string;
   finalized?: boolean;
   last_pushed_at?: number;
@@ -88,6 +91,9 @@ interface ObservalState {
   runIncarnation?: string;
   runHeaderHash?: string;
   runOrigin?: "pi_session_start_root_v1";
+  parentSessionId?: string;
+  parentRunIncarnation?: string;
+  parentHeaderHash?: string;
   freshRootStart?: boolean;
   identityConflict?: boolean;
 }
@@ -752,12 +758,48 @@ export default function (pi: ExtensionAPI) {
       }
       const runOrigin = cursor.run_origin ??
         (s.freshRootStart && !header.parentSession ? "pi_session_start_root_v1" : undefined);
+      let parent: { id: string; run: string; headerHash: string } | null = null;
+      if (typeof header.parentSession === "string" && s.sessionFile) {
+        try {
+          const parentFile = path.resolve(header.parentSession);
+          if (isSameOrUnder(parentFile, path.dirname(s.sessionFile)) && parentFile !== path.resolve(s.sessionFile)) {
+            const parentStat = fs.statSync(parentFile);
+            const parentFd = fs.openSync(parentFile, "r");
+            let parentLine: string;
+            try {
+              const data = Buffer.alloc(4096);
+              const read = fs.readSync(parentFd, data, 0, data.length, 0);
+              const end = data.indexOf(10, 0);
+              parentLine = end >= 0 && end < read ? data.toString("utf-8", 0, end) : "";
+            } finally { fs.closeSync(parentFd); }
+            const parentHeader = JSON.parse(parentLine);
+            const parentHash = sha256(Buffer.from(parentLine));
+            const parentCursor = readCursor(parentHeader.id);
+            const sourceIdentity = sha256(Buffer.from(JSON.stringify([parentFile, parentStat.ino, parentHash])));
+            if (parentHeader.type === "session" && parentHeader.id !== s.sessionId &&
+                typeof parentHeader.id === "string" && parentHeader.id.length <= 256 &&
+                parentCursor.run_incarnation && parentCursor.run_header_hash === parentHash &&
+                parentCursor.source_identity === sourceIdentity &&
+                Date.parse(parentHeader.timestamp) <= Date.parse(header.timestamp)) {
+              parent = { id: parentHeader.id, run: parentCursor.run_incarnation, headerHash: parentHash };
+            }
+          }
+        } catch { /* No corroborated local parent: never invent a lineage link. */ }
+      }
+      if (cursor.parent_session_id !== parent?.id || cursor.parent_run_incarnation !== parent?.run ||
+          cursor.parent_header_hash !== parent?.headerHash) {
+        if (cursor.run_incarnation) { s.identityConflict = true; return; }
+      }
       if (!cursor.run_incarnation && !writeCursor(s.sessionId, cursor.offset, cursor.line_count, false,
             { run_incarnation: run, run_header_hash: hash, run_origin: runOrigin,
-              source_identity: identity, offset: 0, line_count: 0 })) return;
+              parent_session_id: parent?.id, parent_run_incarnation: parent?.run,
+              parent_header_hash: parent?.headerHash, source_identity: identity, offset: 0, line_count: 0 })) return;
       s.runIncarnation = run;
       s.runHeaderHash = hash;
       s.runOrigin = runOrigin;
+      s.parentSessionId = parent?.id;
+      s.parentRunIncarnation = parent?.run;
+      s.parentHeaderHash = parent?.headerHash;
     } catch {
       // Missing/invalid source remains legacy-only. Never invent an incarnation.
     }
@@ -992,6 +1034,11 @@ export default function (pi: ExtensionAPI) {
           payload.run_incarnation = s.runIncarnation;
           payload.run_header_hash = s.runHeaderHash;
           if (s.runOrigin) payload.run_origin = s.runOrigin;
+          if (s.parentSessionId && s.parentRunIncarnation && s.parentHeaderHash) {
+            payload.parent_session_id = s.parentSessionId;
+            payload.parent_run_incarnation = s.parentRunIncarnation;
+            payload.parent_header_hash = s.parentHeaderHash;
+          }
         }
         const finalCapabilities = capabilitiesForSession(s);
         if (finalCapabilities.length > 0) payload.capabilities_used = finalCapabilities;
@@ -1045,6 +1092,11 @@ export default function (pi: ExtensionAPI) {
           payload.run_incarnation = s.runIncarnation;
           payload.run_header_hash = s.runHeaderHash;
           if (s.runOrigin) payload.run_origin = s.runOrigin;
+          if (s.parentSessionId && s.parentRunIncarnation && s.parentHeaderHash) {
+            payload.parent_session_id = s.parentSessionId;
+            payload.parent_run_incarnation = s.parentRunIncarnation;
+            payload.parent_header_hash = s.parentHeaderHash;
+          }
         }
         const chunkCapabilities = capabilitiesForSession(s);
         if (chunkCapabilities.length > 0) payload.capabilities_used = chunkCapabilities;

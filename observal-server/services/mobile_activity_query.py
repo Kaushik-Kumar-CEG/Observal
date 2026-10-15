@@ -325,50 +325,51 @@ async def trace_pair_batch(
     *,
     include_author: bool = True,
 ) -> tuple[dict[uuid.UUID, dict], dict[uuid.UUID, dict]]:
-    """Two grouped indexed scans per viewport; no per-follow JSONL or N+1 fact reads."""
+    """Materialize bounded viewer-relevant facts once, then group two independent scopes."""
     from services.mobile_read_control import readable
 
     if not await readable(db, project):
         return {}, {}
     params = {"project": project, "subjects": subjects, "viewer": viewer, "start": start, "end": end}
-    aggregates = (
-        "count(DISTINCT (e.user_id,e.root_run_incarnation)) AS roots, "
-        "count(*) AS calls,count(DISTINCT (e.event_time AT TIME ZONE 'UTC')::date) AS days "
-    )
-    public = "(l.is_private=false AND v.status IN ('approved','archived')" + _TRACE_APPROVED + ")"
-    author_sql = (
-        "SELECT p.original_author_id AS subject,"
-        + aggregates
+    # The materialized CTE prevents repeated run/visibility/approval lookups
+    # when both scopes are requested in the same viewport. It contains only
+    # actors/authors on the requested 12 IDs, not the global evidence corpus.
+    sql = (
+        "WITH eligible AS MATERIALIZED (SELECT e.user_id,e.root_run_incarnation,e.event_time,"
+        "p.original_author_id,l.is_private,l.submitted_by,v.status AS version_status,"
+        "approval.status AS publication_status "
         + _TRACE_FROM
-        + " AND p.original_author_id=ANY(CAST(:subjects AS uuid[])) AND "
-        + public
-        + " GROUP BY p.original_author_id"
+        + " AND ((:include_author AND p.original_author_id=ANY(CAST(:subjects AS uuid[]))) "
+        "OR e.user_id=ANY(CAST(:subjects AS uuid[])))) "
+        "SELECT 'author' AS scope_name,original_author_id AS subject,"
+        "count(DISTINCT (user_id,root_run_incarnation)) AS roots,count(*) AS calls,"
+        "count(DISTINCT (event_time AT TIME ZONE 'UTC')::date) AS days "
+        "FROM eligible WHERE :include_author AND original_author_id=ANY(CAST(:subjects AS uuid[])) "
+        "AND is_private=false AND version_status IN ('approved','archived') "
+        "AND publication_status='approved' GROUP BY original_author_id "
+        "UNION ALL SELECT 'user' AS scope_name,user_id AS subject,"
+        "count(DISTINCT (user_id,root_run_incarnation)) AS roots,count(*) AS calls,"
+        "count(DISTINCT (event_time AT TIME ZONE 'UTC')::date) AS days "
+        "FROM eligible WHERE user_id=ANY(CAST(:subjects AS uuid[])) "
+        "AND ((is_private=false AND version_status IN ('approved','archived') "
+        "AND publication_status='approved') "
+        "OR (user_id=:viewer AND is_private=true AND submitted_by=:viewer)) "
+        "GROUP BY user_id"
     )
-    # Self-owned private components appear only in this viewer's own User
-    # scope, not on another user's User activity viewed by an administrator.
-    user_sql = (
-        "SELECT e.user_id AS subject,"
-        + aggregates
-        + _TRACE_FROM
-        + " AND e.user_id=ANY(CAST(:subjects AS uuid[])) AND ("
-        + public
-        + " OR (e.user_id=:viewer AND l.is_private=true AND l.submitted_by=:viewer))"
-        + " GROUP BY e.user_id"
-    )
-    authors = (
-        {
-            row.subject: {"roots": row.roots, "calls": row.calls, "days": row.days}
-            for row in (await db.execute(text(author_sql), params)).all()
-            if row.roots
-        }
-        if include_author
-        else {}
-    )
-    users = {
-        row.subject: {"roots": row.roots, "calls": row.calls, "days": row.days}
-        for row in (await db.execute(text(user_sql), params)).all()
-        if row.roots
-    }
+    params["include_author"] = include_author
+    # PostgreSQL otherwise selects 10K+ repeated per-fact nested lookups into
+    # publication, run and user tables on a concentrated original author.
+    # This is transaction-local (never a global database configuration change).
+    await db.execute(text("SET LOCAL enable_nestloop=off"))
+    authors: dict[uuid.UUID, dict] = {}
+    users: dict[uuid.UUID, dict] = {}
+    for row in (await db.execute(text(sql), params)).all():
+        if row.roots:
+            (authors if row.scope_name == "author" else users)[row.subject] = {
+                "roots": row.roots,
+                "calls": row.calls,
+                "days": row.days,
+            }
     return authors, users
 
 

@@ -103,6 +103,10 @@ class SessionIngestRequest(BaseModel):
     run_header_hash: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
     # Only emitted by an upgraded Pi session_start handler, never inferred from JSONL.
     run_origin: Literal["pi_session_start_root_v1"] | None = None
+    # Claimed only by an upgraded Pi sender after reading its parent's
+    # immutable on-disk header and saved incarnation, never inferred by ID.
+    parent_run_incarnation: UUID | None = None
+    parent_header_hash: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
     # Discovery resources the CLI's capability lock attributes to this session
     capabilities_used: list[CapabilityUsed] | None = Field(None, max_length=MAX_CAPABILITIES_PER_PUSH)
 
@@ -175,7 +179,14 @@ async def ingest_session(
     user_id = str(current_user.id)
     project_id = DEFAULT_PROJECT_ID
 
-    if req.harness == "pi" or req.run_incarnation is not None or req.run_header_hash is not None or req.run_origin:
+    if (
+        req.harness == "pi"
+        or req.run_incarnation is not None
+        or req.run_header_hash is not None
+        or req.run_origin
+        or req.parent_run_incarnation is not None
+        or req.parent_header_hash is not None
+    ):
         from services.mobile_run_identity import admit_pi_run
 
         await admit_pi_run(
@@ -188,6 +199,9 @@ async def ingest_session(
             run_incarnation=req.run_incarnation,
             run_header_hash=req.run_header_hash,
             run_origin=req.run_origin,
+            parent_session_id=req.parent_session_id,
+            parent_run_incarnation=req.parent_run_incarnation,
+            parent_header_hash=req.parent_header_hash,
         )
 
     optic.debug(

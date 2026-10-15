@@ -100,7 +100,14 @@ def _revision(rows: list[dict], *, retained_suffix: bool = False) -> str | None:
 
 
 def _matched(
-    extracted, rows: list[dict], mappings: dict[str, dict[str, uuid.UUID]], *, verified_root: uuid.UUID | None = None
+    extracted,
+    rows: list[dict],
+    mappings: dict[str, dict[str, uuid.UUID]],
+    *,
+    verified_root: uuid.UUID | None = None,
+    allow_child: bool = False,
+    root_start: datetime | None = None,
+    root_session_id: str | None = None,
 ) -> tuple[list[dict], bool]:
     """Only result-linked calls with a unique server alias and valid time qualify."""
     valid = []
@@ -121,14 +128,15 @@ def _matched(
             or stamp is None
             or not datetime(1971, 1, 1, tzinfo=UTC) <= stamp <= now + timedelta(minutes=5)
             or len(call.source_block_key) > 270
+            or (root_start is not None and stamp < root_start)
         ):
             partial = True
             continue
         root = (
-            source["session_id"]
+            (root_session_id or source["session_id"])
             if verified_root is not None
             and rows[0]["line_offset"] == 0
-            and not any(r.get("parent_session_id") for r in rows)
+            and (allow_child or not any(r.get("parent_session_id") for r in rows))
             else None
         )
         valid.append(
@@ -170,6 +178,49 @@ async def _rows(project: str, user: str, harness: str, session: str) -> list[dic
     return response.json().get("data", [])
 
 
+async def _qualified_lineage(db, scope: dict, run, child_start: datetime) -> tuple[str, uuid.UUID, datetime] | None:
+    """At most eight exact same-actor parent incarnations, ending in a current root."""
+    seen = {scope["session"]}
+    parent_id, nonce, fingerprint = run.parent_session_id, run.parent_run_incarnation, run.parent_header_hash
+    if not parent_id or nonce is None or not fingerprint:
+        return None
+    for _ in range(8):
+        if parent_id in seen:
+            return None
+        seen.add(parent_id)
+        parent = (
+            await db.execute(
+                text(
+                    "SELECT session_id,run_incarnation,header_hash,parent_session_id,parent_run_incarnation,"
+                    "parent_header_hash,origin_witness,root_verified,source_status,started_at "
+                    "FROM mobile_run_instances WHERE project_id=:project AND user_id=:user AND harness='pi' "
+                    "AND session_id=:parent FOR UPDATE"
+                ),
+                {**scope, "parent": parent_id},
+            )
+        ).first()
+        if (
+            parent is None
+            or parent.run_incarnation != nonce
+            or parent.header_hash != fingerprint
+            or parent.started_at is None
+            or parent.started_at > child_start
+            or parent.source_status not in ("complete", "partial")
+        ):
+            return None
+        child_start = parent.started_at
+        if parent.parent_session_id is None:
+            if parent.root_verified and parent.origin_witness == "pi_session_start_root_v1":
+                return parent.session_id, parent.run_incarnation, parent.started_at
+            return None
+        parent_id, nonce, fingerprint = (
+            parent.parent_session_id,
+            parent.parent_run_incarnation,
+            parent.parent_header_hash,
+        )
+    return None
+
+
 async def project_pi_session(ctx: dict, project: str, user: str, harness: str, session: str) -> dict:
     del ctx
     # Worker is fed only server-derived uploader identity, never client-declared
@@ -191,7 +242,8 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         run = (
             await db.execute(
                 text(
-                    "SELECT run_incarnation,header_hash,root_verified,origin_witness FROM mobile_run_instances "
+                    "SELECT run_incarnation,header_hash,root_verified,origin_witness,parent_session_id,"
+                    "parent_run_incarnation,parent_header_hash,started_at FROM mobile_run_instances "
                     "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session FOR UPDATE"
                 ),
                 scope,
@@ -199,6 +251,9 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         ).first()
         run_incarnation = None
         root_witnessed = False
+        resolved_root: uuid.UUID | None = None
+        resolved_root_id: str | None = None
+        lineage_start: datetime | None = None
         if run and revision is not None and first_source_offset == 0 and rows:
             try:
                 header = json.loads(rows[0]["raw_line"])
@@ -216,7 +271,21 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                     and not header.get("parentSession")
                     and not any(row.get("parent_session_id") for row in rows)
                     and _source_time(header.get("timestamp")) is not None
+                    and run.parent_session_id is None
                 )
+                if root_witnessed:
+                    resolved_root = run.run_incarnation
+                    resolved_root_id = session
+                    lineage_start = _source_time(header.get("timestamp"))
+                elif run.parent_session_id is not None and _source_time(header.get("timestamp")) is not None:
+                    lineage = await _qualified_lineage(db, scope, run, _source_time(header["timestamp"]))
+                    if (
+                        lineage is not None
+                        and header.get("parentSession")
+                        and all(row.get("parent_session_id") == run.parent_session_id for row in rows)
+                    ):
+                        resolved_root_id, resolved_root, _root_started = lineage
+                        lineage_start = _source_time(header["timestamp"])  # Calls cannot predate this child.
         if revision is not None:
             hashes = {r.get("layer_hash") for r in rows}
             if all(isinstance(digest, str) and digest.startswith("v2_") for digest in hashes):
@@ -245,7 +314,10 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                         extraction,
                         rows,
                         mapping,
-                        verified_root=run_incarnation if root_witnessed else None,
+                        verified_root=resolved_root,
+                        allow_child=resolved_root is not None and not root_witnessed,
+                        root_start=lineage_start,
+                        root_session_id=resolved_root_id,
                     )
                     status = "partial" if partial or first_source_offset else "complete"
                 else:
@@ -284,7 +356,15 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                 if zero_times
                 else True
             )
-            if zero_exists:
+            stale_roots = await db.scalar(
+                text(
+                    "SELECT count(*) FROM mobile_evidence_events WHERE project_id=:project AND user_id=:user "
+                    "AND harness=:harness AND session_id=:session "
+                    "AND root_run_incarnation IS DISTINCT FROM :resolved_root"
+                ),
+                {**scope, "resolved_root": resolved_root},
+            )
+            if zero_exists and not stale_roots and bool(run.root_verified if run else False) == bool(resolved_root):
                 count = await db.scalar(
                     text(
                         "SELECT count(*) FROM mobile_evidence_events WHERE project_id=:project AND user_id=:user "
@@ -396,7 +476,7 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                 {
                     **scope,
                     "status": status if run_incarnation else "pending",
-                    "verified": bool(root_witnessed and status in ("complete", "partial")),
+                    "verified": bool(resolved_root is not None and status in ("complete", "partial")),
                 },
             )
         # ClickHouse and Postgres have no shared transaction. Recheck source
@@ -406,6 +486,20 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         if _revision(fresh or [], retained_suffix=True) != revision:
             await db.rollback()
             raise RuntimeError("Mobile source changed during evidence publication")
+        # A parent that becomes qualified after child ingest must cause every
+        # admitted direct child to reproject. Each child in turn wakes its own
+        # descendants; unrelated roots do not lose their scoped cursor.
+        if run is not None:
+            await db.execute(
+                text(
+                    "INSERT INTO mobile_projection_queue(project_id,user_id,harness,session_id) "
+                    "SELECT project_id,user_id,harness,session_id FROM mobile_run_instances "
+                    "WHERE project_id=:project AND user_id=:user AND harness='pi' "
+                    "AND parent_run_incarnation=:run "
+                    "ON CONFLICT (project_id,user_id,harness,session_id) DO UPDATE SET requested_at=now()"
+                ),
+                {**scope, "run": run.run_incarnation},
+            )
         await db.commit()
     return {"status": status, "matched": len(valid)}
 

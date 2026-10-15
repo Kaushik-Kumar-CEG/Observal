@@ -89,7 +89,16 @@ async def test_fresh_run_claim_is_bound_to_original_source_and_uploader(monkeypa
 
 @pytest.mark.asyncio
 async def test_reused_nonce_different_header_legacy_replay_and_other_harness_fail_closed(monkeypatch):
-    db = Db(SimpleNamespace(run_incarnation=RUN, header_hash=HASH, origin_witness=None))
+    db = Db(
+        SimpleNamespace(
+            run_incarnation=RUN,
+            header_hash=HASH,
+            origin_witness=None,
+            parent_session_id=None,
+            parent_run_incarnation=None,
+            parent_header_hash=None,
+        )
+    )
     monkeypatch.setattr(admission, "async_session", lambda: Session(db))
     await claim(db, start_offset=8, lines=[])
     for changes in (
@@ -124,7 +133,14 @@ async def test_lifecycle_root_witness_only_on_unparented_source_and_immutable_re
             run_origin="pi_session_start_root_v1",
         )
     assert exc.value.status_code == 409
-    db.existing = SimpleNamespace(run_incarnation=RUN, header_hash=HASH, origin_witness="pi_session_start_root_v1")
+    db.existing = SimpleNamespace(
+        run_incarnation=RUN,
+        header_hash=HASH,
+        origin_witness="pi_session_start_root_v1",
+        parent_session_id=None,
+        parent_run_incarnation=None,
+        parent_header_hash=None,
+    )
     await claim(db, start_offset=2, lines=[], run_origin="pi_session_start_root_v1")
     with pytest.raises(HTTPException):
         await claim(db, start_offset=2, lines=[], run_origin=None)

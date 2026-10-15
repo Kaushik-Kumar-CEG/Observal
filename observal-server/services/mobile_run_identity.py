@@ -11,7 +11,7 @@ Legacy senders cannot retroactively acquire incarnation identity.
 import hashlib
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -30,6 +30,9 @@ async def admit_pi_run(
     run_incarnation: uuid.UUID | None,
     run_header_hash: str | None,
     run_origin: str | None = None,
+    parent_session_id: str | None = None,
+    parent_run_incarnation: uuid.UUID | None = None,
+    parent_header_hash: str | None = None,
 ) -> None:
     if harness != "pi":
         raise HTTPException(409, "Pi run identity required")
@@ -38,6 +41,13 @@ async def admit_pi_run(
         if run_incarnation is None and run_header_hash is None and run_origin is None:
             return
         raise HTTPException(409, "Unverifiable run identity")
+    parent_claim = (parent_session_id, parent_run_incarnation, parent_header_hash)
+    if any(item is not None for item in parent_claim) and not all(item is not None for item in parent_claim):
+        raise HTTPException(409, "Incomplete Pi parent identity")
+    if run_origin and parent_session_id:
+        raise HTTPException(409, "Child cannot claim root origin")
+    if parent_session_id == session or (parent_session_id is not None and len(parent_session_id) > 256):
+        raise HTTPException(409, "Invalid Pi parent identity")
     params = {"project": project, "user": user, "harness": harness, "session": session}
     async with async_session() as db:
         # Serialize competing claims before any ClickHouse write. A conflicting
@@ -49,7 +59,8 @@ async def admit_pi_run(
         existing = (
             await db.execute(
                 text(
-                    "SELECT run_incarnation,header_hash,origin_witness FROM mobile_run_instances "
+                    "SELECT run_incarnation,header_hash,origin_witness,parent_session_id,parent_run_incarnation,"
+                    "parent_header_hash FROM mobile_run_instances "
                     "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session "
                     "FOR UPDATE"
                 ),
@@ -61,10 +72,13 @@ async def admit_pi_run(
                 existing.run_incarnation != run_incarnation
                 or existing.header_hash != run_header_hash
                 or existing.origin_witness != run_origin
+                or existing.parent_session_id != parent_session_id
+                or existing.parent_run_incarnation != parent_run_incarnation
+                or existing.parent_header_hash != parent_header_hash
                 or (start_offset == 0 and lines and hashlib.sha256(lines[0].encode()).hexdigest() != run_header_hash)
             ):
                 raise HTTPException(409, "Scoped session identity conflict")
-        elif run_incarnation is None and run_header_hash is None and run_origin is None:
+        elif run_incarnation is None and run_header_hash is None and run_origin is None and parent_session_id is None:
             return  # Legacy evidence remains unqualified but cannot replace a claimed run.
         elif run_incarnation is None or run_header_hash is None or len(run_header_hash) != 64:
             raise HTTPException(409, "Unverifiable run identity")
@@ -102,13 +116,70 @@ async def admit_pi_run(
                 or (
                     run_origin is not None and (run_origin != "pi_session_start_root_v1" or parsed.get("parentSession"))
                 )
+                or (
+                    parent_session_id is not None
+                    and not (isinstance(parsed.get("parentSession"), str) and parsed["parentSession"])
+                )
+                or (parent_session_id is None and parsed.get("parentSession") and run_origin)
             ):
                 raise HTTPException(409, "Run header identity mismatch")
+            # A client-reported Pi child link is accepted only after resolving
+            # every same-actor incarnation hop to a prospective admitted root.
+            # Paths and bare parent IDs alone cannot introduce root reach.
+            if parent_session_id is not None:
+                seen = {session}
+                parent_id, parent_nonce, parent_hash = parent_claim
+                assert parent_id is not None and parent_nonce is not None and parent_hash is not None
+                child_started = when.astimezone(UTC)
+                for _depth in range(8):
+                    if parent_id in seen:
+                        raise HTTPException(409, "Pi parent cycle")
+                    seen.add(parent_id)
+                    parent = (
+                        await db.execute(
+                            text(
+                                "SELECT session_id,run_incarnation,header_hash,started_at,parent_session_id,"
+                                "parent_run_incarnation,parent_header_hash,origin_witness FROM mobile_run_instances "
+                                "WHERE project_id=:project AND user_id=:user AND harness='pi' AND session_id=:parent FOR UPDATE"
+                            ),
+                            {**params, "parent": parent_id},
+                        )
+                    ).first()
+                    if (
+                        parent is None
+                        or parent.run_incarnation != parent_nonce
+                        or parent.header_hash != parent_hash
+                        or parent.started_at is None
+                        or parent.started_at > child_started
+                    ):
+                        raise HTTPException(409, "Unresolved or noncausal Pi parent")
+                    child_started = parent.started_at
+                    if parent.parent_session_id is None:
+                        if parent.origin_witness != "pi_session_start_root_v1":
+                            raise HTTPException(409, "Unqualified Pi root")
+                        break
+                    parent_id, parent_nonce, parent_hash = (
+                        parent.parent_session_id,
+                        parent.parent_run_incarnation,
+                        parent.parent_header_hash,
+                    )
+                else:
+                    raise HTTPException(409, "Pi parent depth exceeded")
             await db.execute(
                 text(
-                    "INSERT INTO mobile_run_instances(project_id,user_id,harness,session_id,run_incarnation,header_hash,origin_witness) "
-                    "VALUES (:project,:user,:harness,:session,:run,:header,:origin)"
+                    "INSERT INTO mobile_run_instances(project_id,user_id,harness,session_id,run_incarnation,header_hash,"
+                    "origin_witness,parent_session_id,parent_run_incarnation,parent_header_hash,started_at) "
+                    "VALUES (:project,:user,:harness,:session,:run,:header,:origin,:parent,:parent_run,:parent_hash,:start)"
                 ),
-                {**params, "run": run_incarnation, "header": run_header_hash, "origin": run_origin},
+                {
+                    **params,
+                    "run": run_incarnation,
+                    "header": run_header_hash,
+                    "origin": run_origin,
+                    "parent": parent_session_id,
+                    "parent_run": parent_run_incarnation,
+                    "parent_hash": parent_header_hash,
+                    "start": when.astimezone(UTC),
+                },
             )
         await db.commit()
