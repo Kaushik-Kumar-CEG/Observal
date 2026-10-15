@@ -182,7 +182,10 @@ async def get_mobile_user(
     ):
         raise HTTPException(status_code=403, detail="Mobile credential required")
     path = request.url.path
-    if not (path.startswith("/api/v1/mobile-activity/v1/") or path == "/api/v1/auth/mobile/logout"):
+    if not (
+        path.startswith("/api/v1/mobile-activity/v1/")
+        or path in ("/api/v1/auth/mobile/logout", "/api/v1/auth/mobile/credential")
+    ):
         raise HTTPException(status_code=403, detail="Mobile route required")
     user = await _authenticate_via_jwt(token, db, allow_mobile=True)
     if not user or user.auth_provider == "deactivated":

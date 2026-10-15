@@ -3,6 +3,7 @@
 
 """Phone credentials cannot become account-wide browser/CLI credentials."""
 
+import asyncio
 import inspect
 import json
 import uuid
@@ -60,6 +61,8 @@ async def test_device_grant_creates_scope_preserving_read_only_phone_tokens(iden
     created = await inspect.unwrap(device_auth.device_authorize)(
         request, DeviceAuthRequest(client_id=MOBILE_CLIENT_ID), identity.db
     )
+    assert created.verification_origins == ["http://localhost"]
+    assert created.verification_uri.startswith("http://localhost/device")
     data = json.loads(await identity.redis.get(f"device_auth:{created.device_code}"))
     assert data["client_id"] == MOBILE_CLIENT_ID
     assert data["device_id"]
@@ -72,6 +75,12 @@ async def test_device_grant_creates_scope_preserving_read_only_phone_tokens(iden
     )
     assert grant.status_code == 200
     body = json.loads(grant.body)
+    assert (body["token_type"], body["client_id"], body["audience"], body["scope"]) == (
+        "bearer",
+        MOBILE_CLIENT_ID,
+        MOBILE_AUDIENCE,
+        MOBILE_SCOPE,
+    )
     access, refresh = body["access_token"], body["refresh_token"]
     with pytest.raises(jwt.InvalidTokenError):
         decode_access_token(access)
@@ -87,11 +96,30 @@ async def test_device_grant_creates_scope_preserving_read_only_phone_tokens(iden
     ] is None
     mobile_request = SimpleNamespace(url=SimpleNamespace(path="/api/v1/auth/mobile/logout"), state=SimpleNamespace())
     assert (await deps.get_mobile_user(mobile_request, f"Bearer {access}", identity.db)).id == identity.user.id
+    proof_request = SimpleNamespace(
+        headers={"authorization": f"Bearer {access}"},
+        url=SimpleNamespace(path="/api/v1/auth/mobile/credential"),
+        state=SimpleNamespace(),
+    )
+    proven = await deps.get_mobile_user(proof_request, f"Bearer {access}", identity.db)
+    proof = await inspect.unwrap(auth.mobile_credential)(proof_request, proven)
+    assert (proof.subject_id, proof.device_id, proof.audience, proof.scope) == (
+        identity.user.id,
+        data["device_id"],
+        MOBILE_AUDIENCE,
+        MOBILE_SCOPE,
+    )
     first = await inspect.unwrap(auth.refresh_token)(request, RefreshRequest(refresh_token=refresh), identity.db)
     second = await inspect.unwrap(auth.refresh_token)(
         request, RefreshRequest(refresh_token=first.refresh_token), identity.db
     )
     for pair in (first, second):
+        assert (pair.token_type, pair.client_id, pair.audience, pair.scope) == (
+            "bearer",
+            MOBILE_CLIENT_ID,
+            MOBILE_AUDIENCE,
+            MOBILE_SCOPE,
+        )
         a = decode_access_token(pair.access_token, allow_mobile=True)
         r = decode_refresh_token(pair.refresh_token)
         assert (a["device_id"], a["scope"], a["aud"]) == (data["device_id"], MOBILE_SCOPE, MOBILE_AUDIENCE)
@@ -112,6 +140,68 @@ async def test_device_grant_creates_scope_preserving_read_only_phone_tokens(iden
             request, RefreshRequest(refresh_token=second.refresh_token), identity.db
         )
     assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_mobile_sso_verification_origin_is_browser_initial_only(identity, monkeypatch):
+    monkeypatch.setattr(
+        device_auth.ds,
+        "get_sync",
+        lambda key, default=None: "https://browser.example.test" if key == "deployment.frontend_url" else default,
+    )
+    grant = await inspect.unwrap(device_auth.device_authorize)(
+        SimpleNamespace(headers={"host": "untrusted.example"}),
+        DeviceAuthRequest(client_id=MOBILE_CLIENT_ID, sso=True),
+        identity.db,
+    )
+    assert grant.verification_origins == ["https://browser.example.test"]
+    assert grant.verification_uri.startswith("https://browser.example.test/")
+    assert "untrusted.example" not in grant.verification_uri
+    monkeypatch.setattr(
+        device_auth.ds,
+        "get_sync",
+        lambda key, default=None: (
+            "https://attacker.example.test/redirect" if key == "deployment.frontend_url" else default
+        ),
+    )
+    with pytest.raises(HTTPException) as exc:
+        await inspect.unwrap(device_auth.device_authorize)(
+            SimpleNamespace(headers={"host": "untrusted.example"}),
+            DeviceAuthRequest(client_id=MOBILE_CLIENT_ID),
+            identity.db,
+        )
+    assert exc.value.status_code == 503
+    monkeypatch.setattr(device_auth.ds, "get_sync", lambda _key, default=None: default)
+    with pytest.raises(HTTPException) as exc:
+        await inspect.unwrap(device_auth.device_authorize)(
+            SimpleNamespace(
+                headers={
+                    "host": "api.example.test",
+                    "x-forwarded-proto": "https",
+                    "x-forwarded-host": "attacker.example.test",
+                }
+            ),
+            DeviceAuthRequest(client_id=MOBILE_CLIENT_ID),
+            identity.db,
+        )
+    assert exc.value.status_code == 503  # No configured public origin: ignore client-supplied Host.
+
+
+@pytest.mark.asyncio
+async def test_mobile_refresh_is_atomically_single_use_under_concurrent_requests(identity):
+    _, refresh, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="race-phone")
+    request = SimpleNamespace(headers={})
+    outcomes = await asyncio.gather(
+        *(
+            inspect.unwrap(auth.refresh_token)(request, RefreshRequest(refresh_token=refresh), identity.db)
+            for _ in range(2)
+        ),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(result, HTTPException) and result.status_code == 401 for result in outcomes) == 1
+    assert sum(not isinstance(result, BaseException) for result in outcomes) == 1
+    winner = next(result for result in outcomes if not isinstance(result, BaseException))
+    assert winner.client_id == MOBILE_CLIENT_ID and winner.scope == MOBILE_SCOPE
 
 
 @pytest.mark.asyncio
@@ -140,6 +230,30 @@ async def test_mobile_bearer_denied_by_legacy_telemetry_and_admin_routes(identit
         ):
             response = await client.get(path, headers=headers)
             assert response.status_code == 401, (path, response.status_code)
+
+
+@pytest.mark.asyncio
+async def test_mobile_credential_proof_requires_server_verified_mobile_bearer(identity, monkeypatch):
+    monkeypatch.setattr(auth.limiter, "enabled", False)
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.dependency_overrides[deps.get_db] = lambda: identity.db
+    phone, _, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="phone-proof")
+    desktop, _, _ = await auth._issue_tokens(identity.user)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        proof = await client.get("/api/v1/auth/mobile/credential", headers={"Authorization": f"Bearer {phone}"})
+        other = await client.get("/api/v1/auth/mobile/credential", headers={"Authorization": f"Bearer {desktop}"})
+        missing = await client.get("/api/v1/auth/mobile/credential")
+    assert proof.status_code == 200
+    assert proof.json() == {
+        "token_type": "bearer",
+        "client_id": MOBILE_CLIENT_ID,
+        "audience": MOBILE_AUDIENCE,
+        "scope": MOBILE_SCOPE,
+        "subject_id": str(identity.user.id),
+        "device_id": "phone-proof",
+    }
+    assert other.status_code == 403 and missing.status_code == 401
 
 
 @pytest.mark.asyncio

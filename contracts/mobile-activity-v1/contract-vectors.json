@@ -1,6 +1,14 @@
 {
   "synthetic_draft_only": true,
   "not_current_or_live": true,
+  "synthetic_mobile_grant": {
+    "device_challenge": {"device_code": "synthetic-do-not-redeem", "user_code": "ABCD-EFGH", "verification_uri": "https://browser.example.invalid/device", "verification_uri_complete": "https://browser.example.invalid/device?code=ABCD-EFGH", "verification_origins": ["https://browser.example.invalid"], "expires_in": 600, "interval": 5},
+    "device_token": {"access_token": "synthetic-not-a-jwt", "refresh_token": "synthetic-not-a-jwt", "token_type": "bearer", "client_id": "observal-mobile", "audience": "observal-mobile-activity-v1", "scope": "mobile:read", "expires_in": 3600, "user": {"id": "10000000-0000-4000-8000-000000000003", "email": "example@example.invalid", "name": "Example", "role": "user"}},
+    "refresh_pair": {"access_token": "synthetic-not-a-jwt", "refresh_token": "synthetic-not-a-jwt", "token_type": "bearer", "client_id": "observal-mobile", "audience": "observal-mobile-activity-v1", "scope": "mobile:read", "expires_in": 3600},
+    "authenticated_proof": {"token_type": "bearer", "client_id": "observal-mobile", "audience": "observal-mobile-activity-v1", "scope": "mobile:read", "subject_id": "10000000-0000-4000-8000-000000000003", "device_id": "synthetic-device"},
+    "must_confirm_via_server_before_storing_pair": true,
+    "browser_idp_redirect_is_not_a_mobile_token_callback": true
+  },
   "wire_cases": [
     {
       "id": "paired-40-calls-overlap-prospective-not-deployed", "http": 200,
@@ -61,7 +69,7 @@
       "authorized_self_user_only": true, "unqualified_other_ids_indistinguishable": true,
       "must_not_expose": ["forbidden_cohort", "forbidden_revision", "forbidden_source"]
     },
-    {"id": "partial-zero", "http": 200, "reading": {"value": 0, "status": "partial", "reasons": ["unknown_root_origin"], "coverage": {"eligible_sessions": 3, "source_start": "2026-09-01T00:00:00Z", "source_end": "2026-09-08T00:00:00Z", "supported_harnesses": ["verified-synthetic"], "supported_kinds": ["mcp_calls"], "projection": "partial"}}, "expected_text": "0 observed traces · Partial coverage", "expected_talkback": "0 observed traces · Partial coverage"},
+    {"id": "partial-zero", "http": 200, "reading": {"value": 0, "status": "partial", "reasons": ["observed_qualified_only", "incomplete_coverage"], "coverage": {"eligible_sessions": 1, "source_start": null, "source_end": null, "supported_harnesses": ["pi"], "supported_kinds": ["mcp_calls"], "projection": "partial"}}, "expected_text": "0 observed traces · Partial coverage", "expected_talkback": "0 observed traces · Partial coverage", "requires_verified_tool_free_source": true, "never_author_or_general_zero": true},
     {"id": "unknown-only-null", "http": 200, "reading": {"value": null, "status": "not_recorded", "reasons": ["unavailable"], "coverage": {"eligible_sessions": null, "source_start": null, "source_end": null, "supported_harnesses": [], "supported_kinds": [], "projection": "unavailable"}}, "expected_text": "Not recorded"},
     {"id": "forbidden-author", "http": 403, "body": null, "must_not_expose": ["count", "coverage", "subject_name", "cohort", "source"]},
     {"id": "source-erased-stale-page", "http": 409, "body": null, "expect_window_refresh": true},

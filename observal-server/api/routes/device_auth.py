@@ -36,7 +36,7 @@ from schemas.auth import (
     DeviceConfirmRequest,
     DeviceTokenRequest,
 )
-from services.jwt_service import MOBILE_CLIENT_ID
+from services.jwt_service import MOBILE_AUDIENCE, MOBILE_CLIENT_ID, MOBILE_SCOPE
 from services.redis import get_redis
 
 router = APIRouter(prefix="/api/v1/auth/device", tags=["device-auth"])
@@ -152,7 +152,7 @@ async def _saml_configured(db: AsyncSession) -> bool:
         return False
 
 
-@router.post("/authorize", response_model=DeviceAuthResponse)
+@router.post("/authorize", response_model=DeviceAuthResponse, response_model_exclude_none=True)
 @limiter.limit("5/minute")
 async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: AsyncSession = Depends(get_db)):
     """Create a device authorization request. Returns device_code + user_code."""
@@ -174,6 +174,26 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
                 status_code=400,
                 detail=f"{'Google' if requested_provider == 'google' else 'GitHub'} sign-in is not configured on this server",
             )
+    frontend_url = _resolve_frontend_url(request)
+    verification_origins = None
+    if client_id == MOBILE_CLIENT_ID:
+        parsed = urlparse(frontend_url)
+        safe_local = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+        trusted_public_origin = any(
+            configured and not _is_localhost_url(configured)
+            for configured in (ds.get_sync("deployment.frontend_url"), ds.get_sync("deployment.public_url"))
+        )
+        if (not safe_local and not trusted_public_origin) or (
+            (parsed.scheme != "https" and not safe_local)
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in ("", "/")
+        ):
+            raise HTTPException(status_code=503, detail="Mobile verification origin not configured")
+        verification_origins = [f"{parsed.scheme}://{parsed.netloc}"]
     device_code = secrets.token_urlsafe(48)
     user_code = _generate_user_code()
     normalized_code = _normalize_user_code(user_code)
@@ -197,8 +217,6 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
     except RedisError as e:
         optic.error("Redis unavailable during device authorize: {}", e)
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
-
-    frontend_url = _resolve_frontend_url(request)
 
     optic.info("device_authorize: code issued")
     if req and req.sso:
@@ -228,6 +246,7 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
             user_code=user_code,
             verification_uri=login_url,
             verification_uri_complete=login_url,
+            verification_origins=verification_origins,
             expires_in=_DEVICE_AUTH_TTL,
             interval=5,
         )
@@ -237,6 +256,7 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
         user_code=user_code,
         verification_uri=f"{frontend_url}/device",
         verification_uri_complete=f"{frontend_url}/device?code={user_code}",
+        verification_origins=verification_origins,
         expires_in=_DEVICE_AUTH_TTL,
         interval=5,
     )
@@ -319,6 +339,16 @@ async def device_token(request: Request, req: DeviceTokenRequest, db: AsyncSessi
                 "access_token": access_token,
                 "refresh_token": refresh_token,
                 "expires_in": expires_in,
+                **(
+                    {
+                        "token_type": "bearer",
+                        "client_id": MOBILE_CLIENT_ID,
+                        "audience": MOBILE_AUDIENCE,
+                        "scope": MOBILE_SCOPE,
+                    }
+                    if client_id == MOBILE_CLIENT_ID
+                    else {}
+                ),
                 "user": {
                     "id": str(user.id),
                     "email": user.email,

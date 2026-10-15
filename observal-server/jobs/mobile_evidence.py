@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 
+import services.dynamic_settings as ds
 from database import async_session
 from services.clickhouse.client import _query
 from services.session_parsers.pi_invocations import PiInvocationExtractor
@@ -23,6 +24,61 @@ _MAX_BYTES = 16 * 1024 * 1024
 _PARAMS = (
     "project_id={project:String} AND user_id={user:String} AND harness={harness:String} AND session_id={session:String}"
 )
+
+
+def _source_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or not 1971 <= parsed.year < 2100:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _zero_activities(rows: list[dict]) -> list[tuple[int, datetime, str]] | None:
+    """Only tool-free, timestamped Pi records justify a partial zero cohort."""
+    activity: list[tuple[int, datetime, str]] = []
+    for row in rows:
+        try:
+            record = json.loads(row["raw_line"])
+        except (ValueError, TypeError, KeyError):
+            return None
+        if not isinstance(record, dict):
+            return None
+        if record.get("type") != "message":
+            if record.get("type") not in {
+                "session",
+                "label",
+                "session_info",
+                "model_change",
+                "thinking_level_change",
+                "compaction",
+                "branch_summary",
+            }:
+                return None
+            continue
+        if not isinstance(row.get("layer_hash"), str) or not row["layer_hash"].startswith("v2_"):
+            return None
+        message = record.get("message")
+        if not isinstance(message, dict):
+            return None
+        when = _source_time(record.get("timestamp"))
+        if when is None or when > datetime.now(UTC) + timedelta(minutes=5):
+            return None
+        if message.get("role") not in ("user", "assistant"):
+            return None
+        if message.get("role") == "assistant":
+            content = message.get("content")
+            if not isinstance(content, list) or any(
+                isinstance(part, dict) and part.get("type") == "toolCall" for part in content
+            ):
+                return None  # A silent/unknown tool might have called a component.
+        if row.get("event_type") in ("user_prompt", "assistant_text", "thinking"):
+            activity.append((row["line_offset"], when, row["layer_hash"]))
+    return activity or None
 
 
 def _revision(rows: list[dict], *, retained_suffix: bool = False) -> str | None:
@@ -135,13 +191,14 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         run = (
             await db.execute(
                 text(
-                    "SELECT run_incarnation,header_hash,root_verified FROM mobile_run_instances "
+                    "SELECT run_incarnation,header_hash,root_verified,origin_witness FROM mobile_run_instances "
                     "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session FOR UPDATE"
                 ),
                 scope,
             )
         ).first()
         run_incarnation = None
+        root_witnessed = False
         if run and revision is not None and first_source_offset == 0 and rows:
             try:
                 header = json.loads(rows[0]["raw_line"])
@@ -154,6 +211,12 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                 and hashlib.sha256(rows[0]["raw_line"].encode()).hexdigest() == run.header_hash
             ):
                 run_incarnation = run.run_incarnation
+                root_witnessed = (
+                    run.origin_witness == "pi_session_start_root_v1"
+                    and not header.get("parentSession")
+                    and not any(row.get("parent_session_id") for row in rows)
+                    and _source_time(header.get("timestamp")) is not None
+                )
         if revision is not None:
             hashes = {r.get("layer_hash") for r in rows}
             if all(isinstance(digest, str) and digest.startswith("v2_") for digest in hashes):
@@ -182,7 +245,7 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                         extraction,
                         rows,
                         mapping,
-                        verified_root=run_incarnation if run_incarnation and run.root_verified else None,
+                        verified_root=run_incarnation if root_witnessed else None,
                     )
                     status = "partial" if partial or first_source_offset else "complete"
                 else:
@@ -198,22 +261,39 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                 scope,
             )
         ).first()
+        zero_times = (
+            _zero_activities(rows)
+            if rows and root_witnessed and status == "complete" and not valid and any(mapping.values())
+            else None
+        )
         if current and (current.source_revision, current.status, current.first_source_offset) == (
             revision or "unknown",
             status,
             first_source_offset,
         ):
-            # Backfill and retention replay unchanged sources frequently. Do not
-            # invalidate a subject's pagination because an unrelated scan ran.
-            count = await db.scalar(
-                text(
-                    "SELECT count(*) FROM mobile_evidence_events WHERE project_id=:project AND user_id=:user "
-                    "AND harness=:harness AND session_id=:session"
-                ),
-                scope,
+            # Newly upgraded zero-cohort projection may be missing even when
+            # positive facts/publication were previously idempotent.
+            zero_exists = (
+                await db.scalar(
+                    text(
+                        "SELECT 1 FROM mobile_eligible_event_times WHERE project_id=:project AND user_id=:user "
+                        "AND harness=:harness AND session_id=:session LIMIT 1"
+                    ),
+                    scope,
+                )
+                if zero_times
+                else True
             )
-            await db.rollback()
-            return {"status": status, "matched": count or 0}
+            if zero_exists:
+                count = await db.scalar(
+                    text(
+                        "SELECT count(*) FROM mobile_evidence_events WHERE project_id=:project AND user_id=:user "
+                        "AND harness=:harness AND session_id=:session"
+                    ),
+                    scope,
+                )
+                await db.rollback()
+                return {"status": status, "matched": count or 0}
         old_components = (
             (
                 await db.execute(
@@ -236,6 +316,30 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
             ),
             scope,
         )
+        await db.execute(
+            text(
+                "DELETE FROM mobile_eligible_event_times WHERE project_id=:project AND user_id=:user "
+                "AND harness=:harness AND session_id=:session"
+            ),
+            scope,
+        )
+        if zero_times:
+            for offset, event_time, digest in zero_times:
+                await db.execute(
+                    text(
+                        "INSERT INTO mobile_eligible_event_times(project_id,user_id,harness,session_id,"
+                        "source_line_offset,root_run_incarnation,source_revision,event_time,layer_hash) "
+                        "VALUES (:project,:user,:harness,:session,:offset,:run,:revision,:time,:digest)"
+                    ),
+                    {
+                        **scope,
+                        "offset": offset,
+                        "run": run_incarnation,
+                        "revision": revision,
+                        "time": event_time,
+                        "digest": digest,
+                    },
+                )
         for fact in valid:
             await db.execute(
                 text(
@@ -286,10 +390,14 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         if run is not None:
             await db.execute(
                 text(
-                    "UPDATE mobile_run_instances SET source_status=:status "
+                    "UPDATE mobile_run_instances SET source_status=:status,root_verified=:verified "
                     "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
                 ),
-                {**scope, "status": status if run_incarnation else "pending"},
+                {
+                    **scope,
+                    "status": status if run_incarnation else "pending",
+                    "verified": bool(root_witnessed and status in ("complete", "partial")),
+                },
             )
         # ClickHouse and Postgres have no shared transaction. Recheck source
         # after publication preparation; a racing append/repair retries instead
@@ -310,6 +418,10 @@ async def scan_retained_mobile_sources(ctx: dict) -> dict:
     and publication generations make all retries idempotent.
     """
     del ctx
+    retention_days = (
+        await ds.get_int("retention.trace_days", default=0) if await ds.get_bool("retention.enabled") else 0
+    )
+    source_floor = "AND timestamp>=now()-INTERVAL {days:UInt32} DAY " if retention_days > 0 else ""
     async with async_session() as db:
         cursor = (
             await db.execute(
@@ -324,11 +436,17 @@ async def scan_retained_mobile_sources(ctx: dict) -> dict:
         result = await _query(
             "SELECT project_id,user_id,session_id,groupUniqArray(101)(layer_hash) AS hashes "
             "FROM session_events FINAL WHERE harness='pi' AND is_source_record=1 "
-            "AND startsWith(layer_hash,'v2_') AND timestamp>=now()-INTERVAL 90 DAY "
+            "AND startsWith(layer_hash,'v2_') "
+            f"{source_floor}"
             "AND (project_id,user_id,session_id)>({project:String},{user:String},{session:String}) "
             "GROUP BY project_id,user_id,session_id ORDER BY project_id,user_id,session_id LIMIT 51 "
             "SETTINGS max_execution_time=5 FORMAT JSON",
-            {"param_project": cursor.project_id, "param_user": cursor.user_id, "param_session": cursor.session_id},
+            {
+                "param_project": cursor.project_id,
+                "param_user": cursor.user_id,
+                "param_session": cursor.session_id,
+                "param_days": retention_days,
+            },
         )
         result.raise_for_status()
         candidates = result.json().get("data", [])
@@ -377,11 +495,12 @@ async def scan_retained_mobile_sources(ctx: dict) -> dict:
 
 
 async def run_mobile_retention_sweep(ctx: dict) -> dict:
-    """Revoke materialized evidence after ClickHouse TTL, admin purge or repair.
+    """Bounded derived-data cleanup with a persisted check cursor.
 
-    Reads already revalidate their source on each request. This bounded sweep
-    also removes old PostgreSQL facts that would otherwise outlive source
-    retention. User deletion cascades are handled directly by the schema.
+    Each pass checks up to 500 old publications, including ones whose source
+    disappeared; failed/unchanged first candidates cannot starve later rows.
+    The mobile read barrier remains closed until separate source freshness
+    qualification; this sweep alone is not an atomic CH/PG read guarantee.
     """
     del ctx
     async with async_session() as db:
@@ -390,24 +509,38 @@ async def run_mobile_retention_sweep(ctx: dict) -> dict:
                 text(
                     "SELECT project_id,user_id,harness,session_id FROM mobile_session_publications "
                     "WHERE status IN ('complete','partial') AND updated_at<now()-INTERVAL '1 day' "
-                    "ORDER BY updated_at,project_id,user_id,session_id LIMIT 50"
+                    "AND (last_checked_at IS NULL OR last_checked_at<now()-INTERVAL '12 hours') "
+                    "ORDER BY last_checked_at NULLS FIRST,updated_at,project_id,user_id,session_id LIMIT 500"
                 )
             )
         ).all()
     checked = 0
     revoked = 0
-    for project, user, harness, session in candidates:
-        try:
-            result = await project_pi_session({}, project, str(user), harness, session)
-        except Exception:
-            from loguru import logger as optic
+    failed = False
+    async with async_session() as db:
+        for project, user, harness, session in candidates:
+            try:
+                result = await project_pi_session({}, project, str(user), harness, session)
+                if result["status"] not in ("complete", "partial"):
+                    revoked += 1
+            except Exception:
+                from loguru import logger as optic
 
-            optic.exception("mobile retained evidence cleanup failed")
-            return {"checked": checked, "revoked": revoked, "failed": True}
-        checked += 1
-        if result["status"] not in ("complete", "partial"):
-            revoked += 1
-    return {"checked": checked, "revoked": revoked, "failed": False}
+                optic.exception("mobile retained evidence cleanup failed")
+                failed = True
+            finally:
+                checked += 1
+                await db.execute(
+                    text(
+                        "UPDATE mobile_session_publications SET last_checked_at=now() "
+                        "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
+                    ),
+                    {"project": project, "user": user, "harness": harness, "session": session},
+                )
+                if checked % 25 == 0:
+                    await db.commit()  # Preserve progress if the worker's 120s timeout interrupts a long sweep.
+        await db.commit()
+    return {"checked": checked, "revoked": revoked, "failed": failed}
 
 
 async def run_mobile_projection_queue(ctx: dict) -> dict:
@@ -420,7 +553,8 @@ async def run_mobile_projection_queue(ctx: dict) -> dict:
             await db.execute(
                 text(
                     "SELECT project_id,user_id,harness,session_id,requested_at "
-                    "FROM mobile_projection_queue ORDER BY requested_at LIMIT 50 FOR UPDATE SKIP LOCKED"
+                    "FROM mobile_projection_queue WHERE requested_at<=now() "
+                    "ORDER BY requested_at LIMIT 50 FOR UPDATE SKIP LOCKED"
                 )
             )
         ).all()
@@ -448,7 +582,8 @@ async def run_mobile_projection_queue(ctx: dict) -> dict:
                 else:
                     await db.execute(
                         text(
-                            "UPDATE mobile_projection_queue SET attempts=attempts+1 "
+                            "UPDATE mobile_projection_queue SET attempts=attempts+1,"
+                            "requested_at=now()+INTERVAL '5 minutes' "
                             "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
                         ),
                         {"project": project, "user": user, "harness": harness, "session": session},
@@ -458,7 +593,13 @@ async def run_mobile_projection_queue(ctx: dict) -> dict:
                 from loguru import logger as optic
 
                 optic.exception("mobile evidence projection failed for scoped session")
-                await db.rollback()
-                return {"attempted": attempted, "completed": completed, "failed": True}
+                await db.execute(
+                    text(
+                        "UPDATE mobile_projection_queue SET attempts=attempts+1,"
+                        "requested_at=now()+INTERVAL '1 minute' "
+                        "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
+                    ),
+                    {"project": project, "user": user, "harness": harness, "session": session},
+                )
         await db.commit()
     return {"attempted": attempted, "completed": completed, "failed": False}

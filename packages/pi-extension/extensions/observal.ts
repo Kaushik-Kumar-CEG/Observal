@@ -52,6 +52,7 @@ interface CursorEntry {
   line_count: number;
   run_incarnation?: string;
   run_header_hash?: string;
+  run_origin?: "pi_session_start_root_v1";
   source_identity?: string;
   finalized?: boolean;
   last_pushed_at?: number;
@@ -86,6 +87,8 @@ interface ObservalState {
   layerSnapshot: LayerSnapshot | null;
   runIncarnation?: string;
   runHeaderHash?: string;
+  runOrigin?: "pi_session_start_root_v1";
+  freshRootStart?: boolean;
   identityConflict?: boolean;
 }
 
@@ -122,7 +125,7 @@ export default function (pi: ExtensionAPI) {
   let state: ObservalState | null = null;
 
   pi.on("session_start", async (event, ctx) => {
-    state = initState(ctx);
+    state = initState(ctx, event.reason);
 
     if (state.config && state.layerSnapshot) {
       // Never report a v2 identity until the legacy snapshot and uploader-bound
@@ -303,7 +306,7 @@ export default function (pi: ExtensionAPI) {
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
 
-  function initState(ctx: ExtensionContext): ObservalState {
+  function initState(ctx: ExtensionContext, reason: "startup" | "reload" | "new" | "resume" | "fork"): ObservalState {
     const config = loadConfig();
     const sessionFile = ctx.sessionManager.getSessionFile() ?? null;
     const sessionId = ctx.sessionManager.getSessionId();
@@ -317,6 +320,14 @@ export default function (pi: ExtensionAPI) {
       lineCount = cursor.line_count;
     }
 
+    const header = ctx.sessionManager.getHeader?.() ?? null;
+    const started = header && Date.parse(header.timestamp);
+    const freshRootStart = Boolean(
+      (reason === "startup" || reason === "new") &&
+      header?.id === sessionId && !header.parentSession && Number.isFinite(started) &&
+      started! <= Date.now() + 10_000 && Date.now() - started! <= 30_000 &&
+      lineCount === 0 && !readCursor(sessionId).run_incarnation
+    );
     const layerSnapshot = buildPiLayerSnapshot();
     const layerHash = layerSnapshot.hash;
 
@@ -325,7 +336,8 @@ export default function (pi: ExtensionAPI) {
     if (sessionId) process.env.OBSERVAL_SESSION_ID = sessionId;
     process.env.OBSERVAL_HARNESS = "pi";
 
-    return { config, sessionFile, sessionId, cwd: ctx.cwd, byteOffset, lineCount, generation: 0, layerHash, layerSnapshot };
+    return { config, sessionFile, sessionId, cwd: ctx.cwd, byteOffset, lineCount, generation: 0,
+      layerHash, layerSnapshot, freshRootStart };
   }
 
   // ─── Capability attribution ───────────────────────────────────────────────
@@ -738,10 +750,14 @@ export default function (pi: ExtensionAPI) {
         s.identityConflict = true;
         return;
       }
+      const runOrigin = cursor.run_origin ??
+        (s.freshRootStart && !header.parentSession ? "pi_session_start_root_v1" : undefined);
       if (!cursor.run_incarnation && !writeCursor(s.sessionId, cursor.offset, cursor.line_count, false,
-            { run_incarnation: run, run_header_hash: hash, source_identity: identity, offset: 0, line_count: 0 })) return;
+            { run_incarnation: run, run_header_hash: hash, run_origin: runOrigin,
+              source_identity: identity, offset: 0, line_count: 0 })) return;
       s.runIncarnation = run;
       s.runHeaderHash = hash;
+      s.runOrigin = runOrigin;
     } catch {
       // Missing/invalid source remains legacy-only. Never invent an incarnation.
     }
@@ -975,6 +991,7 @@ export default function (pi: ExtensionAPI) {
         if (s.runIncarnation && s.runHeaderHash) {
           payload.run_incarnation = s.runIncarnation;
           payload.run_header_hash = s.runHeaderHash;
+          if (s.runOrigin) payload.run_origin = s.runOrigin;
         }
         const finalCapabilities = capabilitiesForSession(s);
         if (finalCapabilities.length > 0) payload.capabilities_used = finalCapabilities;
@@ -1027,6 +1044,7 @@ export default function (pi: ExtensionAPI) {
         if (s.runIncarnation && s.runHeaderHash) {
           payload.run_incarnation = s.runIncarnation;
           payload.run_header_hash = s.runHeaderHash;
+          if (s.runOrigin) payload.run_origin = s.runOrigin;
         }
         const chunkCapabilities = capabilitiesForSession(s);
         if (chunkCapabilities.length > 0) payload.capabilities_used = chunkCapabilities;
@@ -1211,6 +1229,7 @@ export default function (pi: ExtensionAPI) {
           byteOffset: entry.offset,
           lineCount: entry.line_count,
           generation: 0,
+          freshRootStart: false,
         };
         await pushNewLines(recoveryState, { final: true });
         if (readCursor(sessionId).finalized) recovered++;

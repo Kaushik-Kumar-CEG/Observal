@@ -62,8 +62,13 @@ fs.writeFileSync(path.join(observalDir, "lockfile.json"),
 const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
 const extension = await import(`../extensions/observal.ts?verified=${Date.now()}`);
 extension.default({ on: (event: string, handler: any) => handlers.set(event, handler), registerCommand() {} } as any);
-const context = { cwd: home, hasUI: false, sessionManager: { getSessionFile: () => sessionFile, getSessionId: () => "pi-v2" } };
-await handlers.get("session_start")!({ reason: "start" }, context);
+let activeSessionFile = sessionFile;
+let activeSessionId = "pi-v2";
+const context = { cwd: home, hasUI: false, sessionManager: {
+  getSessionFile: () => activeSessionFile, getSessionId: () => activeSessionId,
+  getHeader: () => JSON.parse(fs.readFileSync(activeSessionFile, "utf-8").split("\n")[0]),
+} };
+await handlers.get("session_start")!({ reason: "startup" }, context);
 await handlers.get("agent_end")!({}, context);
 assert.equal(manifestRequests.length, 1);
 assert.deepEqual(JSON.parse(manifestRequests[0]), { harness: "pi", components: [{ id, version: "1.2.3", alias: "alpha" }] });
@@ -74,18 +79,22 @@ assert.deepEqual(JSON.parse(snapshotRequests[0]).pinned_versions, { agents: [], 
 assert.equal(ingestPayloads[0].layer_hash, v2, "only acknowledged mapping is eligible for v2");
 assert.match(String(ingestPayloads[0].run_incarnation), /^[0-9a-f-]{36}$/);
 assert.match(String(ingestPayloads[0].run_header_hash), /^[0-9a-f]{64}$/);
+assert.equal(ingestPayloads[0].run_origin, "pi_session_start_root_v1",
+  "only a fresh Pi runtime session_start plus unparented header may claim root origin");
 accept = false;
-await handlers.get("session_start")!({ reason: "start" }, context);
+await handlers.get("session_start")!({ reason: "reload" }, context);
 fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: "next" } })}\n`);
 await handlers.get("agent_end")!({}, context);
 assert.equal(ingestPayloads.at(-1)?.layer_hash?.startsWith("v2_"), false, "bad receipt stays legacy");
 assert.equal(ingestPayloads.at(-1)?.run_incarnation, ingestPayloads[0].run_incarnation,
   "same retained source keeps a single incarnation across reconnects");
+assert.equal(ingestPayloads.at(-1)?.run_origin, "pi_session_start_root_v1",
+  "a retry retains exactly its original witness rather than minting a new claim");
 
 accept = true;
 const uploaded = manifestRequests.length;
 fs.rmSync(path.join(piHome, "mcp.json"));
-await handlers.get("session_start")!({ reason: "start" }, context);
+await handlers.get("session_start")!({ reason: "reload" }, context);
 fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: "stale pin" } })}\n`);
 await handlers.get("agent_end")!({}, context);
 assert.equal(manifestRequests.length, uploaded, "a stale lockfile without active Pi MCP must not qualify");
@@ -95,11 +104,19 @@ fs.writeFileSync(path.join(piHome, "mcp.json"), JSON.stringify({ mcpServers: { a
 fs.writeFileSync(path.join(observalDir, "lockfile.json"), JSON.stringify({ registries: {
   [origin]: { harnesses: { pi: { agents: [], standalone: [] }, "claude-code": { agents: [], standalone: [pin] } } },
 } }));
-await handlers.get("session_start")!({ reason: "start" }, context);
+await handlers.get("session_start")!({ reason: "reload" }, context);
 fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: "other harness" } })}\n`);
 await handlers.get("agent_end")!({}, context);
 assert.equal(manifestRequests.length, uploaded, "a different harness's pin must not qualify Pi");
 assert.equal(ingestPayloads.at(-1)?.layer_hash?.startsWith("v2_"), false);
+activeSessionId = "pi-resumed";
+activeSessionFile = path.join(home, "resumed.jsonl");
+fs.writeFileSync(activeSessionFile, `${JSON.stringify({ type: "session", id: activeSessionId,
+  timestamp: new Date().toISOString() })}\n`);
+await handlers.get("session_start")!({ reason: "resume" }, context);
+await handlers.get("agent_end")!({}, context);
+assert.equal(ingestPayloads.at(-1)?.run_origin, undefined,
+  "a fresh-looking unclaimed source resumed by Pi is not an interactive new-root witness");
 server.close();
 fs.rmSync(home, { recursive: true, force: true });
 console.log("verified layer sender ok");

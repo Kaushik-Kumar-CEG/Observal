@@ -23,7 +23,7 @@ from api.deps import get_db, get_mobile_user
 from models.user import User, UserRole
 from observal_shared.migration.constants import DEFAULT_PROJECT_ID
 from services.crypto import sign_token, verify_token
-from services.mobile_activity_query import trace_component_page, trace_pair_batch, trace_union
+from services.mobile_activity_query import qualified_zero_subset, trace_component_page, trace_pair_batch, trace_union
 from services.mobile_general_sessions import prompted_roots
 from services.mobile_read_control import readable
 
@@ -334,6 +334,12 @@ async def _summary(
         summary.component_trace_union = _partial(observed["roots"], observed["roots"])
         summary.mcp_calls = _partial(observed["calls"], observed["roots"])
         summary.active_days_utc = _partial(observed["days"], observed["roots"])
+    elif scope == "user" and viewer.id == subject_id:
+        zero = await qualified_zero_subset(db, subject_id, str(DEFAULT_PROJECT_ID), window.start, window.end)
+        if zero:
+            summary.component_trace_union = _partial(0, zero["eligible_sessions"])
+            summary.mcp_calls = _partial(0, zero["eligible_sessions"])
+            summary.active_days_utc = _partial(0, zero["eligible_sessions"])
     return summary
 
 
@@ -433,6 +439,8 @@ async def person_summaries(
             )
             continue
         author, user = authors.get(subject_id), users.get(subject_id)
+        if user is None and subject_id == viewer.id:
+            user = await qualified_zero_subset(db, subject_id, str(DEFAULT_PROJECT_ID), window.start, window.end)
         items.append(
             PairedPerson(
                 subject_id=subject_id,

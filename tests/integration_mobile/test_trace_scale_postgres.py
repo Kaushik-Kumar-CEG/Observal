@@ -27,7 +27,7 @@ VB = uuid.uuid5(uuid.NAMESPACE_DNS, "observal-trace-scale-version-b")
 LAYER = "v2_" + "b" * 64
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="session")
 async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_overlap():
     from database import async_session
     from services.mobile_activity_query import trace_component_page, trace_pair_batch, trace_union

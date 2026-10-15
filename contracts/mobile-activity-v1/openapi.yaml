@@ -72,6 +72,20 @@ paths:
         '200': { description: Atomically rotated mobile-audience pair, content: { application/json: { schema: { $ref: '#/components/schemas/MobileTokenPair' } } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { description: Mobile disabled or unavailable. }
+  /auth/mobile/credential:
+    get:
+      operationId: verifyMobileCredential
+      description: >-
+        Call over the selected HTTPS origin with the newly issued access token
+        after device redemption and every refresh, before persisting a credential
+        pair. The server verifies signature, exact audience/read-only scope,
+        device family, user state and Redis revocation. Never trust JWT fields
+        decoded without verification as evidence of a mobile-only grant.
+      responses:
+        '200': { description: Authenticated mobile credential proof, content: { application/json: { schema: { $ref: '#/components/schemas/MobileCredentialProof' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Restricted' }
+        '503': { description: Mobile authentication disabled or unavailable. }
   /auth/mobile/logout:
     post:
       operationId: logoutMobileDevice
@@ -280,21 +294,26 @@ components:
     DeviceChallenge:
       type: object
       additionalProperties: false
-      required: [device_code, user_code, verification_uri, verification_uri_complete, expires_in, interval]
+      required: [device_code, user_code, verification_uri, verification_uri_complete, verification_origins, expires_in, interval]
       properties:
         device_code: { type: string }
         user_code: { type: string }
         verification_uri: { type: string, format: uri }
         verification_uri_complete: { type: string, format: uri }
+        verification_origins: { type: array, minItems: 1, maxItems: 1, items: { type: string, format: uri } }
         expires_in: { type: integer, minimum: 1 }
         interval: { type: integer, minimum: 1 }
     MobileDeviceToken:
       type: object
       additionalProperties: false
-      required: [access_token, refresh_token, expires_in, user]
+      required: [access_token, refresh_token, token_type, client_id, audience, scope, expires_in, user]
       properties:
         access_token: { type: string }
         refresh_token: { type: string }
+        token_type: { type: string, const: bearer }
+        client_id: { type: string, const: observal-mobile }
+        audience: { type: string, const: observal-mobile-activity-v1 }
+        scope: { type: string, const: 'mobile:read' }
         expires_in: { type: integer, minimum: 1 }
         user:
           type: object
@@ -308,12 +327,26 @@ components:
     MobileTokenPair:
       type: object
       additionalProperties: false
-      required: [access_token, refresh_token, token_type, expires_in]
+      required: [access_token, refresh_token, token_type, client_id, audience, scope, expires_in]
       properties:
         access_token: { type: string }
         refresh_token: { type: string }
         token_type: { type: string, const: bearer }
+        client_id: { type: string, const: observal-mobile }
+        audience: { type: string, const: observal-mobile-activity-v1 }
+        scope: { type: string, const: 'mobile:read' }
         expires_in: { type: integer, minimum: 1 }
+    MobileCredentialProof:
+      type: object
+      additionalProperties: false
+      required: [token_type, client_id, audience, scope, subject_id, device_id]
+      properties:
+        token_type: { type: string, const: bearer }
+        client_id: { type: string, const: observal-mobile }
+        audience: { type: string, const: observal-mobile-activity-v1 }
+        scope: { type: string, const: 'mobile:read' }
+        subject_id: { type: string, format: uuid }
+        device_id: { type: string }
     Coverage:
       type: object
       additionalProperties: false
@@ -333,7 +366,10 @@ components:
       description: >-
         Partial is an observed lower bound spoken 'N observed traces · Partial coverage'.
         Supported zero requires complete declared cohort including zero-positive
-        sessions. Individual restricted summary/detail reads and fully denied
+        sessions. Partial zero is available only to self User for a retained,
+        tool-free, v2-mapped Pi source with a prospective root witness and a
+        currently visible historically approved component; it is not an Author,
+        general-session or all-kinds zero. Individual restricted summary/detail reads and fully denied
         batches return bodyless HTTP 403; paired mixed batches use RestrictedScope
         without a reading or cohort. No installed-only/capability-only eligibility.
     ReadingBase:

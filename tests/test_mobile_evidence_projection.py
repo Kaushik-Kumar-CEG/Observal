@@ -5,7 +5,7 @@
 import json
 import uuid
 
-from jobs.mobile_evidence import _matched, _revision
+from jobs.mobile_evidence import _matched, _revision, _zero_activities
 from services.session_parsers.pi_invocations import PiInvocationExtractor
 
 _COMPONENT = uuid.uuid4()
@@ -43,6 +43,36 @@ def _result(call_id):
         "details": {"mode": "call", "server": "alpha", "tool": "fetch"},
         "content": [],
     }
+
+
+def test_zero_cohort_requires_valid_tool_free_activity_and_v2_mapping():
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).isoformat()
+    line = {"type": "message", "timestamp": now, "message": {"role": "user", "content": "go"}}
+    row = {"raw_line": json.dumps(line), "line_offset": 1, "layer_hash": "v2_" + "a" * 64, "event_type": "user_prompt"}
+    assert _zero_activities([row]) == [(1, datetime.fromisoformat(now), row["layer_hash"])]
+    assert _zero_activities([{**row, "layer_hash": "legacy"}]) is None
+    assert _zero_activities([{**row, "raw_line": json.dumps({**line, "timestamp": None})}]) is None
+    assert (
+        _zero_activities(
+            [
+                {
+                    **row,
+                    "raw_line": json.dumps(
+                        {**line, "message": {"role": "assistant", "content": [{"type": "toolCall", "name": "mcp"}]}}
+                    ),
+                }
+            ]
+        )
+        is None
+    )
+    assert (
+        _zero_activities(
+            [{**row, "raw_line": json.dumps({**line, "message": {"role": "toolResult", "toolName": "mcp"}})}]
+        )
+        is None
+    )
 
 
 def test_forty_independently_linked_calls_one_logical_root():

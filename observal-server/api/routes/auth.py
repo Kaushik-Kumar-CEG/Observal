@@ -41,6 +41,7 @@ from schemas.auth import (
     InitResponse,
     LoginRequest,
     LogoutRequest,
+    MobileCredentialProof,
     RefreshRequest,
     RegisterRequest,
     RevokeRequest,
@@ -52,7 +53,9 @@ from schemas.auth import (
 from schemas.sso_health import make_check
 from services import sso_diagnostics
 from services.jwt_service import (
+    MOBILE_AUDIENCE,
     MOBILE_CLIENT_ID,
+    MOBILE_SCOPE,
     create_access_token,
     create_refresh_token,
     decode_access_token,
@@ -1713,7 +1716,7 @@ async def issue_token(request: Request, req: TokenRequest, db: AsyncSession = De
     )
 
 
-@router.post("/token/refresh", response_model=TokenResponse)
+@router.post("/token/refresh", response_model=TokenResponse, response_model_exclude_none=True)
 @limiter.limit(ds.get_sync("security.rate_limit_auth", "10/minute"))
 async def refresh_token(request: Request, req: RefreshRequest, db: AsyncSession = Depends(get_db)):
     """Exchange a valid refresh token for a new access token (and rotated refresh token)."""
@@ -1788,6 +1791,9 @@ async def refresh_token(request: Request, req: RefreshRequest, db: AsyncSession 
         access_token=access_token,
         refresh_token=new_refresh_token,
         expires_in=expires_in,
+        client_id=MOBILE_CLIENT_ID if device_id else None,
+        audience=MOBILE_AUDIENCE if device_id else None,
+        scope=MOBILE_SCOPE if device_id else None,
     )
 
 
@@ -1813,6 +1819,23 @@ async def revoke_token(request: Request, req: RevokeRequest):
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
     return {"detail": "Token revoked"}
+
+
+@router.get("/mobile/credential", response_model=MobileCredentialProof)
+@limiter.limit(ds.get_sync("security.rate_limit_auth", "10/minute"))
+async def mobile_credential(request: Request, current_user: User = Depends(get_mobile_user)):
+    """Prove the active access token's mobile audience/scope using server auth.
+
+    Device token and refresh responses are transported over the selected
+    HTTPS origin. The phone must use this authenticated endpoint before storing
+    a pair, never treat an unverified JWT payload as proof of scope.
+    """
+    token = request.headers["authorization"].removeprefix("Bearer ").strip()
+    payload = decode_access_token(token, allow_mobile=True)
+    device_id = payload.get("device_id")
+    if not isinstance(device_id, str) or not device_id:
+        raise HTTPException(status_code=401, detail="Invalid mobile credentials")
+    return MobileCredentialProof(subject_id=current_user.id, device_id=device_id)
 
 
 @router.post("/mobile/logout")

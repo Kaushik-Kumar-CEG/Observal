@@ -6,6 +6,7 @@
 
 """Session JSONL ingest endpoint."""
 
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -100,6 +101,8 @@ class SessionIngestRequest(BaseModel):
     # Optional upgraded Pi identity; legacy senders remain unqualified.
     run_incarnation: UUID | None = None
     run_header_hash: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
+    # Only emitted by an upgraded Pi session_start handler, never inferred from JSONL.
+    run_origin: Literal["pi_session_start_root_v1"] | None = None
     # Discovery resources the CLI's capability lock attributes to this session
     capabilities_used: list[CapabilityUsed] | None = Field(None, max_length=MAX_CAPABILITIES_PER_PUSH)
 
@@ -172,7 +175,7 @@ async def ingest_session(
     user_id = str(current_user.id)
     project_id = DEFAULT_PROJECT_ID
 
-    if req.harness == "pi" or req.run_incarnation is not None or req.run_header_hash is not None:
+    if req.harness == "pi" or req.run_incarnation is not None or req.run_header_hash is not None or req.run_origin:
         from services.mobile_run_identity import admit_pi_run
 
         await admit_pi_run(
@@ -184,6 +187,7 @@ async def ingest_session(
             lines=req.lines,
             run_incarnation=req.run_incarnation,
             run_header_hash=req.run_header_hash,
+            run_origin=req.run_origin,
         )
 
     optic.debug(

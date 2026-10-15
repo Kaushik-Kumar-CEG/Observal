@@ -135,6 +135,19 @@ class TraceDraftContract(unittest.TestCase):
         self.assertEqual([i["component_traces"]["value"] for i in page["items"]], [1, 1])
         self.assertEqual(sum(i["mcp_calls"]["value"] for i in page["items"]), 40)
 
+    def test_synthetic_mobile_grant_proof_requires_server_validation(self):
+        grant = self.vectors["synthetic_mobile_grant"]
+        for key, schema in (
+            ("device_challenge", "DeviceChallenge"),
+            ("device_token", "MobileDeviceToken"),
+            ("refresh_pair", "MobileTokenPair"),
+            ("authenticated_proof", "MobileCredentialProof"),
+        ):
+            self.check_shape(self.schemas[schema], grant[key])
+        self.assertTrue(grant["must_confirm_via_server_before_storing_pair"])
+        self.assertIn("/auth/mobile/credential", self.spec["paths"])
+        self.assertEqual(grant["device_challenge"]["verification_origins"], ["https://browser.example.invalid"])
+
     def test_acceptance_cases_cover_denial_zero_source_replay_and_origin(self):
         ids = {v["id"] for v in self.fixtures["cases"]}
         for expected in (

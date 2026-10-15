@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded, revalidated positive Pi MCP observations; never invents zeros.
+"""Bounded, revalidated Pi MCP observations and source-verified partial zeros.
 
 Reads are source-checked on EVERY request. A missing/purged/repaired source,
 unsupported cohort, or oversized request returns unavailable, not a stale
@@ -133,6 +133,48 @@ async def _verified_restrict(
         params[f"s{index}"] = session
         clauses.append(f"(e.user_id=:u{index} AND e.session_id=:s{index})")
     return predicate, params, " AND (" + " OR ".join(clauses) + ")"
+
+
+async def qualified_zero_subset(
+    db: AsyncSession, subject: uuid.UUID, project: str, start: datetime, end: datetime
+) -> dict | None:
+    """Self-only tool-free activity in a currently eligible uploader-bound Pi layer.
+
+    Not a general zero or a full-window measurement. Each candidate's complete
+    source is rechecked in ClickHouse, including the persisted revision; exceeding
+    the fixed verification budget returns unavailable.
+    """
+    params = {"project": project, "subject": subject, "start": start, "end": end}
+    candidates = (
+        await db.execute(
+            text(
+                "SELECT DISTINCT z.user_id,z.session_id,pub.source_revision,pub.first_source_offset "
+                "FROM mobile_eligible_event_times z JOIN mobile_session_publications pub "
+                "ON pub.project_id=z.project_id AND pub.user_id=z.user_id "
+                "AND pub.harness=z.harness AND pub.session_id=z.session_id "
+                "JOIN mobile_run_instances run ON run.project_id=z.project_id AND run.user_id=z.user_id "
+                "AND run.harness=z.harness AND run.session_id=z.session_id "
+                "WHERE z.project_id=:project AND z.user_id=:subject AND z.harness='pi' "
+                "AND z.event_time>=:start AND z.event_time<:end AND pub.status='complete' "
+                "AND pub.source_revision=z.source_revision AND run.root_verified=true "
+                "AND run.run_incarnation=z.root_run_incarnation "
+                "AND EXISTS (SELECT 1 FROM mobile_layer_components map "
+                "JOIN mcp_listings l ON l.id=map.component_id AND l.is_private=false "
+                "JOIN mcp_versions v ON v.id=map.version_id AND v.listing_id=l.id "
+                "AND v.status IN ('approved','archived') "
+                "WHERE map.project_id=z.project_id AND map.user_id=z.user_id "
+                "AND map.harness=z.harness AND map.layer_hash=z.layer_hash "
+                "AND (SELECT pe.status FROM mobile_publication_events pe WHERE pe.kind='mcp' "
+                "AND pe.listing_id=l.id AND pe.version_id=v.id AND pe.recorded_at<=z.event_time "
+                "ORDER BY pe.recorded_at DESC,pe.id DESC LIMIT 1)='approved') "
+                "ORDER BY z.user_id,z.session_id,pub.source_revision,pub.first_source_offset LIMIT 21"
+            ),
+            params,
+        )
+    ).all()
+    if not candidates or len(candidates) > MAX_SESSIONS or not await _source_verified(candidates, project):
+        return None
+    return {"roots": 0, "calls": 0, "days": 0, "eligible_sessions": len(candidates)}
 
 
 async def qualified_observations(

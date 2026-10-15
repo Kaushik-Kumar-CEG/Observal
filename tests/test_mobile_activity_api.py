@@ -50,6 +50,7 @@ def app(monkeypatch):
     )
     monkeypatch.setattr(activity, "_scope_revision", AsyncMock(return_value="revision"))
     monkeypatch.setattr(activity, "trace_union", AsyncMock(return_value=None))
+    monkeypatch.setattr(activity, "qualified_zero_subset", AsyncMock(return_value=None))
     monkeypatch.setattr(activity, "trace_pair_batch", AsyncMock(return_value=({}, {})))
     monkeypatch.setattr(activity, "trace_component_page", AsyncMock(return_value=None))
     monkeypatch.setattr(activity, "prompted_roots", AsyncMock(return_value=None))
@@ -108,6 +109,25 @@ async def test_self_readings_are_never_unqualified_zeros(app):
                 "projection": "unavailable",
             },
         }
+
+
+@pytest.mark.asyncio
+async def test_only_self_verified_zero_subset_is_partial_and_other_kinds_remain_unavailable(app, monkeypatch):
+    from api.routes import mobile_activity as activity
+
+    api, viewer, other, db, enabled = app
+    zero = AsyncMock(return_value={"calls": 0, "roots": 0, "days": 0, "eligible_sessions": 1})
+    monkeypatch.setattr(activity, "qualified_zero_subset", zero)
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
+        own = await c.get(f"/api/v1/mobile-activity/v1/people/{viewer.id}/summary?scope=user&period=1w")
+        forbidden = await c.get(f"/api/v1/mobile-activity/v1/people/{other.id}/summary?scope=user&period=1w")
+    assert own.status_code == 200
+    assert own.json()["mcp_calls"]["value"] == 0
+    assert own.json()["mcp_calls"]["status"] == "partial"
+    assert own.json()["confirmed_skill_loads"]["value"] is None
+    assert own.json()["general_sessions"]["value"] is None
+    assert forbidden.status_code == 403 and forbidden.content == b""
+    assert zero.await_count == 1
 
 
 @pytest.mark.asyncio

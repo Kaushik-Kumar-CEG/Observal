@@ -89,19 +89,45 @@ async def test_fresh_run_claim_is_bound_to_original_source_and_uploader(monkeypa
 
 @pytest.mark.asyncio
 async def test_reused_nonce_different_header_legacy_replay_and_other_harness_fail_closed(monkeypatch):
-    db = Db(SimpleNamespace(run_incarnation=RUN, header_hash=HASH))
+    db = Db(SimpleNamespace(run_incarnation=RUN, header_hash=HASH, origin_witness=None))
     monkeypatch.setattr(admission, "async_session", lambda: Session(db))
     await claim(db, start_offset=8, lines=[])
     for changes in (
         {"run_incarnation": uuid.uuid4()},
         {"run_header_hash": "f" * 64},
+        {"lines": [HEADER.replace("2026-10-01", "2026-10-02")]},  # Fake same run hash; altered source.
         {"run_incarnation": None, "run_header_hash": None},
+        {"run_origin": "pi_session_start_root_v1"},  # No retroactive promotion.
         {"harness": "codex"},
     ):
         with pytest.raises(HTTPException) as exc:
             await claim(db, **changes)
         assert exc.value.status_code == 409
     assert db.inserts == 0
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_root_witness_only_on_unparented_source_and_immutable_retry(monkeypatch):
+    db = Db()
+    monkeypatch.setattr(admission, "async_session", lambda: Session(db))
+    monkeypatch.setattr("services.clickhouse.client._query", AsyncMock(return_value=Reply(False)))
+    await claim(db, run_origin="pi_session_start_root_v1")
+    assert db.inserts == 1
+    parented = json.dumps(
+        {"type": "session", "id": SESSION, "timestamp": "2026-10-01T12:00:00Z", "parentSession": "/tmp/parent.jsonl"}
+    )
+    with pytest.raises(HTTPException) as exc:
+        await claim(
+            db,
+            lines=[parented],
+            run_header_hash=hashlib.sha256(parented.encode()).hexdigest(),
+            run_origin="pi_session_start_root_v1",
+        )
+    assert exc.value.status_code == 409
+    db.existing = SimpleNamespace(run_incarnation=RUN, header_hash=HASH, origin_witness="pi_session_start_root_v1")
+    await claim(db, start_offset=2, lines=[], run_origin="pi_session_start_root_v1")
+    with pytest.raises(HTTPException):
+        await claim(db, start_offset=2, lines=[], run_origin=None)
 
 
 @pytest.mark.asyncio

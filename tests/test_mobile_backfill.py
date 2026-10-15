@@ -62,6 +62,8 @@ async def test_scan_persists_last_key_and_queues_only_first_fifty_live_mapped_se
     mock_query = AsyncMock(return_value=Reply([candidate(n) for n in range(51)]))
     monkeypatch.setattr(mobile, "async_session", lambda: Context(db))
     monkeypatch.setattr(mobile, "_query", mock_query)
+    monkeypatch.setattr(mobile.ds, "get_bool", AsyncMock(return_value=True))
+    monkeypatch.setattr(mobile.ds, "get_int", AsyncMock(return_value=365))
     result = await mobile.scan_retained_mobile_sources({})
     assert result == {"status": "scanned", "candidates": 51, "queued": 50}
     queue = [args for sql, args in db.queries if "INSERT INTO mobile_projection_queue" in sql]
@@ -70,12 +72,15 @@ async def test_scan_persists_last_key_and_queues_only_first_fifty_live_mapped_se
     assert cursor == [{"project": "default", "user": USER, "session": "session-049"}]
     assert db.committed == 1
     assert "LIMIT 51" in mock_query.await_args.args[0]
+    assert "timestamp>=now()-INTERVAL {days:UInt32} DAY" in mock_query.await_args.args[0]
+    assert mock_query.await_args.args[1]["param_days"] == 365
 
 
 @pytest.mark.asyncio
 async def test_scan_rewinds_only_after_end_and_ignores_deleted_or_unverified_users(monkeypatch):
     db = Db(eligible=False)
     monkeypatch.setattr(mobile, "async_session", lambda: Context(db))
+    monkeypatch.setattr(mobile.ds, "get_bool", AsyncMock(return_value=False))
     monkeypatch.setattr(
         mobile,
         "_query",
@@ -91,23 +96,84 @@ async def test_scan_rewinds_only_after_end_and_ignores_deleted_or_unverified_use
     assert [args for sql, args in db.queries if "UPDATE mobile_backfill_cursor" in sql] == [
         {"project": "", "user": "", "session": ""}
     ]
+    assert "timestamp>=now()-INTERVAL" not in mobile._query.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_poison_queue_reschedules_pending_and_processes_qualified_after_it(monkeypatch):
+    class QueueDb(Db):
+        def __init__(self):
+            super().__init__()
+            self.scans = 0
+
+        async def execute(self, sql, params=None):
+            self.queries.append((str(sql), params))
+            if "FOR UPDATE SKIP LOCKED" in str(sql):
+                self.scans += 1
+                rows = (
+                    [("default", uuid.UUID(USER), "pi", f"pending-{n}", n) for n in range(50)]
+                    if self.scans == 1
+                    else [("default", uuid.UUID(USER), "pi", "qualified", 51)]
+                )
+                return SimpleNamespace(all=lambda: rows)
+            return SimpleNamespace()
+
+    db = QueueDb()
+    monkeypatch.setattr(mobile, "async_session", lambda: Context(db))
+    replay = AsyncMock(side_effect=[{"status": "pending_mapping"}] * 50 + [{"status": "complete"}])
+    monkeypatch.setattr(mobile, "project_pi_session", replay)
+    first = await mobile.run_mobile_projection_queue({})
+    second = await mobile.run_mobile_projection_queue({})
+    assert first == {"attempted": 50, "completed": 0, "failed": False}
+    assert second == {"attempted": 1, "completed": 1, "failed": False}
+    assert "requested_at<=now()" in db.queries[0][0]
+    retries = [sql for sql, _ in db.queries if "attempts=attempts+1" in sql]
+    assert len(retries) == 50 and all("INTERVAL '5 minutes'" in sql for sql in retries)
+    assert db.committed == 2
 
 
 @pytest.mark.asyncio
 async def test_retention_sweep_revokes_purged_source_and_limits_rechecks(monkeypatch):
-    class ReaperDb:
-        async def execute(self, sql):
-            assert "updated_at<now()-INTERVAL '1 day'" in str(sql)
-            assert "LIMIT 50" in str(sql)
-            return SimpleNamespace(
-                all=lambda: [
-                    ("default", uuid.UUID(USER), "pi", "purged"),
-                    ("default", uuid.UUID(USER), "pi", "retained"),
-                ]
-            )
+    class ReaperDb(Db):
+        async def execute(self, sql, params=None):
+            self.queries.append((str(sql), params))
+            if "LIMIT 500" in str(sql):
+                assert "last_checked_at" in str(sql)
+                return SimpleNamespace(
+                    all=lambda: [
+                        ("default", uuid.UUID(USER), "pi", "purged"),
+                        ("default", uuid.UUID(USER), "pi", "retained"),
+                    ]
+                )
+            return SimpleNamespace()
 
+    db = ReaperDb()
     replay = AsyncMock(side_effect=[{"status": "pending_source"}, {"status": "complete"}])
-    monkeypatch.setattr(mobile, "async_session", lambda: Context(ReaperDb()))
+    monkeypatch.setattr(mobile, "async_session", lambda: Context(db))
     monkeypatch.setattr(mobile, "project_pi_session", replay)
     assert await mobile.run_mobile_retention_sweep({}) == {"checked": 2, "revoked": 1, "failed": False}
     assert [call.args[-1] for call in replay.await_args_list] == ["purged", "retained"]
+    assert len([sql for sql, _ in db.queries if "SET last_checked_at=now()" in sql]) == 2
+    assert db.committed == 1
+
+
+@pytest.mark.asyncio
+async def test_retention_sweep_does_not_starve_after_first_poison_source(monkeypatch):
+    class ReaperDb(Db):
+        async def execute(self, sql, params=None):
+            self.queries.append((str(sql), params))
+            if "LIMIT 500" in str(sql):
+                return SimpleNamespace(
+                    all=lambda: [
+                        ("default", uuid.UUID(USER), "pi", "poison"),
+                        ("default", uuid.UUID(USER), "pi", "after-poison"),
+                    ]
+                )
+            return SimpleNamespace()
+
+    db = ReaperDb()
+    replay = AsyncMock(side_effect=[RuntimeError("unavailable"), {"status": "complete"}])
+    monkeypatch.setattr(mobile, "async_session", lambda: Context(db))
+    monkeypatch.setattr(mobile, "project_pi_session", replay)
+    assert await mobile.run_mobile_retention_sweep({}) == {"checked": 2, "revoked": 0, "failed": True}
+    assert replay.await_count == 2 and db.committed == 1
