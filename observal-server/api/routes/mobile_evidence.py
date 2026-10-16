@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_current_user, get_db
 from api.ratelimit import limiter
+from models.hook import HookListing, HookVersion
 from models.mcp import ListingStatus, McpListing, McpVersion
 from models.skill import SkillListing, SkillVersion
 from models.user import User
@@ -37,10 +38,19 @@ class SkillPin(BaseModel):
     content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class HookPin(BaseModel):
+    id: uuid.UUID
+    version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9.+_-]{0,49}$")
+    alias: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    scope: Literal["user"]
+    binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class LayerRequest(BaseModel):
     harness: Literal["pi"]
     components: list[ComponentPin] = Field(default_factory=list, max_length=100)
     skills: list[SkillPin] = Field(default_factory=list, max_length=100)
+    hooks: list[HookPin] = Field(default_factory=list, max_length=100)
 
 
 class LayerReceipt(BaseModel):
@@ -48,11 +58,17 @@ class LayerReceipt(BaseModel):
     mapped_components: int
 
 
-def canonical_layer_hash(components: list[ComponentPin], skills: list[SkillPin] | None = None) -> str:
-    if skills:
+def canonical_layer_hash(
+    components: list[ComponentPin], skills: list[SkillPin] | None = None, hooks: list[HookPin] | None = None
+) -> str:
+    if skills or hooks:
         canonical = sorted(
             [["mcp", str(c.id), c.version, c.alias] for c in components]
-            + [["skill", str(s.id), s.version, s.scope, s.alias, s.location_sha256, s.content_sha256] for s in skills]
+            + [
+                ["skill", str(s.id), s.version, s.scope, s.alias, s.location_sha256, s.content_sha256]
+                for s in (skills or [])
+            ]
+            + [["hook", str(h.id), h.version, h.scope, h.alias, h.binding_sha256] for h in (hooks or [])]
         )
         return "v3_" + hashlib.sha256(json.dumps(canonical, separators=(",", ":")).encode()).hexdigest()
     canonical = sorted([(str(c.id), c.version, c.alias) for c in components])
@@ -68,12 +84,20 @@ async def upload_layer(
     viewer: User = Depends(get_current_user),
 ):
     del request
-    if (not layer.components and not layer.skills) or len(layer.components) + len(layer.skills) > 100:
+    if (not layer.components and not layer.skills and not layer.hooks) or (
+        len(layer.components) + len(layer.skills) + len(layer.hooks) > 100
+    ):
         raise HTTPException(status_code=422, detail="Unsupported component identity")
     if len({pin.alias for pin in layer.skills}) != len(layer.skills):
         raise HTTPException(status_code=422, detail="Duplicate skill alias")
     if len({pin.id for pin in layer.skills}) != len(layer.skills):
         raise HTTPException(status_code=422, detail="Duplicate skill ID")
+    if (
+        len({pin.id for pin in layer.hooks}) != len(layer.hooks)
+        or len({pin.binding_sha256 for pin in layer.hooks}) != len(layer.hooks)
+        or len({pin.alias for pin in layer.hooks}) != len(layer.hooks)
+    ):
+        raise HTTPException(status_code=422, detail="Ambiguous hook identity")
     if len({pin.alias for pin in layer.components}) != len(layer.components):
         raise HTTPException(status_code=422, detail="Duplicate component alias")
     if len({pin.id for pin in layer.components}) != len(layer.components):
@@ -123,12 +147,58 @@ async def upload_layer(
             resolved_skills[listing_id] = version_id
     if len(resolved_skills) != len(skill_pins):
         raise HTTPException(status_code=422, detail="Unsupported component identity")
-    digest = canonical_layer_hash(layer.components, layer.skills)
+    hook_pins = {pin.id: pin for pin in layer.hooks}
+    hook_versions = (
+        (
+            await db.execute(
+                select(
+                    HookListing.id,
+                    HookVersion.id,
+                    HookVersion.version,
+                    HookVersion.event,
+                    HookVersion.handler_type,
+                    HookVersion.handler_config,
+                    HookVersion.tool_filter,
+                    HookVersion.script_content,
+                    HookVersion.script_filename,
+                )
+                .join(HookVersion, HookVersion.listing_id == HookListing.id)
+                .where(
+                    HookListing.id.in_(hook_pins),
+                    HookVersion.status == ListingStatus.approved,
+                    HookListing.is_private.is_(False),
+                )
+            )
+        ).all()
+        if hook_pins
+        else []
+    )
+    event_map = {"PreToolUse": "tool_call", "PostToolUse": "tool_result"}
+    resolved_hooks: dict[uuid.UUID, tuple[uuid.UUID, str]] = {}
+    for listing_id, version_id, version, event, handler, config, tool_filter, script, filename in hook_versions:
+        command = config.get("command") if isinstance(config, dict) else None
+        mapped_event = event_map.get(event)
+        pin = hook_pins[listing_id]
+        if (
+            version == pin.version
+            and handler == "command"
+            and mapped_event
+            and isinstance(command, str)
+            and command.strip()
+            and tool_filter is None
+            and not script
+            and not filename
+            and hashlib.sha256(f"{mapped_event}\0{command}".encode()).hexdigest() == pin.binding_sha256
+        ):
+            resolved_hooks[listing_id] = (version_id, mapped_event)
+    if len(resolved_hooks) != len(hook_pins):
+        raise HTTPException(status_code=422, detail="Unsupported component identity")
+    digest = canonical_layer_hash(layer.components, layer.skills, layer.hooks)
     params = {"project": str(DEFAULT_PROJECT_ID), "user": viewer.id, "harness": layer.harness, "hash": digest}
     existing = (
         await db.execute(
             text(
-                "SELECT expected_components,expected_skills FROM mobile_verified_layers "
+                "SELECT expected_components,expected_skills,expected_hooks FROM mobile_verified_layers "
                 "WHERE project_id=:project AND user_id=:user AND harness=:harness AND layer_hash=:hash"
             ),
             params,
@@ -149,20 +219,29 @@ async def upload_layer(
             ),
             params,
         )
+        hook_count = await db.scalar(
+            text(
+                "SELECT count(*) FROM mobile_hook_layer_components WHERE project_id=:project AND user_id=:user "
+                "AND harness=:harness AND layer_hash=:hash"
+            ),
+            params,
+        )
         if (
-            existing[0] != len(pins)
+            existing[2] != len(hook_pins)
+            or hook_count != existing[2]
+            or existing[0] != len(pins)
             or count != existing[0]
             or existing[1] != len(skill_pins)
             or skill_count != existing[1]
         ):
             raise HTTPException(status_code=409, detail="Layer mapping invalidated")
-        return LayerReceipt(hash=digest, mapped_components=count + skill_count)
+        return LayerReceipt(hash=digest, mapped_components=count + skill_count + hook_count)
     await db.execute(
         text(
-            "INSERT INTO mobile_verified_layers(project_id,user_id,harness,layer_hash,expected_components,expected_skills) "
-            "VALUES (:project,:user,:harness,:hash,:count,:skills) ON CONFLICT DO NOTHING"
+            "INSERT INTO mobile_verified_layers(project_id,user_id,harness,layer_hash,expected_components,expected_skills,expected_hooks) "
+            "VALUES (:project,:user,:harness,:hash,:count,:skills,:hooks) ON CONFLICT DO NOTHING"
         ),
-        {**params, "count": len(pins), "skills": len(skill_pins)},
+        {**params, "count": len(pins), "skills": len(skill_pins), "hooks": len(hook_pins)},
     )
     for pin in layer.components:
         await db.execute(
@@ -190,5 +269,21 @@ async def upload_layer(
                 "content": pin.content_sha256,
             },
         )
+    for pin in layer.hooks:
+        await db.execute(
+            text(
+                "INSERT INTO mobile_hook_layer_components(project_id,user_id,harness,layer_hash,binding_sha256,"
+                "event,alias,component_id,version_id) VALUES (:project,:user,:harness,:hash,:binding,:event,:alias,:component,:version) "
+                "ON CONFLICT DO NOTHING"
+            ),
+            {
+                **params,
+                "binding": pin.binding_sha256,
+                "event": resolved_hooks[pin.id][1],
+                "alias": pin.alias,
+                "component": pin.id,
+                "version": resolved_hooks[pin.id][0],
+            },
+        )
     await db.commit()
-    return LayerReceipt(hash=digest, mapped_components=len(pins) + len(skill_pins))
+    return LayerReceipt(hash=digest, mapped_components=len(pins) + len(skill_pins) + len(hook_pins))

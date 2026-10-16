@@ -134,7 +134,7 @@ class PairedBatch(BaseModel):
 
 
 class ComponentObservation(BaseModel):
-    kind: Literal["mcp", "skill"] = "mcp"
+    kind: Literal["mcp", "skill", "hook"] = "mcp"
     component_id: UUID
     name: str
     author: PublicPerson
@@ -296,12 +296,14 @@ def _observed_kinds(observed: dict) -> list[str]:
     kinds = ["mcp_calls"] if observed.get("calls", 0) or observed.get("eligible_sessions") else []
     if observed.get("skill_loads", 0):
         kinds.append("confirmed_skill_loads")
+    if observed.get("hook_runs", 0):
+        kinds.append("recorded_hook_runs")
     return kinds
 
 
 def _component(observed: dict) -> ComponentObservation:
     kind = observed.get("kind", "mcp")
-    supported = ["confirmed_skill_loads"] if kind == "skill" else ["mcp_calls"]
+    supported = {"mcp": ["mcp_calls"], "skill": ["confirmed_skill_loads"], "hook": ["recorded_hook_runs"]}[kind]
     return ComponentObservation(
         kind=kind,
         component_id=observed["id"],
@@ -312,6 +314,7 @@ def _component(observed: dict) -> ComponentObservation:
         component_traces=_partial(observed["roots"], kinds=supported),
         mcp_calls=_partial(observed["calls"]) if kind == "mcp" else Reading(),
         confirmed_skill_loads=_partial(observed["skill_loads"], kinds=supported) if kind == "skill" else Reading(),
+        recorded_hook_runs=_partial(observed["hook_runs"], kinds=supported) if kind == "hook" else Reading(),
     )
 
 
@@ -350,14 +353,14 @@ async def _summary(
         db, subject_id, scope, str(DEFAULT_PROJECT_ID), window.start, window.end, viewer_self=viewer.id == subject_id
     )
     if observed:
-        kinds = (["mcp_calls"] if observed["calls"] else []) + (
-            ["confirmed_skill_loads"] if observed.get("skill_loads", 0) else []
-        )
+        kinds = _observed_kinds(observed)
         summary.component_trace_union = _partial(observed["roots"], kinds=kinds)
         if observed["calls"]:
             summary.mcp_calls = _partial(observed["calls"])
         if observed.get("skill_loads", 0):
             summary.confirmed_skill_loads = _partial(observed["skill_loads"], kinds=["confirmed_skill_loads"])
+        if observed.get("hook_runs", 0):
+            summary.recorded_hook_runs = _partial(observed["hook_runs"], kinds=["recorded_hook_runs"])
         summary.active_days_utc = _partial(observed["days"], kinds=kinds)
     elif scope == "user" and viewer.id == subject_id:
         zero = await qualified_zero_subset(db, subject_id, str(DEFAULT_PROJECT_ID), window.start, window.end)
@@ -653,7 +656,7 @@ async def components(
         claims = _read_cursor(cursor, binding)
         try:
             kind = claims["last_kind"]
-            if kind not in ("mcp", "skill"):
+            if kind not in ("mcp", "skill", "hook"):
                 raise ValueError("invalid component kind")
             after = (int(claims["last_roots"]), kind, UUID(claims["last_id"]))
         except (ValueError, TypeError, KeyError) as exc:
@@ -710,7 +713,7 @@ async def component_detail(
 ):
     if not await _authorize(viewer, subject_id, scope, db):
         return Response(status_code=403)
-    if kind == "hook" or not await readable(db, str(DEFAULT_PROJECT_ID)):
+    if not await readable(db, str(DEFAULT_PROJECT_ID)):
         raise HTTPException(404, "Not found")
     window, anchor = _paired_window(viewer, period, window_anchor)
     revision = await _scope_revision(db, viewer, subject_id, scope, anchor)

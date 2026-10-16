@@ -250,19 +250,21 @@ async def qualified_components(
 _TRACE_TABLES = {
     "mcp": ("mobile_evidence_events", "mobile_layer_components", "mcp_listings", "mcp_versions"),
     "skill": ("mobile_skill_evidence_events", "mobile_skill_layer_components", "skill_listings", "skill_versions"),
+    "hook": ("mobile_hook_evidence_events", "mobile_hook_layer_components", "hook_listings", "hook_versions"),
 }
 
 
-def _trace_from(kind: Literal["mcp", "skill"]) -> str:
+def _trace_from(kind: Literal["mcp", "skill", "hook"]) -> str:
     event, pins, listing, version = _TRACE_TABLES[kind]
-    revision_join = "AND pub.source_revision=e.source_revision" if kind == "skill" else ""
+    revision_join = "AND pub.source_revision=e.source_revision" if kind in ("skill", "hook") else ""
+    pin_identity = "map.binding_sha256=e.binding_sha256" if kind == "hook" else "map.alias=e.alias"
     return f"""
 FROM {event} e
 JOIN mobile_run_instances run ON run.project_id=e.project_id AND run.user_id=e.user_id
  AND run.harness=e.harness AND run.run_incarnation=e.root_run_incarnation
  AND run.root_verified=true AND run.source_status IN ('complete','partial')
 JOIN {pins} map ON map.project_id=e.project_id AND map.user_id=e.user_id
- AND map.harness=e.harness AND map.layer_hash=e.layer_hash AND map.alias=e.alias AND map.component_id=e.component_id
+ AND map.harness=e.harness AND map.layer_hash=e.layer_hash AND {pin_identity} AND map.component_id=e.component_id
 JOIN mobile_session_publications pub ON pub.project_id=e.project_id AND pub.user_id=e.user_id
  AND pub.harness=e.harness AND pub.session_id=e.session_id AND pub.status IN ('complete','partial')
  {revision_join}
@@ -331,6 +333,7 @@ async def trace_union(
         "SELECT count(DISTINCT (typed.user_id,typed.root_run_incarnation)) AS roots, "
         "count(*) FILTER (WHERE typed.kind='mcp') AS calls, "
         "count(*) FILTER (WHERE typed.kind='skill') AS skill_loads, "
+        "count(*) FILTER (WHERE typed.kind='hook') AS hook_runs, "
         "count(DISTINCT (typed.event_time AT TIME ZONE 'UTC')::date) AS days FROM ("
         + _trace_branches("e.user_id,e.root_run_incarnation,e.event_time", scope, viewer_self)
         + ") typed"
@@ -340,7 +343,13 @@ async def trace_union(
     await db.execute(text("SET LOCAL enable_nestloop=off"))
     row = (await db.execute(text(sql), {"project": project, "subject": subject, "start": start, "end": end})).one()
     return (
-        {"roots": row.roots, "calls": row.calls, "skill_loads": row.skill_loads, "days": row.days}
+        {
+            "roots": row.roots,
+            "calls": row.calls,
+            "skill_loads": row.skill_loads,
+            "hook_runs": row.hook_runs,
+            "days": row.days,
+        }
         if row.roots
         else None
     )
@@ -379,6 +388,7 @@ async def trace_pair_batch(
         "SELECT 'author' AS scope_name,original_author_id AS subject,"
         "count(DISTINCT (user_id,root_run_incarnation)) AS roots,"
         "count(*) FILTER (WHERE kind='mcp') AS calls,count(*) FILTER (WHERE kind='skill') AS skill_loads,"
+        "count(*) FILTER (WHERE kind='hook') AS hook_runs,"
         "count(DISTINCT (event_time AT TIME ZONE 'UTC')::date) AS days "
         "FROM eligible WHERE :include_author AND original_author_id=ANY(CAST(:subjects AS uuid[])) "
         "AND is_private=false AND version_status IN ('approved','archived') "
@@ -386,6 +396,7 @@ async def trace_pair_batch(
         "UNION ALL SELECT 'user' AS scope_name,user_id AS subject,"
         "count(DISTINCT (user_id,root_run_incarnation)) AS roots,"
         "count(*) FILTER (WHERE kind='mcp') AS calls,count(*) FILTER (WHERE kind='skill') AS skill_loads,"
+        "count(*) FILTER (WHERE kind='hook') AS hook_runs,"
         "count(DISTINCT (event_time AT TIME ZONE 'UTC')::date) AS days "
         "FROM eligible WHERE user_id=ANY(CAST(:subjects AS uuid[])) "
         "AND ((is_private=false AND version_status IN ('approved','archived') "
@@ -406,6 +417,7 @@ async def trace_pair_batch(
                 "roots": row.roots,
                 "calls": row.calls,
                 "skill_loads": row.skill_loads,
+                "hook_runs": row.hook_runs,
                 "days": row.days,
             }
     return authors, users
@@ -422,7 +434,7 @@ async def trace_component_page(
     viewer_self: bool = False,
     after: tuple[int, str, uuid.UUID] | None = None,
     component: uuid.UUID | None = None,
-    kind: Literal["mcp", "skill"] | None = None,
+    kind: Literal["mcp", "skill", "hook"] | None = None,
     limit: int = 20,
 ) -> list[dict] | None:
     """Indexed PG fact aggregation with stable reach/id keyset, 21-row probe."""
@@ -457,7 +469,8 @@ async def trace_component_page(
         "typed.author_username,typed.author_name,"
         "count(DISTINCT (typed.user_id,typed.root_run_incarnation)) AS roots,"
         "count(*) FILTER (WHERE typed.kind='mcp') AS calls,"
-        "count(*) FILTER (WHERE typed.kind='skill') AS skill_loads "
+        "count(*) FILTER (WHERE typed.kind='skill') AS skill_loads,"
+        "count(*) FILTER (WHERE typed.kind='hook') AS hook_runs "
         "FROM (" + branches + ") typed "
         "GROUP BY typed.kind,typed.id,typed.name,typed.original_author_id,typed.author_username,typed.author_name"
         + after_sql
