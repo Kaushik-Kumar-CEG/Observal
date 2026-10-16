@@ -223,6 +223,25 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
 
             print("plan_total_ms", round(plan["Execution Time"], 1), flush=True)
             walk(plan["Plan"])
+        # Report the expensive first-read and repeated same-viewport queries
+        # separately: an all-subject average hides 10K-root author latency.
+        representative = sample[:12]
+        cold_tick = time.perf_counter()
+        first_author, first_user = await trace_pair_batch(db, representative, AUTHOR, "default", start, end)
+        cold_ms = (time.perf_counter() - cold_tick) * 1000
+        assert first_author[AUTHOR]["roots"] == 10000 and first_user[OTHER]["roots"] == 6000
+        warm = []
+        for _ in range(12):
+            tick = time.perf_counter()
+            await trace_pair_batch(db, representative, AUTHOR, "default", start, end)
+            warm.append((time.perf_counter() - tick) * 1000)
+        print(
+            "isolated_pg_representative_cold_ms=",
+            round(cold_ms, 1),
+            "warm_p95_ms=",
+            round(sorted(warm)[int((len(warm) - 1) * 0.95)], 1),
+            flush=True,
+        )
         durations = []
         for _ in range(3):
             for index in range(0, len(sample), 12):
@@ -257,6 +276,16 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
             {"id": AUTHOR},
         )
         assert bumped == (privacy_epoch or 0) + 1, (privacy_epoch, bumped)
+        filtered = []
+        for _ in range(12):
+            tick = time.perf_counter()
+            await trace_pair_batch(db, representative, AUTHOR, "default", start, end)
+            filtered.append((time.perf_counter() - tick) * 1000)
+        print(
+            "isolated_pg_private_representative_p95_ms=",
+            round(sorted(filtered)[int((len(filtered) - 1) * 0.95)], 1),
+            flush=True,
+        )
         authors, users = await trace_pair_batch(db, [AUTHOR, OTHER], AUTHOR, "default", start, end)
         assert authors[AUTHOR]["roots"] == 2000 and OTHER not in authors, authors
         assert users[AUTHOR]["roots"] == 4000 and users[OTHER]["roots"] == 1200, users

@@ -305,6 +305,17 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                     proof = await client.get("/api/v1/auth/mobile/credential", headers=bearer)
                     assert proof.status_code == 200
                     assert pair["audience"] == "observal-mobile-activity-v1" and pair["scope"] == "mobile:read"
+                    assert (await client.get("/api/v1/auth/whoami", headers=bearer)).status_code in (401, 403)
+                    assert (await client.get("/api/v1/layer-snapshots/" + "a" * 16, headers=bearer)).status_code in (
+                        401,
+                        403,
+                    )
+                    # Public GraphQL health is intentionally available to anonymous clients;
+                    # a mobile bearer must not acquire a private query context.
+                    graphql = await client.post("/api/v1/graphql", headers=bearer, json={"query": "{ health }"})
+                    anonymous = await client.post("/api/v1/graphql", json={"query": "{ health }"})
+                    assert graphql.status_code == anonymous.status_code == 200
+                    assert graphql.json() == anonymous.json() == {"data": {"health": "ok"}}
                     return pair, bearer
 
                 author_mobile, admin = await mobile_pair(author.email, author_password)
@@ -355,6 +366,17 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                 assert own.status_code == 200
                 assert own.json()["items"][0]["user_usage"]["value"] == 1
                 assert own.json()["items"][1]["author_usage"] == {"status": "restricted"}
+                own_card = own.json()["items"][0]
+                own_page = await client.get(
+                    f"/api/v1/mobile-activity/v1/people/{actor.id}/user/components",
+                    headers=member,
+                    params={
+                        "period": "1w",
+                        "window_anchor": own.json()["window_anchor"],
+                        "expected_revision": own_card["user_revision"],
+                    },
+                )
+                assert own_page.status_code == 200 and len(own_page.json()["items"]) == 3
                 stale_params = {
                     "period": "1w",
                     "window_anchor": paired.json()["window_anchor"],
@@ -375,6 +397,14 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                     json={"subject_ids": [str(author.id)], "period": "1w"},
                 )
                 assert fresh.status_code == 200 and fresh.json()["items"][0]["author_usage"]["value"] == 1
+                hidden = await client.get(
+                    f"/api/v1/mobile-activity/v1/people/{author.id}/summary",
+                    headers=admin,
+                    params={"scope": "author", "period": "1w"},
+                )
+                assert hidden.status_code == 200
+                assert hidden.json()["recorded_hook_runs"]["value"] is None
+                assert hidden.json()["recorded_hook_runs"]["status"] == "not_recorded"
                 async with async_session() as db:
                     await db.execute(text("UPDATE hook_listings SET is_private=false WHERE id=:id"), {"id": hook_id})
                     await db.commit()
