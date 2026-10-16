@@ -28,7 +28,7 @@ from observal_shared.migration.constants import DEFAULT_PROJECT_ID
 from services.crypto import get_key_manager, sign_token, verify_token
 from services.mobile_activity_query import qualified_zero_subset, trace_component_page, trace_pair_batch, trace_union
 from services.mobile_general_sessions import prompted_roots
-from services.mobile_read_control import readable
+from services.mobile_read_control import active_mobile_cohort, readable
 
 router = APIRouter(prefix="/api/v1/mobile-activity/v1", tags=["mobile-activity"])
 Period = Literal["1w", "1m", "3m"]
@@ -88,7 +88,7 @@ class Capabilities(BaseModel):
     viewer_id: UUID
     supported_kinds: list[str] = Field(default_factory=list)
     platform_overview: bool
-    trace_headlines: Literal[False] = False
+    trace_headlines: bool = False
     synthetic_test_cohort: bool = False
 
 
@@ -376,24 +376,11 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
     server_id = await db.scalar(text("SELECT server_id FROM mobile_server_identity WHERE singleton = true"))
     if server_id is None:
         raise HTTPException(status_code=503, detail="Server identity unavailable")
-    test_only = (
-        await ds.get_bool("mobile.auth_enabled")
-        and await readable(db, str(DEFAULT_PROJECT_ID))
-        and await ds.get_bool("mobile.synthetic_test_enabled")
-        and await ds.get("mobile.synthetic_test_ack") == "isolated-disposable-synthetic-only-v1"
-        and await ds.get("mobile.synthetic_test_server_id") == str(server_id)
-    )
-    # Distinct, explicitly configured test principals: admin Author and the
-    # ordinary actor's own User scope. A follow alone never qualifies anyone.
-    author_viewer = (
-        await ds.get("mobile.synthetic_test_viewer_id") == str(viewer.id) and await _trace_allowed(viewer)
-        if test_only
-        else False
-    )
-    self_user_viewer = (
-        await ds.get("mobile.synthetic_test_self_user_viewer_id") == str(viewer.id) if test_only else False
-    )
-    test_only = test_only and (author_viewer or self_user_viewer)
+    # The exact same barrier-bound cohort decision guards every data route.
+    cohort = await active_mobile_cohort(db, viewer, server_id=str(server_id))
+    live = cohort == "live"
+    author_viewer = cohort == "synthetic-author"
+    test_only = cohort in ("synthetic-author", "synthetic-user")
     kinds: list[str] = []
     if test_only:
         window = _window("1w")
@@ -415,8 +402,11 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
         server_id=server_id,
         project_id=str(DEFAULT_PROJECT_ID),
         viewer_id=viewer.id,
-        supported_kinds=kinds,
+        # Production is all-kind only after the owner qualifies all three
+        # positive evidence paths; unsupported zeros remain Not recorded.
+        supported_kinds=["mcp_calls", "confirmed_skill_loads", "recorded_hook_runs"] if live else kinds,
         platform_overview=await _trace_allowed(viewer),
+        trace_headlines=live,
         synthetic_test_cohort=test_only,
     )
 

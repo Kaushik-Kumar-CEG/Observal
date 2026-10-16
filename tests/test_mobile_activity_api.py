@@ -125,6 +125,7 @@ async def test_published_keyset_pages_use_same_viewer_and_latest_approval(app, m
 @pytest.mark.asyncio
 async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblocked_read(app, monkeypatch):
     from api.routes import mobile_activity as activity
+    from services import mobile_read_control
 
     api, viewer, _other, db, _enabled = app
     viewer.role = UserRole.super_admin
@@ -139,7 +140,7 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
     states = {"mobile.auth_enabled": True, "mobile.synthetic_test_enabled": True}
     monkeypatch.setattr(activity.ds, "get_bool", AsyncMock(side_effect=lambda key: states.get(key, False)))
     barrier = AsyncMock(return_value=False)
-    monkeypatch.setattr(activity, "readable", barrier)
+    monkeypatch.setattr(mobile_read_control, "readable", barrier)
     observed = AsyncMock(return_value={"roots": 1, "calls": 40, "days": 1})
     monkeypatch.setattr(activity, "trace_union", observed)
     async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
@@ -175,6 +176,32 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
         settings["mobile.synthetic_test_ack"] = ""
         unacknowledged = await c.get("/api/v1/mobile-activity/v1/capabilities")
         assert unacknowledged.json()["synthetic_test_cohort"] is False
+        states["trace_headlines"] = True
+        settings["mobile.trace_qualification_server_id"] = str(server)
+        settings["mobile.synthetic_test_ack"] = "isolated-disposable-synthetic-only-v1"
+        missing_approval = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert missing_approval.json()["trace_headlines"] is False
+        assert missing_approval.json()["synthetic_test_cohort"] is False
+        assert missing_approval.json()["supported_kinds"] == []
+        settings["mobile.trace_qualification_ack"] = "owner-approved-v3-all-kinds-v1"
+        approved = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert approved.json()["trace_headlines"] is True
+        assert approved.json()["synthetic_test_cohort"] is False
+        assert approved.json()["supported_kinds"] == ["mcp_calls", "confirmed_skill_loads", "recorded_hook_runs"]
+        assert_wire("Capabilities", approved.json())
+        states["trace_headlines"] = False
+        rolled_back = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert rolled_back.json()["trace_headlines"] is False
+        assert rolled_back.json()["synthetic_test_cohort"] is False
+        states["trace_headlines"] = True
+        settings["mobile.trace_qualification_server_id"] = str(uuid.uuid4())
+        assert (await c.get("/api/v1/mobile-activity/v1/capabilities")).json()["trace_headlines"] is False
+        settings["mobile.trace_qualification_server_id"] = str(server)
+        barrier.return_value = False
+        assert (await c.get("/api/v1/mobile-activity/v1/capabilities")).json()["trace_headlines"] is False
+        barrier.return_value = True
+        states["mobile.auth_enabled"] = False
+        assert (await c.get("/api/v1/mobile-activity/v1/capabilities")).json()["trace_headlines"] is False
 
 
 @pytest.mark.asyncio

@@ -56,6 +56,43 @@ def identity(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_mobile_cohort_denial_has_no_response_body():
+    from app_factory import create_app
+    from services.mobile_read_control import MobileCohortDeniedError
+
+    api = create_app()
+
+    @api.get("/mobile-denial-probe")
+    async def denied():
+        raise MobileCohortDeniedError
+
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as client:
+        result = await client.get("/mobile-denial-probe")
+    assert result.status_code == 403 and result.content == b""
+
+
+@pytest.mark.asyncio
+async def test_phone_data_route_requires_cohort_even_with_valid_device_proof(identity, monkeypatch):
+    from services import mobile_read_control
+
+    token, _, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="scoped-cohort")
+    request = SimpleNamespace(
+        url=SimpleNamespace(path="/api/v1/mobile-activity/v1/people/summaries"), state=SimpleNamespace()
+    )
+    cohort = AsyncMock(return_value=None)
+    monkeypatch.setattr(mobile_read_control, "active_mobile_cohort", cohort)
+    with pytest.raises(mobile_read_control.MobileCohortDeniedError):
+        await deps.get_mobile_user(request, f"Bearer {token}", identity.db)
+    capability_request = SimpleNamespace(
+        url=SimpleNamespace(path="/api/v1/mobile-activity/v1/capabilities"), state=SimpleNamespace()
+    )
+    assert (await deps.get_mobile_user(capability_request, f"Bearer {token}", identity.db)).id == identity.user.id
+    cohort.return_value = "synthetic-author"
+    assert (await deps.get_mobile_user(request, f"Bearer {token}", identity.db)).id == identity.user.id
+    assert cohort.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_device_grant_creates_scope_preserving_read_only_phone_tokens(identity):
     request = SimpleNamespace(headers={"host": "localhost"})
     created = await inspect.unwrap(device_auth.device_authorize)(

@@ -42,7 +42,7 @@ def extract_hook_receipts(rows: list[dict]) -> tuple[list[HookReceipt], bool]:
         parsed.append((row["line_offset"], row.get("layer_hash"), record))
     parsed.sort(key=lambda record: record[0])
     calls: dict[str, list[tuple[int, str | None]]] = {}
-    results: dict[str, list[tuple[bool, str | None]]] = {}
+    results: dict[str, list[tuple[int, bool, str | None]]] = {}
     for offset, generation, record in parsed:
         msg = record.get("message")
         if record.get("type") != "message" or not isinstance(msg, dict):
@@ -56,7 +56,7 @@ def extract_hook_receipts(rows: list[dict]) -> tuple[list[HookReceipt], bool]:
             and isinstance(msg.get("toolCallId"), str)
             and isinstance(msg.get("isError"), bool)
         ):
-            results.setdefault(msg["toolCallId"], []).append((msg["isError"], generation))
+            results.setdefault(msg["toolCallId"], []).append((offset, msg["isError"], generation))
     facts = []
     seen = set()
     for offset, generation, record in parsed:
@@ -92,8 +92,9 @@ def extract_hook_receipts(rows: list[dict]) -> tuple[list[HookReceipt], bool]:
             len(made) != 1
             or made[0][0] >= offset
             or made[0][1] != generation
-            or (outcome == "blocked" and any(not error for error, _ in linked))
-            or any(result_generation != generation for _, result_generation in linked)
+            or (event == "tool_result" and (len(linked) != 1 or linked[0][0] <= made[0][0]))
+            or (outcome == "blocked" and any(not error for _, error, _ in linked))
+            or any(result_generation != generation for _, _, result_generation in linked)
         ):
             malformed = True
             continue

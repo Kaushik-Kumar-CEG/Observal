@@ -42,7 +42,7 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
         ("127.0.0.1", 15439, "observal"),
         ("127.0.0.1", 15440, "observal"),
     }
-    origin = {15438: "http://127.0.0.1:18480", 15439: "http://127.0.0.1:18482", 15440: "http://127.0.0.1:18483"}[
+    origin = {15438: "http://127.0.0.1:18485", 15439: "http://127.0.0.1:18482", 15440: "http://127.0.0.1:18483"}[
         db_url.port
     ]
     joint = os.getenv("MOBILE_INTEGRATION_JOINT_HOLD") == "1"
@@ -259,10 +259,20 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                 )
                 assert admin_login.status_code == 200
                 desktop_admin = {"Authorization": "Bearer " + admin_login.json()["access_token"]}
+                async with async_session() as db:
+                    server_id = await db.scalar(
+                        text("SELECT server_id FROM mobile_server_identity WHERE singleton=true")
+                    )
+                assert server_id is not None
                 for key, value in (
                     ("deployment.frontend_url", https_origin),
                     ("deployment.public_url", https_origin),
                     ("mobile.auth_enabled", "true"),
+                    ("mobile.synthetic_test_server_id", str(server_id)),
+                    ("mobile.synthetic_test_viewer_id", str(author.id)),
+                    ("mobile.synthetic_test_self_user_viewer_id", str(actor.id)),
+                    ("mobile.synthetic_test_ack", "isolated-disposable-synthetic-only-v1"),
+                    ("mobile.synthetic_test_enabled", "true"),
                 ):
                     changed = await client.put(
                         f"/api/v1/admin/settings/{key}", headers=desktop_admin, json={"value": value}
@@ -313,7 +323,13 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                     assert pair["audience"] == "observal-mobile-activity-v1" and pair["scope"] == "mobile:read"
                     capability = await client.get("/api/v1/mobile-activity/v1/capabilities", headers=bearer)
                     assert capability.status_code == 200
-                    assert capability.json()["synthetic_test_cohort"] is False  # allowlist is not automatic
+                    assert capability.json()["synthetic_test_cohort"] is True
+                    assert capability.json()["trace_headlines"] is False
+                    assert capability.json()["supported_kinds"] == [
+                        "mcp_calls",
+                        "confirmed_skill_loads",
+                        "recorded_hook_runs",
+                    ]
                     assert (await client.get("/api/v1/auth/whoami", headers=bearer)).status_code in (401, 403)
                     assert (await client.get("/api/v1/layer-snapshots/" + "a" * 16, headers=bearer)).status_code in (
                         401,
@@ -329,6 +345,47 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
 
                 author_mobile, admin = await mobile_pair(author.email, author_password)
                 actor_mobile, member = await mobile_pair(actor.email, actor_password)
+                # A seeded administrator has the same role but is NOT an
+                # allowlisted viewer. Device proof alone grants no trace data.
+                demo_challenge = await client.post(
+                    "/api/v1/auth/device/authorize", json={"client_id": "observal-mobile"}
+                )
+                assert demo_challenge.status_code == 200
+                demo_login = await client.post(
+                    "/api/v1/auth/login",
+                    json={"email": os.environ["DEMO_ADMIN_EMAIL"], "password": os.environ["DEMO_ADMIN_PASSWORD"]},
+                )
+                assert demo_login.status_code == 200
+                demo_confirm = await client.post(
+                    "/api/v1/auth/device/confirm",
+                    headers={"Authorization": "Bearer " + demo_login.json()["access_token"]},
+                    json={"user_code": demo_challenge.json()["user_code"]},
+                )
+                assert demo_confirm.status_code == 200
+                demo_grant = await client.post(
+                    "/api/v1/auth/device/token",
+                    json={
+                        "device_code": demo_challenge.json()["device_code"],
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    },
+                )
+                assert demo_grant.status_code == 200
+                demo_head = {"Authorization": "Bearer " + demo_grant.json()["access_token"]}
+                demo_cap = await client.get("/api/v1/mobile-activity/v1/capabilities", headers=demo_head)
+                assert demo_cap.status_code == 200 and demo_cap.json()["synthetic_test_cohort"] is False
+                denied = await client.get(
+                    f"/api/v1/mobile-activity/v1/people/{author.id}/summary",
+                    headers=demo_head,
+                    params={"scope": "author", "period": "1w"},
+                )
+                assert denied.status_code == 403 and denied.content == b""
+                assert (
+                    await client.post(
+                        "/api/v1/auth/mobile/logout",
+                        headers=demo_head,
+                        json={"refresh_token": demo_grant.json()["refresh_token"]},
+                    )
+                ).status_code == 200
                 paired = await client.post(
                     "/api/v1/mobile-activity/v1/people/summaries",
                     headers=admin,
@@ -376,6 +433,23 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                 assert own.json()["items"][0]["user_usage"]["value"] == 1
                 assert own.json()["items"][1]["author_usage"] == {"status": "restricted"}
                 own_card = own.json()["items"][0]
+                # The installed Android User breakdown first fetches the named
+                # summary as the subject themself. Unlike a different viewer,
+                # this invokes prompted_roots against retained ClickHouse source.
+                # A healthy card/page alone would miss a ClickHouse auth failure.
+                own_summary = await client.get(
+                    f"/api/v1/mobile-activity/v1/people/{actor.id}/summary",
+                    headers=member,
+                    params={
+                        "scope": "user",
+                        "period": "1w",
+                        "window_anchor": own.json()["window_anchor"],
+                        "expected_revision": own_card["user_revision"],
+                    },
+                )
+                assert own_summary.status_code == 200
+                assert own_summary.json()["component_trace_union"]["status"] == "partial"
+                assert own_summary.json()["component_trace_union"]["value"] == 1
                 own_page = await client.get(
                     f"/api/v1/mobile-activity/v1/people/{actor.id}/user/components",
                     headers=member,
@@ -494,12 +568,22 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
             import services.dynamic_settings as ds
             from models.enterprise_config import EnterpriseConfig
 
+            reset_keys = (
+                "mobile.auth_enabled",
+                "mobile.synthetic_test_enabled",
+                "mobile.synthetic_test_server_id",
+                "mobile.synthetic_test_viewer_id",
+                "mobile.synthetic_test_self_user_viewer_id",
+                "mobile.synthetic_test_ack",
+            )
             async with async_session() as db:
-                setting = await db.scalar(select(EnterpriseConfig).where(EnterpriseConfig.key == "mobile.auth_enabled"))
-                if setting is not None:
-                    setting.value = "false"
-                    await db.commit()
-            await ds.invalidate("mobile.auth_enabled")
+                for key in reset_keys:
+                    setting = await db.scalar(select(EnterpriseConfig).where(EnterpriseConfig.key == key))
+                    if setting is not None:
+                        setting.value = "false" if key.endswith("_enabled") else ""
+                await db.commit()
+            for key in reset_keys:
+                await ds.invalidate(key)
         if session:
             # Remove ClickHouse source before relational identity; async
             # mutations must finish before the temporary actor disappears.

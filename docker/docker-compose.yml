@@ -143,7 +143,10 @@ services:
     volumes:
       - chdata:/var/lib/clickhouse
       - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
-      - ./clickhouse/users.d:/etc/clickhouse-server/users.d
+      # Keep the image's users.d writable for ClickHouse's env-driven default user.
+      # A shared host bind here persists ignored default-user.xml across stacks,
+      # letting one disposable instance replace another's password and break reads.
+      - ./clickhouse/users.d/memory.xml:/etc/clickhouse-server/users.d/memory.xml:ro
     healthcheck:
       test:
         [

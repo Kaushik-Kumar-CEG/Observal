@@ -356,6 +356,10 @@ DEFAULTS: dict[str, str] = {
     "mobile.synthetic_test_viewer_id": "",
     "mobile.synthetic_test_self_user_viewer_id": "",
     "mobile.synthetic_test_ack": "",
+    # Explicit, server-bound owner qualification for real-person phone UI.
+    # The production switch alone never makes a cohort displayable.
+    "mobile.trace_qualification_server_id": "",
+    "mobile.trace_qualification_ack": "",
     # Registry policy
     "registry.registered_agents_only": "false",
     # Must be enabled only after all old API/worker processes are drained and

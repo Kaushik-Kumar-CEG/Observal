@@ -192,6 +192,11 @@ async def get_mobile_user(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     if path != "/api/v1/auth/mobile/logout" and not await ds.get_bool("mobile.auth_enabled"):
         raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
+    if path.startswith("/api/v1/mobile-activity/v1/") and path != "/api/v1/mobile-activity/v1/capabilities":
+        from services.mobile_read_control import MobileCohortDeniedError, active_mobile_cohort
+
+        if await active_mobile_cohort(db, user) is None:
+            raise MobileCohortDeniedError
     request.state.audit_user = user
     await _enforce_password_change(request, user)
     request.state.current_user = user

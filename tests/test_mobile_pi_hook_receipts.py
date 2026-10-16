@@ -90,12 +90,16 @@ def test_pasted_or_unlinked_or_contradictory_receipt_never_counts():
         [_receipt(offset=0), _call()],
         [_call(), _receipt(outcome="blocked", code=2), bad_result],
         [_call(), _receipt(outcome="ran", code=2)],
+        [_call(), _receipt(event="tool_result")],
+        [_call(), _receipt(event="tool_result"), bad_result, {**bad_result, "line_offset": 4}],
         [_call(), _receipt(binding="0" * 63)],
         [_call(), {**_receipt(), "layer_hash": "v3_" + "c" * 64}],
         [_call(), _receipt(), {**bad_result, "layer_hash": "v3_" + "c" * 64}],
     ):
         facts, malformed = extract_hook_receipts(rows)
         assert not facts and malformed
+    result_receipt, malformed = extract_hook_receipts([_call(), _receipt(event="tool_result"), bad_result])
+    assert not malformed and len(result_receipt) == 1 and result_receipt[0].event == "tool_result"
 
 
 def test_binding_and_prospective_root_are_required_for_a_hook_positive():
