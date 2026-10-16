@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Opt-in *real HTTPS* disposable Android-cohort API acceptance (never CI/prod).
 
-Only run after Android accepts v1.2 and the isolated synthetic read gate is
-explicitly opened. Read protected account files out of band; never log tokens.
-MOBILE_INTEGRATION_HTTPS=1 requires MOBILE_TEST_CA, MOBILE_TEST_ACCOUNTS,
-MOBILE_TEST_ORDINARY and MOBILE_TEST_FIXTURE. Origin must be HTTPS loopback.
+Run MOBILE_INTEGRATION_BROWSER_PREFLIGHT=1 with MOBILE_TEST_ORIGIN/CA
+while the synthetic read gate is still BLOCKED; it checks both browser routes
+and their same-origin JS without grants or credentials. Only the separate
+MOBILE_INTEGRATION_HTTPS=1 scoped API journey requires an explicitly open
+synthetic read gate plus MOBILE_TEST_ACCOUNTS, MOBILE_TEST_ORDINARY and
+MOBILE_TEST_FIXTURE. Read protected files out of band; never log tokens.
+Origin must be HTTPS loopback.
 """
 
 import json
 import os
+import re
 import ssl
 import uuid
 from pathlib import Path
@@ -18,7 +22,13 @@ from urllib.parse import urlparse
 import httpx
 import pytest
 
-pytestmark = pytest.mark.skipif(os.getenv("MOBILE_INTEGRATION_HTTPS") != "1", reason="isolated HTTPS test only")
+
+def _loopback_origin() -> str:
+    origin = os.environ["MOBILE_TEST_ORIGIN"]
+    parsed = urlparse(origin)
+    assert parsed.scheme == "https" and parsed.hostname in ("localhost", "127.0.0.1")
+    assert parsed.path in ("", "/") and not (parsed.username or parsed.password or parsed.query or parsed.fragment)
+    return origin
 
 
 def _file(name: str) -> dict:
@@ -26,6 +36,18 @@ def _file(name: str) -> dict:
     if path.stat().st_mode & 0o077:
         raise AssertionError("Test credential/fixture file must not be group or world accessible")
     return json.loads(path.read_text())
+
+
+async def _assert_browser_approval_page(client: httpx.AsyncClient) -> None:
+    """API-only proxy can pass device-confirm yet strand Chrome on /device."""
+    for path in ("/login", "/device?code=TESTTEST"):  # no real challenge or credentials
+        page = await client.get(path)
+        assert page.status_code == 200 and "text/html" in page.headers.get("content-type", "")
+        assert '<div id="root"></div>' in page.text and 'type="module"' in page.text
+        scripts = re.findall(r'<script[^>]+type="module"[^>]+src="(/[^"]+)"', page.text)
+        assert scripts, "browser approval needs a same-origin SPA script, not only an API response"
+        script = await client.get(scripts[-1])
+        assert script.status_code == 200 and "javascript" in script.headers.get("content-type", "")
 
 
 async def _mobile_pair(client: httpx.AsyncClient, account: dict) -> dict:
@@ -64,14 +86,24 @@ async def _mobile_pair(client: httpx.AsyncClient, account: dict) -> dict:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.getenv("MOBILE_INTEGRATION_BROWSER_PREFLIGHT") != "1", reason="isolated browser preflight only")
+async def test_isolated_https_browser_approval_preflight():
+    """Run while the read gate is still blocked, before inviting Android."""
+    async with httpx.AsyncClient(
+        base_url=_loopback_origin(),
+        verify=ssl.create_default_context(cafile=os.environ["MOBILE_TEST_CA"]),
+        timeout=30,
+    ) as client:
+        await _assert_browser_approval_page(client)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.getenv("MOBILE_INTEGRATION_HTTPS") != "1", reason="isolated HTTPS test only")
 async def test_isolated_https_two_scopes_two_components_one_child_root():
     maintainer, ordinary, fixture = (
         _file(key) for key in ("MOBILE_TEST_ACCOUNTS", "MOBILE_TEST_ORDINARY", "MOBILE_TEST_FIXTURE")
     )
-    origin = os.environ["MOBILE_TEST_ORIGIN"]
-    parsed = urlparse(origin)
-    assert parsed.scheme == "https" and parsed.hostname in ("localhost", "127.0.0.1")
-    assert parsed.path in ("", "/") and not (parsed.username or parsed.password or parsed.query or parsed.fragment)
+    origin = _loopback_origin()
     assert fixture["maintainer_id"] == maintainer["id"] and fixture["actor_id"] == ordinary["id"]
     assert fixture["marker"] == "synthetic-mobile-https-v1"
     async with httpx.AsyncClient(
@@ -81,6 +113,7 @@ async def test_isolated_https_two_scopes_two_components_one_child_root():
         headers={"User-Agent": "Observal-Android-Isolated/1.0"},
     ) as client:
         assert (await client.get("/readyz")).status_code == 200
+        await _assert_browser_approval_page(client)
         maintainer_pair = await _mobile_pair(client, maintainer)
         admin = {"Authorization": "Bearer " + maintainer_pair["access_token"]}
         caps = await client.get("/api/v1/mobile-activity/v1/capabilities", headers=admin)

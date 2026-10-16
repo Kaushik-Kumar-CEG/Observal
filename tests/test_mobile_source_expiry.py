@@ -32,9 +32,14 @@ def test_missing_or_suffix_source_cannot_claim_a_retention_floor():
     assert _source_retained_until([{"line_offset": 0, "timestamp": "1960-01-01 00:00:00"}], "a" * 64) is None
 
 
-def test_all_typed_kinds_require_child_and_verified_root_publication_ttl():
+def test_all_typed_kinds_require_root_or_every_intermediate_source_ttl():
     for kind in ("mcp", "skill", "hook"):
         sql = _trace_from(kind)
         assert "pub.source_retained_until>now()" in sql
-        assert "root_pub.source_retained_until>now()" in sql
-        assert "root_pub.session_id=run.session_id" in sql
+        assert "e.run_incarnation=e.root_run_incarnation AND e.session_id=run.session_id" in sql
+        assert "WITH RECURSIVE chain AS" in sql
+        assert "ancestor_pub.source_retained_until>now()" in sql
+        assert "ancestor_pub.status IN ('complete','partial')" in sql
+        assert "bool_or(ancestor.run_incarnation=e.root_run_incarnation" in sql
+        assert "parent.header_hash=chain.parent_header_hash" in sql
+        assert "root_pub" not in sql, "root fact's own pub and child ancestry already cover the root"

@@ -253,11 +253,49 @@ _TRACE_TABLES = {
     "hook": ("mobile_hook_evidence_events", "mobile_hook_layer_components", "hook_listings", "hook_versions"),
 }
 
+# Children may be more than one hop below their root. Checking only the fact's
+# and root's publication leaves an expired/unqualified intermediate ancestor
+# readable until the asynchronous descendant reproject catches up. The bounded
+# chain is evaluated only for child facts; root-heavy batches take the short arm.
+_LINEAGE_GUARD = """
+AND CASE WHEN e.run_incarnation=e.root_run_incarnation AND e.session_id=run.session_id
+ THEN true ELSE EXISTS (
+  WITH RECURSIVE chain AS (
+   SELECT own.project_id,own.user_id,own.harness,own.session_id,own.run_incarnation,
+     own.parent_session_id,own.parent_run_incarnation,own.parent_header_hash,
+     own.header_hash,own.started_at,own.source_status,0 AS depth
+   FROM mobile_run_instances own
+   WHERE own.project_id=e.project_id AND own.user_id=e.user_id AND own.harness=e.harness
+     AND own.session_id=e.session_id AND own.run_incarnation=e.run_incarnation
+   UNION ALL
+   SELECT parent.project_id,parent.user_id,parent.harness,parent.session_id,parent.run_incarnation,
+     parent.parent_session_id,parent.parent_run_incarnation,parent.parent_header_hash,
+     parent.header_hash,parent.started_at,parent.source_status,chain.depth+1
+   FROM chain JOIN mobile_run_instances parent
+     ON parent.project_id=chain.project_id AND parent.user_id=chain.user_id AND parent.harness=chain.harness
+     AND parent.session_id=chain.parent_session_id AND parent.run_incarnation=chain.parent_run_incarnation
+     AND parent.header_hash=chain.parent_header_hash AND parent.started_at<=chain.started_at
+   WHERE chain.depth<8
+  )
+  SELECT 1 FROM chain ancestor
+  LEFT JOIN mobile_session_publications ancestor_pub
+    ON ancestor_pub.project_id=ancestor.project_id AND ancestor_pub.user_id=ancestor.user_id
+    AND ancestor_pub.harness=ancestor.harness AND ancestor_pub.session_id=ancestor.session_id
+  HAVING count(*)>1
+    AND bool_or(ancestor.run_incarnation=e.root_run_incarnation AND ancestor.parent_session_id IS NULL)
+    AND bool_and(coalesce(
+      ancestor.source_status IN ('complete','partial')
+      AND ancestor_pub.status IN ('complete','partial') AND ancestor_pub.source_retained_until>now(),false))
+ ) END
+"""
+
 
 def _trace_from(kind: Literal["mcp", "skill", "hook"]) -> str:
     event, pins, listing, version = _TRACE_TABLES[kind]
     revision_join = "AND pub.source_revision=e.source_revision" if kind in ("skill", "hook") else ""
     pin_identity = "map.binding_sha256=e.binding_sha256" if kind == "hook" else "map.alias=e.alias"
+    # Own publication covers roots; the child-only lineage guard checks all
+    # ancestors (including the root), so a second root join is redundant.
     return f"""
 FROM {event} e
 JOIN mobile_run_instances run ON run.project_id=e.project_id AND run.user_id=e.user_id
@@ -269,9 +307,7 @@ JOIN mobile_session_publications pub ON pub.project_id=e.project_id AND pub.user
  AND pub.harness=e.harness AND pub.session_id=e.session_id AND pub.status IN ('complete','partial')
  AND pub.source_retained_until>now()
  {revision_join}
-JOIN mobile_session_publications root_pub ON root_pub.project_id=run.project_id AND root_pub.user_id=run.user_id
- AND root_pub.harness=run.harness AND root_pub.session_id=run.session_id
- AND root_pub.status IN ('complete','partial') AND root_pub.source_retained_until>now()
+ {_LINEAGE_GUARD}
 JOIN {listing} l ON l.id=e.component_id
 JOIN mobile_listing_provenance p ON p.kind='{kind}' AND p.listing_id=l.id
 JOIN users origin ON origin.id=p.original_author_id AND origin.auth_provider!='deactivated'
