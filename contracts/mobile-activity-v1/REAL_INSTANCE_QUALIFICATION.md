@@ -30,4 +30,20 @@ Run this only with the **instance owner's explicit written permission** for the 
 
 9. Only after the owner signs off cohorts, visibility and roles may a test maintainer receive a scoped real-instance credential. Use the **existing** server-issued verification origin on HTTPS, not a local rewrite of the Host header. Compare each permitted, named person at 1W and 1M from retained qualified source → projection → authenticated API → Android card/page/detail under the same window/revision. Confirm distinct-root arithmetic (forty calls on one root remains **one**) without publishing raw identities. Have a second non-admin account attempt the same Following/private/detail route; it must see Restricted or bodyless denial, never inherited access. Test logout, account switch, stale page, refresh replay and one deletion during a pending read. Stop and reblock if any named-person leakage or unsupported-zero claim appears.
 
+## Approved cohort enable / emergency rollback (operator only)
+
+This procedure is **not** approval. Keep the project barrier closed while installing the exact reviewed API/worker and Pi sender, migrating, confirming source revision/retention and erasure, testing the scoped auth audience, and having the instance owner approve the named synthetic or consented cohort and privacy minimum-cell policy. Use `GET /api/v1/admin/settings/schema` and the admin-only `PUT /api/v1/admin/settings/{key}` with `{"value":"true"}` for `mobile.auth_enabled` and `trace_headlines` **only after** those checks; first validate credential proof and read denial while the barrier is still blocked. Neither toggle qualifies a missing kind or zero. Have the DBA inspect the retained source and pending deletion queue under the same project lock before opening reads. Opening is a separate, reviewed, single-transaction PostgreSQL change:
+
+```sql
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default', 0));
+-- Abort if approved cohort, retention/source revision, worker or privacy checks differ from the signed record.
+UPDATE mobile_read_controls SET blocked=false, generation=generation+1, updated_at=now()
+WHERE project_id='default' AND blocked=true;
+-- Require exactly one changed row; otherwise ROLLBACK and investigate.
+COMMIT;
+```
+
+Before emergency rollback or any erasure, acquire the same exclusive lock and set `blocked=true, generation=generation+1, updated_at=now()` on that exact row and commit **before** disabling both admin settings with `{"value":"false"}`. Wait for earlier shared-lock readers to finish; no already-sent bytes can be recalled. Confirm unauthorized/Restricted routes contain no counts, refresh credentials are revoked where appropriate, and old cursors reject on epoch change. Never bypass a pending ClickHouse mutation by reopening; fresh source and privacy requalification is required. All operations are project-specific; do not apply this `default` SQL to another project without its reviewed ID/key and cohort approval.
+
 The separate synthetic Android UI journey is recorded in the shared mobile `BACKEND_ANDROID_ACCEPTANCE.md`; it does **not** meet steps 4–9 for a real cohort. An instance owner must supply the authorization and aggregate-safe operational facts. This runbook grants no access to `internal.observal.io`, `dev.observal.io`, or any other deployment and requires no private-data inspection to conclude **not yet qualified**.
