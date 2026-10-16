@@ -3,7 +3,7 @@
 """Opt-in, loopback-only Pi SDK→extension→authenticated HTTP→worker proof.
 
 The SDK serializes transcript entries; it does not invoke a model or discover
-skills itself. No phone audience, read barrier or production setting is opened.
+skills itself. A tightly gated localhost-only option opens a synthetic phone cohort.
 """
 
 import asyncio
@@ -14,7 +14,7 @@ import ssl
 import subprocess
 import tempfile
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -40,8 +40,14 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
     assert (db_url.host, db_url.port, db_url.database) in {
         ("127.0.0.1", 15438, "observal"),
         ("127.0.0.1", 15439, "observal"),
+        ("127.0.0.1", 15440, "observal"),
     }
-    origin = {15438: "http://127.0.0.1:18480", 15439: "http://127.0.0.1:18482"}[db_url.port]
+    origin = {15438: "http://127.0.0.1:18480", 15439: "http://127.0.0.1:18482", 15440: "http://127.0.0.1:18483"}[
+        db_url.port
+    ]
+    joint = os.getenv("MOBILE_INTEGRATION_JOINT_HOLD") == "1"
+    assert not joint or (db_url.port == 15440 and os.getenv("MOBILE_INTEGRATION_V3_HTTPS") == "1")
+    https_origin = "https://localhost:18443" if joint else "https://localhost:18444"
     sdk = Path(os.environ["PI_PROBE_SDK_ENTRY"])
     assert sdk.is_file()
     marker = uuid.uuid4().hex
@@ -150,7 +156,7 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
     author_mobile = None
     actor_mobile = None
     if os.getenv("MOBILE_INTEGRATION_V3_HTTPS") == "1":
-        assert db_url.port == 15439, "HTTPS reads require fresh, synthetic-only stack"
+        assert db_url.port in (15439, 15440), "HTTPS reads require fresh, synthetic-only stack"
         async with async_session() as db:
             assert await db.scalar(text("SELECT count(*) FROM users")) == 4
             assert await db.scalar(text("SELECT count(*) FROM users WHERE email NOT LIKE '%@demo.example'")) == 0
@@ -243,7 +249,7 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
             assert ca.is_file() and ca.stat().st_mode & 0o077 == 0
             tls = ssl.create_default_context(cafile=str(ca))
             async with httpx.AsyncClient(
-                base_url="https://localhost:18444",
+                base_url=https_origin,
                 verify=tls,
                 timeout=30,
                 headers={"User-Agent": "Observal-Android-Isolated/1.0"},
@@ -254,8 +260,8 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                 assert admin_login.status_code == 200
                 desktop_admin = {"Authorization": "Bearer " + admin_login.json()["access_token"]}
                 for key, value in (
-                    ("deployment.frontend_url", "https://localhost:18444"),
-                    ("deployment.public_url", "https://localhost:18444"),
+                    ("deployment.frontend_url", https_origin),
+                    ("deployment.public_url", https_origin),
                     ("mobile.auth_enabled", "true"),
                 ):
                     changed = await client.put(
@@ -284,7 +290,7 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                     )
                     assert challenge.status_code == 200
                     data = challenge.json()
-                    assert data["verification_origins"] == ["https://localhost:18444"]
+                    assert data["verification_origins"] == [https_origin]
                     login = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
                     confirmed = await client.post(
                         "/api/v1/auth/device/confirm",
@@ -305,6 +311,9 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                     proof = await client.get("/api/v1/auth/mobile/credential", headers=bearer)
                     assert proof.status_code == 200
                     assert pair["audience"] == "observal-mobile-activity-v1" and pair["scope"] == "mobile:read"
+                    capability = await client.get("/api/v1/mobile-activity/v1/capabilities", headers=bearer)
+                    assert capability.status_code == 200
+                    assert capability.json()["synthetic_test_cohort"] is False  # allowlist is not automatic
                     assert (await client.get("/api/v1/auth/whoami", headers=bearer)).status_code in (401, 403)
                     assert (await client.get("/api/v1/layer-snapshots/" + "a" * 16, headers=bearer)).status_code in (
                         401,
@@ -432,6 +441,44 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                         json={"refresh_token": author_mobile["refresh_token"]},
                     )
                 ).status_code == 200
+            if joint:
+                # Local Android owner obtains passwords from the protected file,
+                # starts new device grants, then records the app result. This
+                # process retains the actual Pi source until ack or fixed TTL.
+                handoff = Path("/tmp/observal-mobile-joint")
+                assert handoff.is_dir() and handoff.stat().st_mode & 0o077 == 0
+                done = handoff / "owner-done"
+                assert not done.exists()
+                until = datetime.now(UTC) + timedelta(hours=4)
+                record = {
+                    "expires_at": until.isoformat(),
+                    "origin": https_origin,
+                    "author": {
+                        "id": str(author.id),
+                        "email": author.email,
+                        "password": author_password,
+                        "username": author.username,
+                        "role": "admin",
+                    },
+                    "actor": {
+                        "id": str(actor.id),
+                        "email": actor.email,
+                        "password": actor_password,
+                        "username": actor.username,
+                        "role": "user",
+                    },
+                    "session": session,
+                    "root_run_incarnation": str(roots[0]),
+                    "components": {"mcp": str(mcp_id), "skill": str(skill_id), "hook": str(hook_id)},
+                }
+                destination = handoff / "owner.json"
+                fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as output:
+                    json.dump(record, output)
+                print("ANDROID_JOINT_READY", until.isoformat(), flush=True)
+                while datetime.now(UTC) < until and not done.is_file():
+                    await asyncio.sleep(2)
+                print("ANDROID_JOINT_COMPLETED" if done.is_file() else "ANDROID_JOINT_EXPIRED", flush=True)
     finally:
         if opened:
             async with async_session() as db:

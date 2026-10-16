@@ -394,17 +394,28 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
         await ds.get("mobile.synthetic_test_self_user_viewer_id") == str(viewer.id) if test_only else False
     )
     test_only = test_only and (author_viewer or self_user_viewer)
+    kinds: list[str] = []
     if test_only:
         window = _window("1w")
         observed = await trace_union(
             db, viewer.id, "author" if author_viewer else "user", str(DEFAULT_PROJECT_ID), window.start, window.end
         )
-        test_only = observed is not None and observed["roots"] > 0 and observed.get("calls", 0) > 0
+        if observed and observed["roots"] > 0:
+            kinds = [
+                kind
+                for key, kind in (
+                    ("calls", "mcp_calls"),
+                    ("skill_loads", "confirmed_skill_loads"),
+                    ("hook_runs", "recorded_hook_runs"),
+                )
+                if observed.get(key, 0) > 0
+            ]
+        test_only = bool(kinds)
     return Capabilities(
         server_id=server_id,
         project_id=str(DEFAULT_PROJECT_ID),
         viewer_id=viewer.id,
-        supported_kinds=["mcp_calls"] if test_only else [],
+        supported_kinds=kinds,
         platform_overview=await _trace_allowed(viewer),
         synthetic_test_cohort=test_only,
     )

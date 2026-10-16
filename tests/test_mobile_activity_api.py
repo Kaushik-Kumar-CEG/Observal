@@ -152,6 +152,14 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
         assert opened.json()["trace_headlines"] is False
         assert opened.json()["supported_kinds"] == ["mcp_calls"]
         assert_wire("Capabilities", opened.json())
+        observed.return_value = {"roots": 1, "calls": 1, "skill_loads": 1, "hook_runs": 1, "days": 1}
+        mixed = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert mixed.json()["supported_kinds"] == ["mcp_calls", "confirmed_skill_loads", "recorded_hook_runs"]
+        assert_wire("Capabilities", mixed.json())
+        observed.return_value = {"roots": 1, "calls": 0, "skill_loads": 1, "hook_runs": 0, "days": 1}
+        skill_only = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert skill_only.json()["synthetic_test_cohort"] is True
+        assert skill_only.json()["supported_kinds"] == ["confirmed_skill_loads"]
         observed.return_value = None
         missing_source = await c.get("/api/v1/mobile-activity/v1/capabilities")
         assert missing_source.json()["synthetic_test_cohort"] is False
