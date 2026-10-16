@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import secrets
+import ssl
 import subprocess
 import tempfile
 import uuid
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 
 pytestmark = pytest.mark.skipif(os.getenv("MOBILE_INTEGRATION_V3_SENDER") != "1", reason="isolated loopback stack only")
@@ -36,8 +37,11 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
     from services.clickhouse.client import _query
 
     db_url = make_url(settings.DATABASE_URL)
-    assert (db_url.host, db_url.port, db_url.database) == ("127.0.0.1", 15438, "observal")
-    origin = "http://127.0.0.1:18480"
+    assert (db_url.host, db_url.port, db_url.database) in {
+        ("127.0.0.1", 15438, "observal"),
+        ("127.0.0.1", 15439, "observal"),
+    }
+    origin = {15438: "http://127.0.0.1:18480", 15439: "http://127.0.0.1:18482"}[db_url.port]
     sdk = Path(os.environ["PI_PROBE_SDK_ENTRY"])
     assert sdk.is_file()
     marker = uuid.uuid4().hex
@@ -57,7 +61,8 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
         name="Synthetic SDK Author",
         role=UserRole.admin,
     )
-    author.set_password(secrets.token_urlsafe(25))
+    author_password = secrets.token_urlsafe(25)
+    author.set_password(author_password)
     mcp_id, skill_id, hook_id = (uuid.uuid4() for _ in range(3))
     content = "---\nname: review\ndescription: isolated SDK test\n---\n# Review\n"
     command = "true"  # No stdout, no subprocess network or secrets.
@@ -141,6 +146,14 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
         ),
     ]
     session = None
+    opened = False
+    author_mobile = None
+    actor_mobile = None
+    if os.getenv("MOBILE_INTEGRATION_V3_HTTPS") == "1":
+        assert db_url.port == 15439, "HTTPS reads require fresh, synthetic-only stack"
+        async with async_session() as db:
+            assert await db.scalar(text("SELECT count(*) FROM users")) == 4
+            assert await db.scalar(text("SELECT count(*) FROM users WHERE email NOT LIKE '%@demo.example'")) == 0
     try:
         async with async_session() as db:
             assert await db.scalar(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'")) is True
@@ -223,7 +236,193 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                 .all()
             )
             assert len(roots) == 3 and len(set(roots)) == 1
+        if os.getenv("MOBILE_INTEGRATION_V3_HTTPS") == "1":
+            # On this disposable fresh DB *only*, temporarily open the real
+            # PostgreSQL gate and exercise actual scoped mobile credentials.
+            ca = Path(os.environ["MOBILE_PROBE_CA"])
+            assert ca.is_file() and ca.stat().st_mode & 0o077 == 0
+            tls = ssl.create_default_context(cafile=str(ca))
+            async with httpx.AsyncClient(
+                base_url="https://localhost:18444",
+                verify=tls,
+                timeout=30,
+                headers={"User-Agent": "Observal-Android-Isolated/1.0"},
+            ) as client:
+                admin_login = await client.post(
+                    "/api/v1/auth/login", json={"email": author.email, "password": author_password}
+                )
+                assert admin_login.status_code == 200
+                desktop_admin = {"Authorization": "Bearer " + admin_login.json()["access_token"]}
+                for key, value in (
+                    ("deployment.frontend_url", "https://localhost:18444"),
+                    ("deployment.public_url", "https://localhost:18444"),
+                    ("mobile.auth_enabled", "true"),
+                ):
+                    changed = await client.put(
+                        f"/api/v1/admin/settings/{key}", headers=desktop_admin, json={"value": value}
+                    )
+                    assert changed.status_code == 200, (key, changed.status_code, changed.json().get("detail"))
+                async with async_session() as db:
+                    assert await db.scalar(text("SELECT count(*) FROM users")) == 6
+                    assert (
+                        await db.scalar(text("SELECT count(*) FROM users WHERE email NOT LIKE '%@demo.example'")) == 2
+                    )
+                    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+                    allowed = await db.execute(
+                        text(
+                            "UPDATE mobile_read_controls SET blocked=false,generation=generation+1,updated_at=now() "
+                            "WHERE project_id='default' AND blocked=true"
+                        )
+                    )
+                    assert allowed.rowcount == 1
+                    await db.commit()
+                    opened = True
+
+                async def mobile_pair(email: str, password: str):
+                    challenge = await client.post(
+                        "/api/v1/auth/device/authorize", json={"client_id": "observal-mobile"}
+                    )
+                    assert challenge.status_code == 200
+                    data = challenge.json()
+                    assert data["verification_origins"] == ["https://localhost:18444"]
+                    login = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
+                    confirmed = await client.post(
+                        "/api/v1/auth/device/confirm",
+                        headers={"Authorization": "Bearer " + login.json()["access_token"]},
+                        json={"user_code": data["user_code"]},
+                    )
+                    assert confirmed.status_code == 200
+                    grant = await client.post(
+                        "/api/v1/auth/device/token",
+                        json={
+                            "device_code": data["device_code"],
+                            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                        },
+                    )
+                    assert grant.status_code == 200
+                    pair = grant.json()
+                    bearer = {"Authorization": "Bearer " + pair["access_token"]}
+                    proof = await client.get("/api/v1/auth/mobile/credential", headers=bearer)
+                    assert proof.status_code == 200
+                    assert pair["audience"] == "observal-mobile-activity-v1" and pair["scope"] == "mobile:read"
+                    return pair, bearer
+
+                author_mobile, admin = await mobile_pair(author.email, author_password)
+                actor_mobile, member = await mobile_pair(actor.email, actor_password)
+                paired = await client.post(
+                    "/api/v1/mobile-activity/v1/people/summaries",
+                    headers=admin,
+                    json={"subject_ids": [str(author.id), str(actor.id)], "period": "1w"},
+                )
+                assert paired.status_code == 200, (paired.status_code, paired.text[:160])
+                authors, users = paired.json()["items"]
+                assert authors["author_usage"]["value"] == users["user_usage"]["value"] == 1
+                assert authors["author_usage"]["status"] == users["user_usage"]["status"] == "partial"
+                for subject, scope, revision in (
+                    (author.id, "author", authors["author_revision"]),
+                    (actor.id, "user", users["user_revision"]),
+                ):
+                    params = {
+                        "period": "1w",
+                        "window_anchor": paired.json()["window_anchor"],
+                        "expected_revision": revision,
+                    }
+                    base = f"/api/v1/mobile-activity/v1/people/{subject}/{scope}/components"
+                    page = await client.get(base, headers=admin, params=params)
+                    assert page.status_code == 200, (scope, page.status_code)
+                    assert page.json()["complete"] and len(page.json()["items"]) == 3
+                    assert {item["kind"] for item in page.json()["items"]} == {"mcp", "skill", "hook"}
+                    summary = await client.get(
+                        f"/api/v1/mobile-activity/v1/people/{subject}/summary",
+                        headers=admin,
+                        params={"scope": scope, **params},
+                    )
+                    assert summary.status_code == 200
+                    for field in ("component_trace_union", "mcp_calls", "confirmed_skill_loads", "recorded_hook_runs"):
+                        assert summary.json()[field]["value"] == 1
+                        assert summary.json()[field]["status"] == "partial"
+                    for item in page.json()["items"]:
+                        assert item["component_traces"]["value"] == 1
+                        detail = await client.get(
+                            f"{base}/{item['kind']}/{item['component_id']}", headers=admin, params=params
+                        )
+                        assert detail.status_code == 200 and detail.json()["component"] == item
+                own = await client.post(
+                    "/api/v1/mobile-activity/v1/people/summaries",
+                    headers=member,
+                    json={"subject_ids": [str(actor.id), str(author.id)], "period": "1w"},
+                )
+                assert own.status_code == 200
+                assert own.json()["items"][0]["user_usage"]["value"] == 1
+                assert own.json()["items"][1]["author_usage"] == {"status": "restricted"}
+                stale_params = {
+                    "period": "1w",
+                    "window_anchor": paired.json()["window_anchor"],
+                    "expected_revision": authors["author_revision"],
+                }
+                async with async_session() as db:
+                    await db.execute(text("UPDATE hook_listings SET is_private=true WHERE id=:id"), {"id": hook_id})
+                    await db.commit()
+                stale = await client.get(
+                    f"/api/v1/mobile-activity/v1/people/{author.id}/author/components",
+                    headers=admin,
+                    params=stale_params,
+                )
+                assert stale.status_code == 409, "visibility epoch must invalidate earlier named page"
+                fresh = await client.post(
+                    "/api/v1/mobile-activity/v1/people/summaries",
+                    headers=admin,
+                    json={"subject_ids": [str(author.id)], "period": "1w"},
+                )
+                assert fresh.status_code == 200 and fresh.json()["items"][0]["author_usage"]["value"] == 1
+                async with async_session() as db:
+                    await db.execute(text("UPDATE hook_listings SET is_private=false WHERE id=:id"), {"id": hook_id})
+                    await db.commit()
+                refreshed = await client.post(
+                    "/api/v1/auth/token/refresh", json={"refresh_token": actor_mobile["refresh_token"]}
+                )
+                assert refreshed.status_code == 200
+                replay = await client.post(
+                    "/api/v1/auth/token/refresh", json={"refresh_token": actor_mobile["refresh_token"]}
+                )
+                assert replay.status_code == 401
+                renewed = {"Authorization": "Bearer " + refreshed.json()["access_token"]}
+                assert (await client.get("/api/v1/auth/mobile/credential", headers=renewed)).status_code == 200
+                logged_out = await client.post(
+                    "/api/v1/auth/mobile/logout",
+                    headers=renewed,
+                    json={"refresh_token": refreshed.json()["refresh_token"]},
+                )
+                assert logged_out.status_code == 200
+                assert (await client.get("/api/v1/auth/mobile/credential", headers=renewed)).status_code == 401
+                assert (
+                    await client.post(
+                        "/api/v1/auth/mobile/logout",
+                        headers=admin,
+                        json={"refresh_token": author_mobile["refresh_token"]},
+                    )
+                ).status_code == 200
     finally:
+        if opened:
+            async with async_session() as db:
+                await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+                await db.execute(
+                    text(
+                        "UPDATE mobile_read_controls SET blocked=true,generation=generation+1,"
+                        "updated_at=now() WHERE project_id='default'"
+                    )
+                )
+                await db.commit()
+        if os.getenv("MOBILE_INTEGRATION_V3_HTTPS") == "1":
+            import services.dynamic_settings as ds
+            from models.enterprise_config import EnterpriseConfig
+
+            async with async_session() as db:
+                setting = await db.scalar(select(EnterpriseConfig).where(EnterpriseConfig.key == "mobile.auth_enabled"))
+                if setting is not None:
+                    setting.value = "false"
+                    await db.commit()
+            await ds.invalidate("mobile.auth_enabled")
         if session:
             # Remove ClickHouse source before relational identity; async
             # mutations must finish before the temporary actor disappears.
