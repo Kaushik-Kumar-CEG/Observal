@@ -17,6 +17,7 @@ from sqlalchemy import text
 import services.dynamic_settings as ds
 from database import async_session
 from services.clickhouse.client import _query
+from services.mobile_pi_skill_loads import extract_skill_loads
 from services.session_parsers.pi_invocations import PiInvocationExtractor
 
 _MAX_LINES = 10000
@@ -97,6 +98,56 @@ def _revision(rows: list[dict], *, retained_suffix: bool = False) -> str | None:
     return hashlib.sha256(
         json.dumps([[r["line_offset"], r["line_hash"]] for r in rows], separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _matched_skill_loads(
+    loads,
+    rows: list[dict],
+    mappings: dict[str, dict[tuple[str, str], tuple[uuid.UUID, str]]],
+    *,
+    revision: str,
+    run_incarnation: uuid.UUID | None,
+    root: uuid.UUID | None,
+    root_session_id: str | None,
+    root_start: datetime | None,
+) -> tuple[list[dict], bool]:
+    """Only admit a pinned successful read from this exact verified incarnation."""
+    facts = []
+    partial = False
+    by_offset = {r["line_offset"]: r for r in rows}
+    now = datetime.now(UTC)
+    for load in loads:
+        source = by_offset.get(load.offset)
+        pin = mappings.get(source["layer_hash"], {}).get((load.scope, load.alias)) if source else None
+        if (
+            pin is None
+            or load.layer_hash != source["layer_hash"]
+            or pin[1] != load.location_sha256
+            or root is None
+            or run_incarnation is None
+            or root_start is None
+            or load.event_time < root_start
+            or load.event_time > now + timedelta(minutes=5)
+            or rows[0]["line_offset"] != 0
+        ):
+            partial = True
+            continue
+        facts.append(
+            {
+                "source_line_offset": load.offset,
+                "block_key": load.block_key,
+                "layer_hash": source["layer_hash"],
+                "scope": load.scope,
+                "alias": load.alias,
+                "component_id": pin[0],
+                "source_revision": revision,
+                "run_incarnation": run_incarnation,
+                "root_session_id": root_session_id,
+                "root_run_incarnation": root,
+                "event_time": load.event_time,
+            }
+        )
+    return facts, partial
 
 
 def _matched(
@@ -239,6 +290,8 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         )
         status = "pending_source"
         valid: list[dict] = []
+        valid_skills: list[dict] = []
+        skill_mapping: dict[str, dict[tuple[str, str], tuple[uuid.UUID, str]]] = {}
         run = (
             await db.execute(
                 text(
@@ -288,7 +341,7 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                         lineage_start = _source_time(header["timestamp"])  # Calls cannot predate this child.
         if revision is not None:
             hashes = {r.get("layer_hash") for r in rows}
-            if all(isinstance(digest, str) and digest.startswith("v2_") for digest in hashes):
+            if all(isinstance(digest, str) and digest.startswith(("v2_", "v3_")) for digest in hashes):
                 results = (
                     await db.execute(
                         text(
@@ -308,7 +361,28 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                     expected[digest] = count
                     if alias is not None:
                         mapping.setdefault(digest, {})[alias] = component
-                if all(len(mapping.get(digest, {})) == expected.get(digest, -1) for digest in hashes):
+                skill_results = (
+                    await db.execute(
+                        text(
+                            "SELECT l.layer_hash,l.expected_skills,s.scope,s.alias,s.component_id,s.location_sha256 "
+                            "FROM mobile_verified_layers l LEFT JOIN mobile_skill_layer_components s "
+                            "ON s.project_id=l.project_id AND s.user_id=l.user_id AND s.harness=l.harness "
+                            "AND s.layer_hash=l.layer_hash WHERE l.project_id=:project AND l.user_id=:user "
+                            "AND l.harness=:harness AND l.layer_hash=ANY(:hashes)"
+                        ),
+                        {"project": project, "user": owner, "harness": harness, "hashes": list(hashes)},
+                    )
+                ).all()
+                expected_skills: dict[str, int] = {}
+                for digest, count, pin_scope, alias, component, location in skill_results:
+                    expected_skills[digest] = count
+                    if alias is not None:
+                        skill_mapping.setdefault(digest, {})[(pin_scope, alias)] = (component, location)
+                if all(
+                    len(mapping.get(digest, {})) == expected.get(digest, -1)
+                    and len(skill_mapping.get(digest, {})) == expected_skills.get(digest, -1)
+                    for digest in hashes
+                ):
                     extraction = PiInvocationExtractor().extract(rows)
                     valid, partial = _matched(
                         extraction,
@@ -319,7 +393,22 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                         root_start=lineage_start,
                         root_session_id=resolved_root_id,
                     )
-                    status = "partial" if partial or first_source_offset else "complete"
+                    loads, malformed_skills = extract_skill_loads(rows)
+                    valid_skills, unqualified_skills = _matched_skill_loads(
+                        loads,
+                        rows,
+                        skill_mapping,
+                        revision=revision,
+                        run_incarnation=run_incarnation,
+                        root=resolved_root,
+                        root_session_id=resolved_root_id,
+                        root_start=lineage_start,
+                    )
+                    status = (
+                        "partial"
+                        if partial or malformed_skills or unqualified_skills or first_source_offset
+                        else "complete"
+                    )
                 else:
                     status = "pending_mapping"
             else:
@@ -364,7 +453,20 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                 ),
                 {**scope, "resolved_root": resolved_root},
             )
-            if zero_exists and not stale_roots and bool(run.root_verified if run else False) == bool(resolved_root):
+            existing_skills = await db.scalar(
+                text(
+                    "SELECT count(*) FROM mobile_skill_evidence_events WHERE project_id=:project AND user_id=:user "
+                    "AND harness=:harness AND session_id=:session AND source_revision=:revision "
+                    "AND root_run_incarnation=:resolved_root"
+                ),
+                {**scope, "revision": revision, "resolved_root": resolved_root},
+            )
+            if (
+                zero_exists
+                and not stale_roots
+                and existing_skills == len(valid_skills)
+                and bool(run.root_verified if run else False) == bool(resolved_root)
+            ):
                 count = await db.scalar(
                     text(
                         "SELECT count(*) FROM mobile_evidence_events WHERE project_id=:project AND user_id=:user "
@@ -373,7 +475,7 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                     scope,
                 )
                 await db.rollback()
-                return {"status": status, "matched": count or 0}
+                return {"status": status, "matched": (count or 0) + existing_skills}
         old_components = (
             (
                 await db.execute(
@@ -387,8 +489,28 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
             .scalars()
             .all()
         )
+        old_skills = (
+            (
+                await db.execute(
+                    text(
+                        "SELECT DISTINCT component_id FROM mobile_skill_evidence_events WHERE project_id=:project "
+                        "AND user_id=:user AND harness=:harness AND session_id=:session"
+                    ),
+                    scope,
+                )
+            )
+            .scalars()
+            .all()
+        )
         # A source repair, deletion or mapping invalidation revokes the old
         # generation instead of leaving formerly attributed events readable.
+        await db.execute(
+            text(
+                "DELETE FROM mobile_skill_evidence_events WHERE project_id=:project AND user_id=:user "
+                "AND harness=:harness AND session_id=:session"
+            ),
+            scope,
+        )
         await db.execute(
             text(
                 "DELETE FROM mobile_evidence_events WHERE project_id=:project AND user_id=:user "
@@ -431,6 +553,18 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                 ),
                 {**scope, **fact, "run_incarnation": run_incarnation},
             )
+        for fact in valid_skills:
+            await db.execute(
+                text(
+                    "INSERT INTO mobile_skill_evidence_events(project_id,user_id,harness,session_id,source_line_offset,"
+                    "block_key,layer_hash,scope,alias,component_id,source_revision,run_incarnation,"
+                    "root_session_id,root_run_incarnation,event_time,result_state) "
+                    "VALUES (:project,:user,:harness,:session,:source_line_offset,:block_key,:layer_hash,:scope,"
+                    ":alias,:component_id,:source_revision,:run_incarnation,:root_session_id,"
+                    ":root_run_incarnation,:event_time,'success')"
+                ),
+                {**scope, **fact},
+            )
         await db.execute(
             text(
                 "INSERT INTO mobile_session_publications(project_id,user_id,harness,session_id,source_revision,status,first_source_offset) "
@@ -442,6 +576,7 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
             {**scope, "revision": revision or "unknown", "status": status, "first_source_offset": first_source_offset},
         )
         changed_components = set(old_components) | {fact["component_id"] for fact in valid}
+        changed_skills = set(old_skills) | {fact["component_id"] for fact in valid_skills}
         subjects = {(owner, "user")}
         if changed_components:
             authors = (
@@ -458,6 +593,21 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                 .all()
             )
             subjects.update((author, "author") for author in authors)
+        if changed_skills:
+            skill_authors = (
+                (
+                    await db.execute(
+                        text(
+                            "SELECT DISTINCT original_author_id FROM mobile_listing_provenance "
+                            "WHERE kind='skill' AND listing_id=ANY(:ids)"
+                        ),
+                        {"ids": list(changed_skills)},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            subjects.update((author, "author") for author in skill_authors)
         for subject, subject_scope in subjects:
             await db.execute(
                 text(
@@ -501,7 +651,7 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                 {**scope, "run": run.run_incarnation},
             )
         await db.commit()
-    return {"status": status, "matched": len(valid)}
+    return {"status": status, "matched": len(valid) + len(valid_skills)}
 
 
 async def scan_retained_mobile_sources(ctx: dict) -> dict:
@@ -530,7 +680,7 @@ async def scan_retained_mobile_sources(ctx: dict) -> dict:
         result = await _query(
             "SELECT project_id,user_id,session_id,groupUniqArray(101)(layer_hash) AS hashes "
             "FROM session_events FINAL WHERE harness='pi' AND is_source_record=1 "
-            "AND startsWith(layer_hash,'v2_') "
+            "AND (startsWith(layer_hash,'v2_') OR startsWith(layer_hash,'v3_')) "
             f"{source_floor}"
             "AND (project_id,user_id,session_id)>({project:String},{user:String},{session:String}) "
             "GROUP BY project_id,user_id,session_id ORDER BY project_id,user_id,session_id LIMIT 51 "
