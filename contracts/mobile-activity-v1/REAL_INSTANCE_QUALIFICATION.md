@@ -3,6 +3,8 @@
 
 # Real-instance trace qualification (operator gate, not a deployment authorization)
 
+**22:28 UTC additive local-only evidence, no target authorization:** `HISTORY_QUALIFICATION.md` and `scripts/audit_mobile_history.py` can bound a **read-only literal-127.0.0.1** retained Pi candidate scan; central usage-ping and general dashboard totals cannot supply author/user provenance. The new exact running **API/worker** image is `sha256:a20e11c17beb8fd7d5737169b8eee2a6b3ebfc7b695b607713de96f34eefd38e` with a web-complete, 23:58-expiring synthetic Android fixture. **Init migrated with the preceding audit-only image**, so a same-image init/API/worker protected-release gate remains unproven. Current 10K-root triple-repeat warm p95 was **763.5/771.5/362.7 ms**, not a passing 500ms product budget. The new installed Android owner result, complete post-delta full suite, independent human security/privacy review and full-diff user review are not yet signed. Older image/502/first-fixture statements below are historical and do not authorize real-person reads or target inspection.
+
 Run this only with the **instance owner's explicit written permission** for the named server, viewer role, candidate period and aggregate inspection. Do not query private sessions, names, bearer tokens, raw prompts, arguments, transcripts, CA keys or individual source paths for an unapproved cohort. Do not use a synthetic fixture, installation ping, generic session total or a PR test as evidence of live coverage. Record only counts after an approved minimum-cell policy; if a count is below the privacy threshold, record `suppressed`, not its exact value. No step here flips `mobile.auth_enabled`, `trace_headlines`, the read barrier or test-mode allowlists.
 
 ## Deployment and isolation gate
