@@ -21,6 +21,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as crypto from "node:crypto";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
@@ -118,6 +119,11 @@ const RECOVERY_MAX_SESSIONS = 5;
 const RECOVERY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const MAX_LAYER_FILE_SIZE = 512 * 1024;
 const MAX_OUTBOX_BYTES = 256 * 1024 * 1024;
+const HOOK_SCHEMA = "observal-pi-hooks/v1";
+const HOOK_FILE = "observal-hooks.json";
+const HOOK_CLAIMS = Symbol.for("observal.pi.mobile-hook-claims");
+interface RegistryHook { id: string; version: string; name: string; event: "tool_call" | "tool_result";
+  command: string; timeout: number; binding: string }
 
 export function acknowledgementCovers(acknowledgement: unknown, pending: PendingBatch): boolean {
   if (!acknowledgement || typeof acknowledgement !== "object") return false;
@@ -130,8 +136,10 @@ export function acknowledgementCovers(acknowledgement: unknown, pending: Pending
 export default function (pi: ExtensionAPI) {
   let state: ObservalState | null = null;
 
+  let hookRuntime: { hash: string; entries: RegistryHook[] } | null = null;
   pi.on("session_start", async (event, ctx) => {
     state = initState(ctx, event.reason);
+    hookRuntime = loadRegistryHooks();
 
     if (state.config && state.layerSnapshot) {
       // Never report a v2 identity until the legacy snapshot and uploader-bound
@@ -167,6 +175,75 @@ export default function (pi: ExtensionAPI) {
     state = null;
   });
 
+  // The commands execute locally, but ONLY the bounded, non-content receipt
+  // goes into Pi's source JSONL. The session uploader retries that JSONL.
+  async function runHook(entry: RegistryHook, input: string, cwd: string): Promise<number | null> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let child: ReturnType<typeof spawn>;
+      let timer: NodeJS.Timeout | undefined;
+      const finish = (code: number | null) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(code);
+      };
+      try {
+        child = spawn("/bin/sh", ["-c", entry.command], {
+          cwd, env: process.env, detached: true, stdio: ["pipe", "ignore", "ignore"],
+        });
+      } catch { finish(null); return; }
+      timer = setTimeout(() => {
+        try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
+        finish(null);
+      }, entry.timeout * 1000);
+      child.on("error", () => finish(null));
+      child.on("close", (code) => finish(typeof code === "number" ? code : null));
+      child.stdin?.on("error", () => { /* local command need not read input */ });
+      child.stdin?.end(input);
+    });
+  }
+
+  async function runRegistryHooks(event: "tool_call" | "tool_result", payload: Record<string, any>,
+    ctx: ExtensionContext): Promise<{ block: true; reason: string } | undefined> {
+    const session = state;
+    const runtime = hookRuntime;
+    const callId = payload.toolCallId;
+    if (!session || !runtime || typeof callId !== "string" || !callId || callId.length > 256 ||
+        !runtime.entries.some((entry) => entry.event === event)) return undefined;
+    // Detect active-file drift; a changed command cannot retain the old pin.
+    if (loadRegistryHooks()?.hash !== runtime.hash) return undefined;
+    const claims = (globalThis as any)[HOOK_CLAIMS] ??= new Set<string>();
+    const key = `${session.sessionId}\0${event}\0${callId}`;
+    if (claims.has(key)) return undefined;
+    claims.add(key);
+    if (claims.size > 4096) claims.delete(claims.values().next().value);
+    const input = JSON.stringify({ hook_event_name: event === "tool_call" ? "PreToolUse" : "PostToolUse",
+      pi_event: event, session_id: session.sessionId, cwd: ctx.cwd,
+      tool_name: payload.toolName, tool_call_id: callId, tool_input: payload.input ?? {},
+      ...(event === "tool_result" ? { tool_response: { is_error: payload.isError === true } } : {}) });
+    for (const entry of runtime.entries.filter((item) => item.event === event)) {
+      const code = await runHook(entry, input, ctx.cwd);
+      const outcome = code === 0 ? "ran" : code === 2 && event === "tool_call" ? "blocked" : "failed";
+      try {
+        pi.appendEntry("observal-hook-run", { v: 1, event, tool_call_id: callId,
+          binding: entry.binding, outcome, exit_code: code });
+      } catch { /* Never break Pi because the receipt cannot be persisted. */ }
+      if (outcome === "blocked") return { block: true, reason: "Blocked by a registry hook" };
+    }
+    return undefined;
+  }
+
+  pi.on("tool_call", async (event, ctx) => {
+    try { return await runRegistryHooks("tool_call", event as Record<string, any>, ctx); }
+    catch { return undefined; }
+  });
+  pi.on("tool_result", async (event, ctx) => {
+    try { await runRegistryHooks("tool_result", event as Record<string, any>, ctx); }
+    catch { /* Sender must not change tool results on reporting errors. */ }
+    return undefined;
+  });
+
   // ─── /obs-sync command ─────────────────────────────────────────────────
 
   pi.registerCommand("agent", {
@@ -187,6 +264,7 @@ export default function (pi: ExtensionAPI) {
           { name: "AGENTS.md", isDir: false },
           { name: "SYSTEM.md", isDir: false },
           { name: "mcp.json", isDir: false },
+          { name: HOOK_FILE, isDir: false },
           { name: "skills", isDir: true },
           { name: "sandboxes", isDir: true }
         ];
@@ -204,7 +282,7 @@ export default function (pi: ExtensionAPI) {
         const profileDir = path.join(AGENTS_DIR, name);
         if (!fs.existsSync(profileDir)) throw new Error(`Profile ${name} not found`);
 
-        const activeItems = ["AGENTS.md", "SYSTEM.md", "mcp.json", "skills", "sandboxes"];
+        const activeItems = ["AGENTS.md", "SYSTEM.md", "mcp.json", HOOK_FILE, "skills", "sandboxes"];
         for (const f of activeItems) {
           const target = path.join(PI_HOME, f);
           if (fs.existsSync(target)) {
@@ -269,6 +347,7 @@ export default function (pi: ExtensionAPI) {
 
           state.layerSnapshot = buildPiLayerSnapshot();
           state.layerHash = state.layerSnapshot.hash;
+          hookRuntime = loadRegistryHooks();
           if (await uploadLayerSnapshot(state.config, state.layerSnapshot)) {
             await uploadVerifiedLayer(state.config, state);
           } else {
@@ -651,6 +730,42 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  function loadRegistryHooks(): { hash: string; entries: RegistryHook[] } | null {
+    if (process.platform === "win32") return null;
+    const file = path.join(os.homedir(), ".pi", "agent", HOOK_FILE);
+    try {
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.size > MAX_LAYER_FILE_SIZE) return null;
+      const bytes = fs.readFileSync(file);
+      const profile = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      if (profile?.schema !== HOOK_SCHEMA || typeof profile.agent !== "string" ||
+          !profile.agent || !Array.isArray(profile.hooks) || profile.hooks.length > 64) return null;
+      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const version = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,49}$/;
+      const alias = /^[A-Za-z0-9_-]{1,128}$/;
+      const entries: RegistryHook[] = [];
+      for (const item of profile.hooks) {
+        if (!item || typeof item !== "object" || !uuid.test(item.id) || !version.test(item.version) ||
+            !alias.test(item.name) || !["tool_call", "tool_result"].includes(item.event) ||
+            item.type !== "command" || typeof item.command !== "string" || !item.command.trim() ||
+            !Number.isInteger(item.timeout) || item.timeout < 1 || item.timeout > 600) return null;
+        entries.push({ id: item.id.toLowerCase(), version: item.version, name: item.name,
+          event: item.event, command: item.command, timeout: item.timeout,
+          binding: sha256(Buffer.from(`${item.event}\0${item.command}`)) });
+      }
+      if (new Set(entries.map((entry) => entry.id)).size !== entries.length ||
+          new Set(entries.map((entry) => entry.name)).size !== entries.length ||
+          new Set(entries.map((entry) => entry.binding)).size !== entries.length) return null;
+      return { hash: sha256(bytes), entries };
+    } catch { return null; }
+  }
+
+  function registeredHookPins(): Array<{ id: string; version: string; scope: "user"; alias: string;
+    binding_sha256: string }> {
+    return (hookRuntime?.entries ?? []).map(({ id, version, name, binding }) =>
+      ({ id, version, scope: "user", alias: name, binding_sha256: binding }));
+  }
+
   function registeredSkillPins(s: ObservalState): Array<{
     id: string; version: string; scope: "user" | "project"; alias: string;
     location_sha256: string; content_sha256: string;
@@ -696,20 +811,23 @@ export default function (pi: ExtensionAPI) {
   async function uploadVerifiedLayer(config: ObservalConfig, s: ObservalState): Promise<void> {
     const components = registeredMcpPins();
     const skills = registeredSkillPins(s);
-    if (!components.length && !skills.length) return;
-    const canonical = skills.length
+    const hooks = registeredHookPins();
+    if (!components.length && !skills.length && !hooks.length) return;
+    const canonical = skills.length || hooks.length
       ? [...components.map((pin) => ["mcp", pin.id, pin.version, pin.alias]),
           ...skills.map((pin) => ["skill", pin.id, pin.version, pin.scope, pin.alias,
-            pin.location_sha256, pin.content_sha256])].sort((a, b) => {
+            pin.location_sha256, pin.content_sha256]),
+          ...hooks.map((pin) => ["hook", pin.id, pin.version, pin.scope, pin.alias,
+            pin.binding_sha256])].sort((a, b) => {
             const left = JSON.stringify(a);
             const right = JSON.stringify(b);
             return left < right ? -1 : left > right ? 1 : 0;
           })
       : components.map((pin) => [pin.id, pin.version, pin.alias]);
-    const hash = `${skills.length ? "v3" : "v2"}_${sha256(Buffer.from(JSON.stringify(canonical)))}`;
+    const hash = `${skills.length || hooks.length ? "v3" : "v2"}_${sha256(Buffer.from(JSON.stringify(canonical)))}`;
     const receipt = await postJsonWithTimeout(config, "/api/v1/mobile-evidence/v1/layers",
-      JSON.stringify({ harness: "pi", components, ...(skills.length ? { skills } : {}) }));
-    if (receipt?.hash === hash && receipt?.mapped_components === components.length + skills.length) s.layerHash = hash;
+      JSON.stringify({ harness: "pi", components, ...(skills.length ? { skills } : {}), ...(hooks.length ? { hooks } : {}) }));
+    if (receipt?.hash === hash && receipt?.mapped_components === components.length + skills.length + hooks.length) s.layerHash = hash;
   }
 
   function needsLayerUpload(hash: string): boolean {
