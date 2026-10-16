@@ -651,14 +651,65 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  function registeredSkillPins(s: ObservalState): Array<{
+    id: string; version: string; scope: "user" | "project"; alias: string;
+    location_sha256: string; content_sha256: string;
+  }> {
+    const section = currentRegistryLockfile()?.harnesses?.pi;
+    if (!section || typeof section !== "object") return [];
+    const entries = [...(section.standalone ?? []), ...(section.agents ?? []).flatMap((agent: any) => agent.components ?? [])]
+      .filter((pin: any) => pin.type === "skill");
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const alias = /^[A-Za-z0-9_-]{1,128}$/;
+    const version = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,49}$/;
+    const result: Array<{ id: string; version: string; scope: "user" | "project"; alias: string;
+      location_sha256: string; content_sha256: string }> = [];
+    for (const pin of entries) {
+      if (typeof pin.id !== "string" || !uuid.test(pin.id) ||
+          typeof pin.version !== "string" || !version.test(pin.version) ||
+          typeof pin.local_name !== "string" || !alias.test(pin.local_name) ||
+          (pin.scope !== "user" && pin.scope !== "project")) return [];
+      if (pin.scope === "project" && pin.directory !== s.cwd) continue;
+      const root = pin.scope === "user" ? path.join(os.homedir(), ".pi", "agent") : s.cwd;
+      const location = path.join(root, pin.scope === "user" ? "skills" : ".pi/skills", pin.local_name, "SKILL.md");
+      try {
+        // Never follow a symlink to an unrelated file. Content stays local;
+        // the server checks its digest against the approved exact version.
+        const directory = path.dirname(location);
+        if (fs.realpathSync(directory) !== directory || fs.realpathSync(location) !== location) continue;
+        const stat = fs.statSync(location);
+        if (!stat.isFile() || stat.size > MAX_LAYER_FILE_SIZE) continue;
+        const bytes = fs.readFileSync(location);
+        result.push({ id: pin.id.toLowerCase(), version: pin.version, scope: pin.scope,
+          alias: pin.local_name, location_sha256: sha256(Buffer.from(location)), content_sha256: sha256(bytes) });
+      } catch { /* Not an active Pi installation. */ }
+    }
+    if (result.length > 100 || new Set(result.map((pin) => pin.id)).size !== result.length ||
+        new Set(result.map((pin) => pin.alias)).size !== result.length) return [];
+    return result.sort((a, b) => {
+      const left = JSON.stringify([a.id, a.version, a.scope, a.alias]);
+      const right = JSON.stringify([b.id, b.version, b.scope, b.alias]);
+      return left < right ? -1 : left > right ? 1 : 0;
+    });
+  }
+
   async function uploadVerifiedLayer(config: ObservalConfig, s: ObservalState): Promise<void> {
-    const pins = registeredMcpPins();
-    if (!pins.length) return;
-    const canonical = pins.map((pin) => [pin.id, pin.version, pin.alias]);
-    const hash = `v2_${sha256(Buffer.from(JSON.stringify(canonical)))}`;
+    const components = registeredMcpPins();
+    const skills = registeredSkillPins(s);
+    if (!components.length && !skills.length) return;
+    const canonical = skills.length
+      ? [...components.map((pin) => ["mcp", pin.id, pin.version, pin.alias]),
+          ...skills.map((pin) => ["skill", pin.id, pin.version, pin.scope, pin.alias,
+            pin.location_sha256, pin.content_sha256])].sort((a, b) => {
+            const left = JSON.stringify(a);
+            const right = JSON.stringify(b);
+            return left < right ? -1 : left > right ? 1 : 0;
+          })
+      : components.map((pin) => [pin.id, pin.version, pin.alias]);
+    const hash = `${skills.length ? "v3" : "v2"}_${sha256(Buffer.from(JSON.stringify(canonical)))}`;
     const receipt = await postJsonWithTimeout(config, "/api/v1/mobile-evidence/v1/layers",
-      JSON.stringify({ harness: "pi", components: pins }));
-    if (receipt?.hash === hash && receipt?.mapped_components === pins.length) s.layerHash = hash;
+      JSON.stringify({ harness: "pi", components, ...(skills.length ? { skills } : {}) }));
+    if (receipt?.hash === hash && receipt?.mapped_components === components.length + skills.length) s.layerHash = hash;
   }
 
   function needsLayerUpload(hash: string): boolean {
