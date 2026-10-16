@@ -267,7 +267,11 @@ JOIN {pins} map ON map.project_id=e.project_id AND map.user_id=e.user_id
  AND map.harness=e.harness AND map.layer_hash=e.layer_hash AND {pin_identity} AND map.component_id=e.component_id
 JOIN mobile_session_publications pub ON pub.project_id=e.project_id AND pub.user_id=e.user_id
  AND pub.harness=e.harness AND pub.session_id=e.session_id AND pub.status IN ('complete','partial')
+ AND pub.source_retained_until>now()
  {revision_join}
+JOIN mobile_session_publications root_pub ON root_pub.project_id=run.project_id AND root_pub.user_id=run.user_id
+ AND root_pub.harness=run.harness AND root_pub.session_id=run.session_id
+ AND root_pub.status IN ('complete','partial') AND root_pub.source_retained_until>now()
 JOIN {listing} l ON l.id=e.component_id
 JOIN mobile_listing_provenance p ON p.kind='{kind}' AND p.listing_id=l.id
 JOIN users origin ON origin.id=p.original_author_id AND origin.auth_provider!='deactivated'

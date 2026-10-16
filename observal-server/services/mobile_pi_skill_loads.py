@@ -27,6 +27,7 @@ class SkillLoad:
     scope: str
     alias: str
     location_sha256: str
+    content_sha256: str
     event_time: datetime
     layer_hash: str | None
 
@@ -83,7 +84,7 @@ def extract_skill_loads(rows: list[dict]) -> tuple[list[SkillLoad], bool]:
     cwd = cwd if isinstance(cwd, str) else ""
     advertised: dict[str, tuple[str, str]] = {}
     calls: list[tuple[int, int, str, str, str, str, datetime | None, str | None]] = []
-    results: dict[str, list[tuple[int, bool, str | None]]] = {}
+    results: dict[str, list[tuple[int, bool, str | None, str | None]]] = {}
     advertised_generation = None
     for offset, generation, record in parsed:
         if record.get("type") != "message" or not isinstance(record.get("message"), dict):
@@ -118,6 +119,9 @@ def extract_skill_loads(rows: list[dict]) -> tuple[list[SkillLoad], bool]:
                     and location in advertised
                     and isinstance(call_id, str)
                     and 0 < len(call_id) <= 256
+                    and isinstance(args, dict)
+                    and "offset" not in args
+                    and "limit" not in args
                 ):
                     scope, alias = advertised[location]
                     calls.append(
@@ -135,7 +139,25 @@ def extract_skill_loads(rows: list[dict]) -> tuple[list[SkillLoad], bool]:
         elif role == "toolResult":
             call_id = message.get("toolCallId")
             if isinstance(call_id, str) and isinstance(message.get("isError"), bool):
-                results.setdefault(call_id, []).append((offset, message["isError"], generation))
+                content = message.get("content")
+                text = (
+                    content[0].get("text")
+                    if isinstance(content, list)
+                    and len(content) == 1
+                    and isinstance(content[0], dict)
+                    and content[0].get("type") == "text"
+                    else None
+                )
+                digest = None
+                if message.get("toolName") == "read" and isinstance(text, str) and not message.get("details"):
+                    try:
+                        encoded = text.encode("utf-8")
+                    except UnicodeError:
+                        pass  # Malformed source text is unqualified, not a worker retry loop.
+                    else:
+                        if len(encoded) <= 262144:
+                            digest = hashlib.sha256(encoded).hexdigest()
+                results.setdefault(call_id, []).append((offset, message["isError"], generation, digest))
     counts = Counter(call[2] for call in calls)
     facts = []
     for offset, index, call_id, scope, alias, location, stamp, generation in calls:
@@ -146,6 +168,7 @@ def extract_skill_loads(rows: list[dict]) -> tuple[list[SkillLoad], bool]:
             or linked[0][0] <= offset
             or linked[0][1]
             or linked[0][2] != generation
+            or linked[0][3] is None
             or stamp is None
         ):
             malformed = True
@@ -157,6 +180,7 @@ def extract_skill_loads(rows: list[dict]) -> tuple[list[SkillLoad], bool]:
                 scope,
                 alias,
                 hashlib.sha256(location.encode()).hexdigest(),
+                linked[0][3],
                 stamp,
                 generation,
             )

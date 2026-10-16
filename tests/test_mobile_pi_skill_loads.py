@@ -11,6 +11,7 @@ from jobs.mobile_evidence import _matched_skill_loads
 from services.mobile_pi_skill_loads import extract_skill_loads
 
 LOCATION = "/home/synthetic/.pi/agent/skills/review/SKILL.md"
+SKILL_TEXT = "---\nname: review\n---\n# Reviewed content\n"
 TIME = datetime.now(UTC).isoformat()
 
 
@@ -38,7 +39,7 @@ def _system(location=LOCATION):
     }
 
 
-def _read(location=LOCATION, call_id="call1"):
+def _read(location=LOCATION, call_id="call1", **extra_args):
     return {
         "type": "message",
         "timestamp": TIME,
@@ -49,18 +50,24 @@ def _read(location=LOCATION, call_id="call1"):
                     "type": "toolCall",
                     "name": "read",
                     "id": call_id,
-                    "arguments": {"path": location},
+                    "arguments": {"path": location, **extra_args},
                 }
             ],
         },
     }
 
 
-def _result(call_id="call1", error=False):
+def _result(call_id="call1", error=False, content=SKILL_TEXT):
     return {
         "type": "message",
         "timestamp": TIME,
-        "message": {"role": "toolResult", "toolCallId": call_id, "isError": error, "content": []},
+        "message": {
+            "role": "toolResult",
+            "toolCallId": call_id,
+            "toolName": "read",
+            "isError": error,
+            "content": [{"type": "text", "text": content}],
+        },
     }
 
 
@@ -74,9 +81,16 @@ def test_advertised_exact_file_and_unique_later_success_are_a_candidate():
         "review",
     )
     assert loads[0].location_sha256 == hashlib.sha256(LOCATION.encode()).hexdigest()
+    assert loads[0].content_sha256 == hashlib.sha256(SKILL_TEXT.encode()).hexdigest()
 
 
 def test_installation_prompt_failure_duplicate_and_shadow_are_never_a_load():
+    truncated = _result()
+    truncated["message"]["details"] = {"truncation": {"truncated": True}}
+    empty = _result()
+    empty["message"]["content"] = []
+    wrong_tool = _result()
+    wrong_tool["message"]["toolName"] = "bash"
     prompt = {
         "type": "message",
         "timestamp": TIME,
@@ -87,6 +101,11 @@ def test_installation_prompt_failure_duplicate_and_shadow_are_never_a_load():
         (_header(), _read(), _result()),
         (_header(), _system(), _read(), _result(error=True)),
         (_header(), _system(), _read(), _result(), _result()),
+        (_header(), _system(), _read(offset=2), _result()),
+        (_header(), _system(), _read(), _result(content="\ud800")),
+        (_header(), _system(), _read(), truncated),
+        (_header(), _system(), _read(), empty),
+        (_header(), _system(), _read(), wrong_tool),
         (_header(), _system(), _read(LOCATION + "-other"), _result()),
         (
             _header(),
@@ -106,7 +125,11 @@ def test_skill_and_mcp_same_verified_root_are_two_facts_but_one_actor_root_union
     for row in source:
         row["layer_hash"] = "v3_" + "a" * 64
     loads, _ = extract_skill_loads(source)
-    mapping = {source[0]["layer_hash"]: {("user", "review"): (skill_id, loads[0].location_sha256)}}
+    mapping = {
+        source[0]["layer_hash"]: {
+            ("user", "review"): (skill_id, loads[0].location_sha256, hashlib.sha256(SKILL_TEXT.encode()).hexdigest())
+        }
+    }
     facts, partial = _matched_skill_loads(
         loads,
         source,
@@ -122,6 +145,24 @@ def test_skill_and_mcp_same_verified_root_are_two_facts_but_one_actor_root_union
     assert facts[0]["source_revision"] == "b" * 64
     assert facts[0]["root_session_id"] == "root-session"
     assert facts[0]["root_run_incarnation"] == root
+    # A same-path successful read of changed bytes must never reuse the
+    # previously approved skill digest, even within one advertised generation.
+    drifted = _source(_header(), _system(), _read(), _result(content="unapproved replacement"))
+    for row in drifted:
+        row["layer_hash"] = "v3_" + "a" * 64
+    drifted_loads, malformed = extract_skill_loads(drifted)
+    assert not malformed and len(drifted_loads) == 1
+    denied, incomplete = _matched_skill_loads(
+        drifted_loads,
+        drifted,
+        mapping,
+        revision="b" * 64,
+        run_incarnation=root,
+        root=root,
+        root_session_id="root-session",
+        root_start=drifted_loads[0].event_time,
+    )
+    assert not denied and incomplete
     # MCP and skill component rows overlap on one actor/root, not two people traces.
     mcp_fact = {"user_id": "actor", "root_run_incarnation": root, "component_id": uuid.uuid4()}
     assert len({("actor", fact["root_run_incarnation"]) for fact in (mcp_fact, facts[0])}) == 1

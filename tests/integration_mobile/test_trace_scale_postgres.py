@@ -103,8 +103,8 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
         )
         await db.execute(
             text("""
-            INSERT INTO mobile_session_publications(project_id,user_id,harness,session_id,source_revision,status)
-            SELECT project_id,user_id,harness,session_id,repeat('a',64),'complete'
+            INSERT INTO mobile_session_publications(project_id,user_id,harness,session_id,source_revision,status,source_retained_until)
+            SELECT project_id,user_id,harness,session_id,repeat('a',64),'complete',now()+INTERVAL '28 days'
             FROM mobile_run_instances WHERE session_id LIKE 'mobile-scale-%'
         """)
         )

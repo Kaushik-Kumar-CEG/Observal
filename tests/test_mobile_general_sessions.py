@@ -46,7 +46,7 @@ class Db:
     async def scalar(self, query, params):
         if "mobile_run_instances" in str(query):
             return 1 if self.witness else None
-        return 1 if params["hash"] == "v2_" + "a" * 64 else None
+        return 1 if params["hash"] in {"v2_" + "a" * 64, "v3_" + "a" * 64} else None
 
 
 def session_header(session_id, timestamp):
@@ -107,6 +107,18 @@ async def test_unprompted_and_purged_unrelated_sessions_do_not_erase_positive_ro
         "eligible_sessions": 1,
     }
     assert await general.prompted_roots(Db(witness=False), "default", START, END, subject=SUBJECT) is None
+    # v3 skills/hooks do not invalidate a same-uploader, source-verified
+    # prompted root or silently suppress the separately permissioned metric.
+    for record in rows["prompted"]:
+        record["layer_hash"] = "v3_" + "a" * 64
+    assert await general.prompted_roots(Db(), "default", START, END, subject=SUBJECT) == {
+        "active_accounts": 1,
+        "roots": 1,
+        "eligible_sessions": 1,
+    }
+    for record in rows["prompted"]:
+        record["layer_hash"] = "v3_" + "b" * 64
+    assert await general.prompted_roots(Db(), "default", START, END, subject=SUBJECT) is None
 
 
 @pytest.mark.asyncio

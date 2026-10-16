@@ -104,7 +104,7 @@ async def prompted_roots(
                 if layer_key not in verified_layers:
                     verified_layers[layer_key] = bool(
                         isinstance(digest, str)
-                        and digest.startswith("v2_")
+                        and digest.startswith(("v2_", "v3_"))
                         and await db.scalar(
                             text(
                                 "SELECT 1 FROM mobile_verified_layers WHERE project_id=:project "

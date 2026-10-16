@@ -24,7 +24,10 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
     from models import Base
 
     base = make_url(os.environ["DATABASE_URL"])
-    assert (base.host, base.port, base.database) == ("127.0.0.1", 15438, "observal")
+    assert (base.host, base.port, base.database) in {
+        ("127.0.0.1", 15438, "observal"),
+        ("127.0.0.1", 15440, "observal"),
+    }
     name = "mobile_migration_scratch_" + uuid.uuid4().hex[:12]
     admin = create_async_engine(base, isolation_level="AUTOCOMMIT")
     created = False
@@ -62,11 +65,19 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
         try:
             async with verify.connect() as conn:
                 assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == (
-                    "060_mobile_pi_hook_facts"
+                    "061_mobile_source_expiry_floor"
                 )
                 assert (
                     await conn.execute(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'"))
                 ).scalar_one() is True
+                assert (
+                    await conn.execute(
+                        text(
+                            "SELECT count(*) FROM information_schema.columns WHERE table_name='mobile_session_publications' "
+                            "AND column_name='source_retained_until'"
+                        )
+                    )
+                ).scalar_one() == 1
                 assert (
                     await conn.execute(
                         text(

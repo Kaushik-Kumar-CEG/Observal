@@ -101,6 +101,30 @@ def _revision(rows: list[dict], *, retained_suffix: bool = False) -> str | None:
     ).hexdigest()
 
 
+def _source_retained_until(rows: list[dict], revision: str | None) -> datetime | None:
+    """Conservative TTL floor derived from every source row's ClickHouse UTC timestamp.
+
+    Raw_line expires at timestamp + 30 days. The one-day margin ensures a
+    positive typed reading stops before any supporting source row can expire.
+    """
+    if revision is None or not rows or rows[0].get("line_offset") != 0:
+        return None
+    try:
+        times = []
+        for row in rows:
+            value = row["timestamp"]
+            if not isinstance(value, str):
+                return None
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            stamp = stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp.astimezone(UTC)
+            if not 1971 <= stamp.year < 2100:
+                return None
+            times.append(stamp)
+        return min(times) + timedelta(days=29) if times else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _matched_hook_receipts(
     receipts,
     rows: list[dict],
@@ -152,7 +176,7 @@ def _matched_hook_receipts(
 def _matched_skill_loads(
     loads,
     rows: list[dict],
-    mappings: dict[str, dict[tuple[str, str], tuple[uuid.UUID, str]]],
+    mappings: dict[str, dict[tuple[str, str], tuple[uuid.UUID, str, str]]],
     *,
     revision: str,
     run_incarnation: uuid.UUID | None,
@@ -172,6 +196,7 @@ def _matched_skill_loads(
             pin is None
             or load.layer_hash != source["layer_hash"]
             or pin[1] != load.location_sha256
+            or pin[2] != load.content_sha256
             or root is None
             or run_incarnation is None
             or root_start is None
@@ -330,6 +355,7 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
     owner = uuid.UUID(user)
     rows = await _rows(project, user, harness, session)
     revision = _revision(rows or [], retained_suffix=True)
+    retained_until = _source_retained_until(rows or [], revision)
     first_source_offset = rows[0]["line_offset"] if revision is not None else 0
     scope = {"project": project, "user": owner, "harness": harness, "session": session}
     async with async_session() as db:
@@ -341,7 +367,7 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         valid: list[dict] = []
         valid_skills: list[dict] = []
         valid_hooks: list[dict] = []
-        skill_mapping: dict[str, dict[tuple[str, str], tuple[uuid.UUID, str]]] = {}
+        skill_mapping: dict[str, dict[tuple[str, str], tuple[uuid.UUID, str, str]]] = {}
         hook_mapping: dict[str, dict[str, tuple[uuid.UUID, str]]] = {}
         run = (
             await db.execute(
@@ -415,7 +441,7 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                 skill_results = (
                     await db.execute(
                         text(
-                            "SELECT l.layer_hash,l.expected_skills,s.scope,s.alias,s.component_id,s.location_sha256 "
+                            "SELECT l.layer_hash,l.expected_skills,s.scope,s.alias,s.component_id,s.location_sha256,s.content_sha256 "
                             "FROM mobile_verified_layers l LEFT JOIN mobile_skill_layer_components s "
                             "ON s.project_id=l.project_id AND s.user_id=l.user_id AND s.harness=l.harness "
                             "AND s.layer_hash=l.layer_hash WHERE l.project_id=:project AND l.user_id=:user "
@@ -425,10 +451,10 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                     )
                 ).all()
                 expected_skills: dict[str, int] = {}
-                for digest, count, pin_scope, alias, component, location in skill_results:
+                for digest, count, pin_scope, alias, component, location, content_sha256 in skill_results:
                     expected_skills[digest] = count
                     if alias is not None:
-                        skill_mapping.setdefault(digest, {})[(pin_scope, alias)] = (component, location)
+                        skill_mapping.setdefault(digest, {})[(pin_scope, alias)] = (component, location, content_sha256)
                 hook_results = (
                     await db.execute(
                         text(
@@ -503,7 +529,7 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         current = (
             await db.execute(
                 text(
-                    "SELECT source_revision,status,first_source_offset FROM mobile_session_publications "
+                    "SELECT source_revision,status,first_source_offset,source_retained_until FROM mobile_session_publications "
                     "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
                 ),
                 scope,
@@ -514,10 +540,16 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
             if rows and root_witnessed and status == "complete" and not valid and any(mapping.values())
             else None
         )
-        if current and (current.source_revision, current.status, current.first_source_offset) == (
+        if current and (
+            current.source_revision,
+            current.status,
+            current.first_source_offset,
+            current.source_retained_until,
+        ) == (
             revision or "unknown",
             status,
             first_source_offset,
+            retained_until,
         ):
             # Newly upgraded zero-cohort projection may be missing even when
             # positive facts/publication were previously idempotent.
@@ -694,13 +726,21 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
             )
         await db.execute(
             text(
-                "INSERT INTO mobile_session_publications(project_id,user_id,harness,session_id,source_revision,status,first_source_offset) "
-                "VALUES (:project,:user,:harness,:session,:revision,:status,:first_source_offset) "
+                "INSERT INTO mobile_session_publications(project_id,user_id,harness,session_id,source_revision,status,"
+                "first_source_offset,source_retained_until) "
+                "VALUES (:project,:user,:harness,:session,:revision,:status,:first_source_offset,:retained_until) "
                 "ON CONFLICT (project_id,user_id,harness,session_id) DO UPDATE "
                 "SET source_revision=EXCLUDED.source_revision,status=EXCLUDED.status,"
-                "first_source_offset=EXCLUDED.first_source_offset,updated_at=now()"
+                "first_source_offset=EXCLUDED.first_source_offset,"
+                "source_retained_until=EXCLUDED.source_retained_until,updated_at=now()"
             ),
-            {**scope, "revision": revision or "unknown", "status": status, "first_source_offset": first_source_offset},
+            {
+                **scope,
+                "revision": revision or "unknown",
+                "status": status,
+                "first_source_offset": first_source_offset,
+                "retained_until": retained_until,
+            },
         )
         changed_components = set(old_components) | {fact["component_id"] for fact in valid}
         changed_skills = set(old_skills) | {fact["component_id"] for fact in valid_skills}
@@ -776,9 +816,12 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         # after publication preparation; a racing append/repair retries instead
         # of committing an already-stale generation.
         fresh = await _rows(project, user, harness, session)
-        if _revision(fresh or [], retained_suffix=True) != revision:
+        if (
+            _revision(fresh or [], retained_suffix=True) != revision
+            or _source_retained_until(fresh or [], revision) != retained_until
+        ):
             await db.rollback()
-            raise RuntimeError("Mobile source changed during evidence publication")
+            raise RuntimeError("Mobile source or retention floor changed during evidence publication")
         # A parent that becomes qualified after child ingest must cause every
         # admitted direct child to reproject. Each child in turn wakes its own
         # descendants; unrelated roots do not lose their scoped cursor.

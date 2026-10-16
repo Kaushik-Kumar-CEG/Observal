@@ -41,7 +41,10 @@ async def test_pi_linked_skill_load_projects_root_and_replay_and_listing_deletio
     from services.session_ingest import ingest_session_lines
 
     url = make_url(settings.DATABASE_URL)
-    assert (url.host, url.port, url.database) == ("127.0.0.1", 15438, "observal")
+    assert (url.host, url.port, url.database) in {
+        ("127.0.0.1", 15438, "observal"),
+        ("127.0.0.1", 15440, "observal"),
+    }
     marker = uuid.uuid4().hex
     actor = User(
         id=uuid.uuid4(),
@@ -260,7 +263,13 @@ async def test_pi_linked_skill_load_projects_root_and_replay_and_listing_deletio
                 {
                     "type": "message",
                     "timestamp": stamp,
-                    "message": {"role": "toolResult", "toolCallId": "skill-read", "isError": False, "content": []},
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": "skill-read",
+                        "toolName": "read",
+                        "isError": False,
+                        "content": [{"type": "text", "text": content}],
+                    },
                 }
             ),
             json.dumps(
