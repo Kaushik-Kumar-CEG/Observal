@@ -134,7 +134,7 @@ class PairedBatch(BaseModel):
 
 
 class ComponentObservation(BaseModel):
-    kind: Literal["mcp"] = "mcp"
+    kind: Literal["mcp", "skill"] = "mcp"
     component_id: UUID
     name: str
     author: PublicPerson
@@ -278,7 +278,7 @@ async def _authorize(viewer: User, subject_id: UUID, scope: Scope, db: AsyncSess
     return True
 
 
-def _partial(value: int, eligible_sessions: int | None = None) -> Reading:
+def _partial(value: int, eligible_sessions: int | None = None, *, kinds: list[str] | None = None) -> Reading:
     return Reading(
         value=value,
         status="partial",
@@ -286,21 +286,32 @@ def _partial(value: int, eligible_sessions: int | None = None) -> Reading:
         coverage=Coverage(
             eligible_sessions=eligible_sessions,
             supported_harnesses=["pi"],
-            supported_kinds=["mcp_calls"],
+            supported_kinds=kinds if kinds is not None else ["mcp_calls"],
             projection="partial",
         ),
     )
 
 
+def _observed_kinds(observed: dict) -> list[str]:
+    kinds = ["mcp_calls"] if observed.get("calls", 0) or observed.get("eligible_sessions") else []
+    if observed.get("skill_loads", 0):
+        kinds.append("confirmed_skill_loads")
+    return kinds
+
+
 def _component(observed: dict) -> ComponentObservation:
+    kind = observed.get("kind", "mcp")
+    supported = ["confirmed_skill_loads"] if kind == "skill" else ["mcp_calls"]
     return ComponentObservation(
+        kind=kind,
         component_id=observed["id"],
         name=observed["name"],
         author=PublicPerson(
             id=observed["original_author_id"], username=observed["author_username"], name=observed["author_name"]
         ),
-        component_traces=_partial(observed["roots"]),
-        mcp_calls=_partial(observed["calls"]),
+        component_traces=_partial(observed["roots"], kinds=supported),
+        mcp_calls=_partial(observed["calls"]) if kind == "mcp" else Reading(),
+        confirmed_skill_loads=_partial(observed["skill_loads"], kinds=supported) if kind == "skill" else Reading(),
     )
 
 
@@ -339,9 +350,15 @@ async def _summary(
         db, subject_id, scope, str(DEFAULT_PROJECT_ID), window.start, window.end, viewer_self=viewer.id == subject_id
     )
     if observed:
-        summary.component_trace_union = _partial(observed["roots"])
-        summary.mcp_calls = _partial(observed["calls"])
-        summary.active_days_utc = _partial(observed["days"])
+        kinds = (["mcp_calls"] if observed["calls"] else []) + (
+            ["confirmed_skill_loads"] if observed.get("skill_loads", 0) else []
+        )
+        summary.component_trace_union = _partial(observed["roots"], kinds=kinds)
+        if observed["calls"]:
+            summary.mcp_calls = _partial(observed["calls"])
+        if observed.get("skill_loads", 0):
+            summary.confirmed_skill_loads = _partial(observed["skill_loads"], kinds=["confirmed_skill_loads"])
+        summary.active_days_utc = _partial(observed["days"], kinds=kinds)
     elif scope == "user" and viewer.id == subject_id:
         zero = await qualified_zero_subset(db, subject_id, str(DEFAULT_PROJECT_ID), window.start, window.end)
         if zero:
@@ -379,7 +396,7 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
         observed = await trace_union(
             db, viewer.id, "author" if author_viewer else "user", str(DEFAULT_PROJECT_ID), window.start, window.end
         )
-        test_only = observed is not None and observed["roots"] > 0
+        test_only = observed is not None and observed["roots"] > 0 and observed.get("calls", 0) > 0
     return Capabilities(
         server_id=server_id,
         project_id=str(DEFAULT_PROJECT_ID),
@@ -499,8 +516,12 @@ async def person_summaries(
                 if privileged
                 else "restricted",
                 user_revision=await _scope_revision(db, viewer, subject_id, "user", anchor),
-                author_usage=(_partial(author["roots"]) if author else Reading()) if privileged else RestrictedScope(),
-                user_usage=_partial(user["roots"], user.get("eligible_sessions")) if user else Reading(),
+                author_usage=(_partial(author["roots"], kinds=_observed_kinds(author)) if author else Reading())
+                if privileged
+                else RestrictedScope(),
+                user_usage=_partial(user["roots"], user.get("eligible_sessions"), kinds=_observed_kinds(user))
+                if user
+                else Reading(),
             )
         )
     return PairedBatch(window=window, window_anchor=anchor, items=items)
@@ -631,7 +652,10 @@ async def components(
     if cursor:
         claims = _read_cursor(cursor, binding)
         try:
-            after = (int(claims["last_roots"]), UUID(claims["last_id"]))
+            kind = claims["last_kind"]
+            if kind not in ("mcp", "skill"):
+                raise ValueError("invalid component kind")
+            after = (int(claims["last_roots"]), kind, UUID(claims["last_id"]))
         except (ValueError, TypeError, KeyError) as exc:
             raise HTTPException(409, "stale_cursor") from exc
     found = await trace_component_page(
@@ -649,7 +673,16 @@ async def components(
     items = [_component(row) for row in found[:20]]
     more = len(found) > 20
     next_cursor = (
-        _cursor({**binding, "last_roots": found[19]["roots"], "last_id": str(found[19]["id"])}) if more else None
+        _cursor(
+            {
+                **binding,
+                "last_roots": found[19]["roots"],
+                "last_kind": found[19].get("kind", "mcp"),
+                "last_id": str(found[19]["id"]),
+            }
+        )
+        if more
+        else None
     )
     return ComponentPage(
         subject_id=subject_id,
@@ -677,7 +710,7 @@ async def component_detail(
 ):
     if not await _authorize(viewer, subject_id, scope, db):
         return Response(status_code=403)
-    if kind != "mcp" or not await readable(db, str(DEFAULT_PROJECT_ID)):
+    if kind == "hook" or not await readable(db, str(DEFAULT_PROJECT_ID)):
         raise HTTPException(404, "Not found")
     window, anchor = _paired_window(viewer, period, window_anchor)
     revision = await _scope_revision(db, viewer, subject_id, scope, anchor)
@@ -692,9 +725,10 @@ async def component_detail(
         window.end,
         viewer_self=viewer.id == subject_id,
         component=component_id,
+        kind=kind,
         limit=1,
     )
-    if not found:
+    if not found or found[0].get("kind", "mcp") != kind:
         raise HTTPException(404, "Not found")
     return ComponentDetail(
         subject_id=subject_id,

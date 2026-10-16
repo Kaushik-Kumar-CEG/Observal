@@ -176,7 +176,7 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
         page = await trace_component_page(db, AUTHOR, "author", "default", start, end, limit=1)
         print("scale_first_page", page, flush=True)
         assert page and len(page) == 2
-        after = (page[0]["roots"], page[0]["id"])
+        after = (page[0]["roots"], page[0]["kind"], page[0]["id"])
         last = await trace_component_page(db, AUTHOR, "author", "default", start, end, after=after, limit=1)
         print("scale_last_page", last, flush=True)
         assert last and len(last) == 1 and last[0]["id"] == B

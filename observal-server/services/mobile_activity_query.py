@@ -244,34 +244,47 @@ async def qualified_components(
     ]
 
 
-# The prospective trace-first path reads indexed PG facts only. Existing v1
-# functions above retain their bounded source revalidation until the project
-# read-control/TTL/erasure gate is qualified. This is NOT a third projector.
-_TRACE_FROM = """
-FROM mobile_evidence_events e
+# One root projection, with typed facts joined to their own verified pins,
+# original authors and publication transitions. Never a parallel counting API.
+# Only these static table names can enter SQL; input subjects and windows bind.
+_TRACE_TABLES = {
+    "mcp": ("mobile_evidence_events", "mobile_layer_components", "mcp_listings", "mcp_versions"),
+    "skill": ("mobile_skill_evidence_events", "mobile_skill_layer_components", "skill_listings", "skill_versions"),
+}
+
+
+def _trace_from(kind: Literal["mcp", "skill"]) -> str:
+    event, pins, listing, version = _TRACE_TABLES[kind]
+    revision_join = "AND pub.source_revision=e.source_revision" if kind == "skill" else ""
+    return f"""
+FROM {event} e
 JOIN mobile_run_instances run ON run.project_id=e.project_id AND run.user_id=e.user_id
  AND run.harness=e.harness AND run.run_incarnation=e.root_run_incarnation
  AND run.root_verified=true AND run.source_status IN ('complete','partial')
-JOIN mobile_layer_components map ON map.project_id=e.project_id AND map.user_id=e.user_id
+JOIN {pins} map ON map.project_id=e.project_id AND map.user_id=e.user_id
  AND map.harness=e.harness AND map.layer_hash=e.layer_hash AND map.alias=e.alias AND map.component_id=e.component_id
 JOIN mobile_session_publications pub ON pub.project_id=e.project_id AND pub.user_id=e.user_id
  AND pub.harness=e.harness AND pub.session_id=e.session_id AND pub.status IN ('complete','partial')
-JOIN mcp_listings l ON l.id=e.component_id
-JOIN mobile_listing_provenance p ON p.kind='mcp' AND p.listing_id=l.id
+ {revision_join}
+JOIN {listing} l ON l.id=e.component_id
+JOIN mobile_listing_provenance p ON p.kind='{kind}' AND p.listing_id=l.id
 JOIN users origin ON origin.id=p.original_author_id AND origin.auth_provider!='deactivated'
-JOIN mcp_versions v ON v.id=map.version_id AND v.listing_id=l.id
+JOIN {version} v ON v.id=map.version_id AND v.listing_id=l.id
 JOIN users actor ON actor.id=e.user_id AND actor.auth_provider!='deactivated'
 LEFT JOIN (
   SELECT pe.listing_id,pe.version_id,pe.status,pe.recorded_at,
    lead(pe.recorded_at) OVER (PARTITION BY pe.listing_id,pe.version_id
                              ORDER BY pe.recorded_at,pe.id) AS next_recorded_at
-  FROM mobile_publication_events pe WHERE pe.kind='mcp'
+  FROM mobile_publication_events pe WHERE pe.kind='{kind}'
 ) approval ON approval.listing_id=l.id AND approval.version_id=v.id
  AND approval.recorded_at<=e.event_time
  AND (approval.next_recorded_at IS NULL OR approval.next_recorded_at>e.event_time)
 WHERE e.project_id=:project AND e.harness='pi' AND e.event_time>=:start AND e.event_time<:end
  AND e.root_run_incarnation IS NOT NULL
 """
+
+
+_TRACE_FROM = _trace_from("mcp")
 _TRACE_APPROVED = " AND approval.status='approved'"
 
 
@@ -284,6 +297,15 @@ def _trace_scope(scope: Scope, *, viewer_self: bool) -> str:
     if viewer_self:
         return " AND e.user_id=:subject AND ((" + public + ") OR (l.is_private=true AND l.submitted_by=:subject))"
     return " AND e.user_id=:subject AND " + public
+
+
+def _trace_branches(columns: str, scope: Scope, viewer_self: bool, *, kind: str | None = None) -> str:
+    """Same visibility and original-author check independently for each type."""
+    return " UNION ALL ".join(
+        f"SELECT '{item}' AS kind,{columns} " + _trace_from(item) + _trace_scope(scope, viewer_self=viewer_self)
+        for item in _TRACE_TABLES
+        if kind is None or kind == item
+    )
 
 
 async def trace_union(
@@ -306,16 +328,22 @@ async def trace_union(
     if not await readable(db, project):
         return None
     sql = (
-        "SELECT count(DISTINCT (e.user_id,e.root_run_incarnation)) AS roots, "
-        "count(*) AS calls,count(DISTINCT (e.event_time AT TIME ZONE 'UTC')::date) AS days "
-        + _TRACE_FROM
-        + _trace_scope(scope, viewer_self=viewer_self)
+        "SELECT count(DISTINCT (typed.user_id,typed.root_run_incarnation)) AS roots, "
+        "count(*) FILTER (WHERE typed.kind='mcp') AS calls, "
+        "count(*) FILTER (WHERE typed.kind='skill') AS skill_loads, "
+        "count(DISTINCT (typed.event_time AT TIME ZONE 'UTC')::date) AS days FROM ("
+        + _trace_branches("e.user_id,e.root_run_incarnation,e.event_time", scope, viewer_self)
+        + ") typed"
     )
     # A concentrated original author otherwise provokes one nested lookup per
     # event into run, publication and account tables (10K+ repeated lookups).
     await db.execute(text("SET LOCAL enable_nestloop=off"))
     row = (await db.execute(text(sql), {"project": project, "subject": subject, "start": start, "end": end})).one()
-    return {"roots": row.roots, "calls": row.calls, "days": row.days} if row.roots else None
+    return (
+        {"roots": row.roots, "calls": row.calls, "skill_loads": row.skill_loads, "days": row.days}
+        if row.roots
+        else None
+    )
 
 
 async def trace_pair_batch(
@@ -337,21 +365,27 @@ async def trace_pair_batch(
     # The materialized CTE prevents repeated run/visibility/approval lookups
     # when both scopes are requested in the same viewport. It contains only
     # actors/authors on the requested 12 IDs, not the global evidence corpus.
-    sql = (
-        "WITH eligible AS MATERIALIZED (SELECT e.user_id,e.root_run_incarnation,e.event_time,"
+    branches = " UNION ALL ".join(
+        f"SELECT '{kind}' AS kind,e.user_id,e.root_run_incarnation,e.event_time,"
         "p.original_author_id,l.is_private,l.submitted_by,v.status AS version_status,"
         "approval.status AS publication_status "
-        + _TRACE_FROM
+        + _trace_from(kind)
         + " AND ((:include_author AND p.original_author_id=ANY(CAST(:subjects AS uuid[]))) "
-        "OR e.user_id=ANY(CAST(:subjects AS uuid[])))) "
+        "OR e.user_id=ANY(CAST(:subjects AS uuid[])))"
+        for kind in _TRACE_TABLES
+    )
+    sql = (
+        "WITH eligible AS MATERIALIZED (" + branches + ") "
         "SELECT 'author' AS scope_name,original_author_id AS subject,"
-        "count(DISTINCT (user_id,root_run_incarnation)) AS roots,count(*) AS calls,"
+        "count(DISTINCT (user_id,root_run_incarnation)) AS roots,"
+        "count(*) FILTER (WHERE kind='mcp') AS calls,count(*) FILTER (WHERE kind='skill') AS skill_loads,"
         "count(DISTINCT (event_time AT TIME ZONE 'UTC')::date) AS days "
         "FROM eligible WHERE :include_author AND original_author_id=ANY(CAST(:subjects AS uuid[])) "
         "AND is_private=false AND version_status IN ('approved','archived') "
         "AND publication_status='approved' GROUP BY original_author_id "
         "UNION ALL SELECT 'user' AS scope_name,user_id AS subject,"
-        "count(DISTINCT (user_id,root_run_incarnation)) AS roots,count(*) AS calls,"
+        "count(DISTINCT (user_id,root_run_incarnation)) AS roots,"
+        "count(*) FILTER (WHERE kind='mcp') AS calls,count(*) FILTER (WHERE kind='skill') AS skill_loads,"
         "count(DISTINCT (event_time AT TIME ZONE 'UTC')::date) AS days "
         "FROM eligible WHERE user_id=ANY(CAST(:subjects AS uuid[])) "
         "AND ((is_private=false AND version_status IN ('approved','archived') "
@@ -371,6 +405,7 @@ async def trace_pair_batch(
             (authors if row.scope_name == "author" else users)[row.subject] = {
                 "roots": row.roots,
                 "calls": row.calls,
+                "skill_loads": row.skill_loads,
                 "days": row.days,
             }
     return authors, users
@@ -385,8 +420,9 @@ async def trace_component_page(
     end: datetime,
     *,
     viewer_self: bool = False,
-    after: tuple[int, uuid.UUID] | None = None,
+    after: tuple[int, str, uuid.UUID] | None = None,
     component: uuid.UUID | None = None,
+    kind: Literal["mcp", "skill"] | None = None,
     limit: int = 20,
 ) -> list[dict] | None:
     """Indexed PG fact aggregation with stable reach/id keyset, 21-row probe."""
@@ -402,20 +438,30 @@ async def trace_component_page(
     after_sql = ""
     if after:
         after_sql = (
-            " HAVING count(DISTINCT (e.user_id,e.root_run_incarnation))<:after_roots OR "
-            "(count(DISTINCT (e.user_id,e.root_run_incarnation))=:after_roots AND l.id>:after_id)"
+            " HAVING count(DISTINCT (typed.user_id,typed.root_run_incarnation))<:after_roots OR "
+            "(count(DISTINCT (typed.user_id,typed.root_run_incarnation))=:after_roots "
+            "AND (typed.kind,typed.id)>(:after_kind,:after_id))"
         )
-        params.update(after_roots=after[0], after_id=after[1])
-    sql = (
-        "SELECT l.id,l.name,p.original_author_id,origin.username AS author_username, "
-        "origin.name AS author_name, "
-        "count(DISTINCT (e.user_id,e.root_run_incarnation)) AS roots, count(*) AS calls "
-        + _TRACE_FROM
+        params.update(after_roots=after[0], after_kind=after[1], after_id=after[2])
+    branches = " UNION ALL ".join(
+        f"SELECT '{item}' AS kind,l.id,l.name,p.original_author_id,origin.username AS author_username,"
+        "origin.name AS author_name,e.user_id,e.root_run_incarnation "
+        + _trace_from(item)
         + _trace_scope(scope, viewer_self=viewer_self)
         + component_sql
-        + " GROUP BY l.id,l.name,p.original_author_id,origin.username,origin.name"
+        for item in _TRACE_TABLES
+        if kind is None or item == kind
+    )
+    sql = (
+        "SELECT typed.kind,typed.id,typed.name,typed.original_author_id,"
+        "typed.author_username,typed.author_name,"
+        "count(DISTINCT (typed.user_id,typed.root_run_incarnation)) AS roots,"
+        "count(*) FILTER (WHERE typed.kind='mcp') AS calls,"
+        "count(*) FILTER (WHERE typed.kind='skill') AS skill_loads "
+        "FROM (" + branches + ") typed "
+        "GROUP BY typed.kind,typed.id,typed.name,typed.original_author_id,typed.author_username,typed.author_name"
         + after_sql
-        + " ORDER BY roots DESC,l.id LIMIT :limit"
+        + " ORDER BY roots DESC,typed.kind,typed.id LIMIT :limit"
     )
     await db.execute(text("SET LOCAL enable_nestloop=off"))
     return [dict(row._mapping) for row in (await db.execute(text(sql), params)).all()]

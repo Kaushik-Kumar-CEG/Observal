@@ -434,6 +434,61 @@ async def test_nested_component_wire_and_direct_id_authorization(app, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_permissioned_skill_detail_and_positive_only_summary_keep_other_kinds_unrecorded(app, monkeypatch):
+    from api.routes import mobile_activity as activity
+
+    api, viewer, other, db, enabled = app
+    skill_id = uuid.uuid4()
+    row = {
+        "kind": "skill",
+        "id": skill_id,
+        "name": "Synthetic skill",
+        "calls": 0,
+        "skill_loads": 2,
+        "roots": 1,
+        "original_author_id": other.id,
+        "author_username": "original",
+        "author_name": "Synthetic",
+    }
+    monkeypatch.setattr(activity, "_paired_window", lambda *_args: (activity._window("1w"), "anchor"))
+    monkeypatch.setattr(activity, "_scope_revision", AsyncMock(return_value="rev"))
+    monkeypatch.setattr(activity, "trace_component_page", AsyncMock(return_value=[row]))
+    monkeypatch.setattr(
+        activity,
+        "trace_union",
+        AsyncMock(
+            return_value={
+                "roots": 1,
+                "calls": 0,
+                "skill_loads": 2,
+                "days": 1,
+            }
+        ),
+    )
+    monkeypatch.setattr(activity, "prompted_roots", AsyncMock(return_value=None))
+    db.scalar.return_value = SimpleNamespace(id=viewer.id, name="Synthetic")
+    base = f"/api/v1/mobile-activity/v1/people/{viewer.id}/user"
+    suffix = "?period=1w&window_anchor=anchor&expected_revision=rev"
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
+        page = await c.get(f"{base}/components{suffix}")
+        detail = await c.get(f"{base}/components/skill/{skill_id}{suffix}")
+        mismatched = await c.get(f"{base}/components/mcp/{skill_id}{suffix}")
+        summary = await c.get(f"/api/v1/mobile-activity/v1/people/{viewer.id}/summary?scope=user&period=1w")
+    assert page.status_code == detail.status_code == summary.status_code == 200
+    assert mismatched.status_code == 404
+    assert_wire("ComponentPage", page.json())
+    assert_wire("ComponentDetail", detail.json())
+    assert_wire("PersonSummary", summary.json())
+    component = detail.json()["component"]
+    assert component["kind"] == "skill" and component["confirmed_skill_loads"]["value"] == 2
+    assert component["mcp_calls"]["value"] is None
+    assert summary.json()["component_trace_union"]["value"] == 1
+    assert summary.json()["confirmed_skill_loads"]["value"] == 2
+    assert summary.json()["mcp_calls"]["value"] is None
+    assert summary.json()["recorded_hook_runs"]["value"] is None
+
+
+@pytest.mark.asyncio
 async def test_paired_author_and_user_are_independent_root_unions_in_one_batch(app, monkeypatch):
     from api.routes import mobile_activity as activity
 

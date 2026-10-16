@@ -15,6 +15,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -33,6 +34,7 @@ async def test_pi_linked_skill_load_projects_root_and_replay_and_listing_deletio
     from models.skill import SkillListing, SkillVersion
     from models.user import User, UserRole
     from services.clickhouse.client import _query
+    from services.mobile_activity_query import trace_component_page, trace_pair_batch, trace_union
     from services.mobile_run_identity import admit_pi_run
     from services.session_ingest import ingest_session_lines
 
@@ -275,6 +277,86 @@ async def test_pi_linked_skill_load_projects_root_and_replay_and_listing_deletio
                 {"id": author.id},
             )
             assert user_epoch is not None and author_epoch is not None
+        # Override the read *function only in this process*. The project read
+        # barrier remains blocked for every actual API/phone and other user.
+        with patch("services.mobile_read_control.readable", new=AsyncMock(return_value=True)):
+            async with async_session() as db:
+                lower, upper = start - timedelta(minutes=1), start + timedelta(minutes=1)
+                user = await trace_union(db, actor.id, "user", "default", lower, upper, viewer_self=True)
+                author_read = await trace_union(db, author.id, "author", "default", lower, upper)
+                assert user == author_read == {"roots": 1, "calls": 1, "skill_loads": 1, "days": 1}
+                authors, users = await trace_pair_batch(db, [actor.id, author.id], author.id, "default", lower, upper)
+                assert (
+                    authors[author.id]["roots"],
+                    authors[author.id]["calls"],
+                    authors[author.id]["skill_loads"],
+                ) == (1, 1, 1)
+                assert (users[actor.id]["roots"], users[actor.id]["calls"], users[actor.id]["skill_loads"]) == (1, 1, 1)
+                page = await trace_component_page(db, actor.id, "user", "default", lower, upper, viewer_self=True)
+                assert len(page) == 2 and {row["kind"] for row in page} == {"mcp", "skill"}
+                assert {row["roots"] for row in page} == {1}
+                remaining = await trace_component_page(
+                    db,
+                    actor.id,
+                    "user",
+                    "default",
+                    lower,
+                    upper,
+                    viewer_self=True,
+                    after=(page[0]["roots"], page[0]["kind"], page[0]["id"]),
+                    limit=1,
+                )
+                assert [entry["kind"] for entry in remaining] == ["skill"]
+                skill_detail = await trace_component_page(
+                    db,
+                    actor.id,
+                    "user",
+                    "default",
+                    lower,
+                    upper,
+                    viewer_self=True,
+                    component=component.id,
+                    kind="skill",
+                    limit=1,
+                )
+                assert skill_detail[0]["skill_loads"] == 1 and skill_detail[0]["calls"] == 0
+                assert not await trace_component_page(
+                    db,
+                    actor.id,
+                    "user",
+                    "default",
+                    lower,
+                    upper,
+                    viewer_self=True,
+                    component=component.id,
+                    kind="mcp",
+                    limit=1,
+                )
+                # Privacy and review changes must drop this kind from BOTH
+                # scopes, but not touch the overlapping MCP root.
+                await db.execute(text("UPDATE skill_listings SET is_private=true WHERE id=:id"), {"id": component.id})
+                await db.commit()
+                assert await trace_union(db, author.id, "author", "default", lower, upper) == {
+                    "roots": 1,
+                    "calls": 1,
+                    "skill_loads": 0,
+                    "days": 1,
+                }
+                assert await trace_union(db, actor.id, "user", "default", lower, upper, viewer_self=True) == {
+                    "roots": 1,
+                    "calls": 1,
+                    "skill_loads": 0,
+                    "days": 1,
+                }
+                assert not await trace_component_page(
+                    db, author.id, "author", "default", lower, upper, component=component.id, kind="skill"
+                )
+                await db.execute(text("UPDATE skill_listings SET is_private=false WHERE id=:id"), {"id": component.id})
+                await db.execute(text("UPDATE skill_versions SET status='rejected' WHERE id=:id"), {"id": version.id})
+                await db.commit()
+                assert (await trace_union(db, author.id, "author", "default", lower, upper))["skill_loads"] == 0
+                await db.execute(text("UPDATE skill_versions SET status='approved' WHERE id=:id"), {"id": version.id})
+                await db.commit()
         assert (await project_pi_session({}, "default", str(actor.id), "pi", session))["matched"] == 2
         async with async_session() as db:
             assert (
