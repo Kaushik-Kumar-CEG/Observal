@@ -10,6 +10,7 @@ identifiers or transcript bytes leave this module's returned aggregate.
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -223,6 +224,7 @@ async def audit_local_history(project: str = "default", *, limit: int = 50, now:
     counts = {
         (period, harness, kind): 0 for period in ("1w", "1m") for harness in ("pi", "unsupported") for kind in _KINDS
     }
+    legacy_counts = {(period, scope): 0 for period in ("1w", "1m") for scope in ("user", "author")}
     async with async_session() as db:
         await db.execute(text("SET TRANSACTION READ ONLY"))
         for source in sources:
@@ -252,7 +254,46 @@ async def audit_local_history(project: str = "default", *, limit: int = 50, now:
                     {"project": project, "user": user, "session": session},
                 )
             ).first()
-            if not rows or not _root_source(rows, run, session, now):
+            if not rows:
+                continue
+            if (
+                run is None
+                and isinstance(rows[0].get("layer_hash"), str)
+                and re.fullmatch(r"[0-9a-f]{16}", rows[0]["layer_hash"])
+            ):
+                # Historical proof is strictly separate from witnessed v2/v3
+                # facts. Never publish this preview through the phone routes.
+                from services.mobile_legacy_attribution import legacy_mcp_candidates, qualify_legacy_mcp
+
+                response = await _query(
+                    "SELECT hash,project_id,user_id,harness,content,uploaded_at FROM layer_snapshots FINAL "
+                    "WHERE project_id={project:String} AND user_id={user:String} AND hash={hash:String} "
+                    "LIMIT 2 SETTINGS max_execution_time=5,max_result_bytes=6000000,result_overflow_mode='throw' FORMAT JSON",
+                    {"param_project": project, "param_user": str(user), "param_hash": rows[0]["layer_hash"]},
+                )
+                response.raise_for_status()
+                snapshots = response.json().get("data", [])
+                if len(snapshots) == 1:
+                    calls = legacy_mcp_candidates(
+                        rows,
+                        snapshots[0],
+                        project=project,
+                        uploader=user,
+                        session=session,
+                        now=now,
+                        modern_run_exists=False,
+                    )
+                    qualified = await qualify_legacy_mcp(db, calls)
+                    for period, days in (("1w", 7), ("1m", 30)):
+                        recent = [
+                            item for item in qualified if now - timedelta(days=days) <= item.candidate.event_time < now
+                        ]
+                        if recent:
+                            legacy_counts[(period, "user")] += 1
+                        if any(item.author_id is not None for item in recent):
+                            legacy_counts[(period, "author")] += 1
+                continue
+            if not _root_source(rows, run, session, now):
                 continue  # child/missing root lineage remains unknown, not zero
             for kind, stamps in (await _candidates(db, project, user, rows, run, now)).items():
                 for period, days in (("1w", 7), ("1m", 30)):
@@ -275,7 +316,21 @@ async def audit_local_history(project: str = "default", *, limit: int = 50, now:
         "source_sessions_examined": len(sources) if len(sources) >= 5 else "suppressed",
         "periods": {
             period: {
-                harness: {kind: bucket(period, harness, kind) for kind in _KINDS} for harness in ("pi", "unsupported")
+                **{
+                    harness: {kind: bucket(period, harness, kind) for kind in _KINDS}
+                    for harness in ("pi", "unsupported")
+                },
+                "legacy_pi": {
+                    scope: {
+                        "status": "partial_candidate"
+                        if legacy_counts[(period, scope)] >= 5
+                        else "not_recorded_or_suppressed",
+                        "candidate_roots": legacy_counts[(period, scope)]
+                        if legacy_counts[(period, scope)] >= 5
+                        else None,
+                    }
+                    for scope in ("user", "author")
+                },
             }
             for period in ("1w", "1m")
         },

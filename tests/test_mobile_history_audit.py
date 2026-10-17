@@ -228,6 +228,68 @@ async def test_history_audit_outputs_only_small_cell_suppression_and_never_write
 
 
 @pytest.mark.asyncio
+async def test_legacy_audit_never_publishes_author_without_original_author_and_suppresses_small_cells(monkeypatch):
+    from services import mobile_legacy_attribution as legacy
+
+    now = datetime.now(UTC)
+
+    class Response:
+        def __init__(self, data):
+            self.data = data
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": self.data}
+
+    sessions = [{"user_id": str(ACTOR), "session_id": f"old-{i}", "harness": "pi"} for i in range(5)]
+
+    async def query(sql, params):
+        if "layer_snapshots FINAL" in sql:
+            return Response([{"hash": "a" * 16}])
+        assert "session_events FINAL" in sql
+        return Response(sessions)
+
+    class DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def execute(self, sql, params=None):
+            assert not any(word in str(sql) for word in ("INSERT", "UPDATE", "DELETE"))
+            if "SET TRANSACTION READ ONLY" in str(sql):
+                return Result([])
+            assert "mobile_run_instances" in str(sql)
+            return SimpleNamespace(first=lambda: None)
+
+        async def scalar(self, sql, params=None):
+            return 1
+
+        async def rollback(self):
+            pass
+
+    async def rows(*args):
+        return [{"layer_hash": "a" * 16}]
+
+    async def qualified(*args):
+        return [SimpleNamespace(candidate=SimpleNamespace(event_time=now - timedelta(minutes=1)), author_id=None)]
+
+    monkeypatch.setattr(audit, "_query", query)
+    monkeypatch.setattr(audit, "async_session", DB)
+    monkeypatch.setattr(audit, "_rows", rows)
+    monkeypatch.setattr(legacy, "legacy_mcp_candidates", lambda *args, **kwargs: [1])
+    monkeypatch.setattr(legacy, "qualify_legacy_mcp", qualified)
+    result = await audit.audit_local_history(now=now)
+    assert result["periods"]["1w"]["legacy_pi"]["user"] == {"status": "partial_candidate", "candidate_roots": 5}
+    assert result["periods"]["1w"]["legacy_pi"]["author"]["candidate_roots"] is None
+    sessions.pop()
+    assert (await audit.audit_local_history(now=now))["periods"]["1w"]["legacy_pi"]["user"]["candidate_roots"] is None
+
+
+@pytest.mark.asyncio
 async def test_history_audit_overflow_refuses_to_publish_any_partial_period_count(monkeypatch):
     class Response:
         def raise_for_status(self):

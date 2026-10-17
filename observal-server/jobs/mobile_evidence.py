@@ -294,7 +294,7 @@ async def _rows(project: str, user: str, harness: str, session: str) -> list[dic
     if int(result.get("n") or 0) > _MAX_LINES or int(result.get("bytes") or 0) > _MAX_BYTES:
         return None
     response = await _query(
-        f"SELECT project_id,user_id,harness,session_id,line_offset,line_hash,raw_line,raw_line_truncated,"
+        f"SELECT project_id,user_id,harness,session_id,line_offset,line_hash,source_sha256,raw_line,raw_line_truncated,"
         f"layer_hash,parent_session_id,is_source_record,event_type,timestamp FROM session_events FINAL WHERE {_PARAMS} "
         f"AND is_source_record=1 ORDER BY line_offset LIMIT {_MAX_LINES + 1} FORMAT JSON",
         params,

@@ -9,13 +9,14 @@ reading is unknown, never a fabricated zero.
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jobs.mobile_evidence import _revision, _rows
+from jobs.mobile_evidence import _revision, _rows, _source_retained_until
 from models.user import User
 from services.clickhouse.client import _query
 
@@ -84,6 +85,7 @@ async def prompted_roots(
 
     cache: dict[tuple[str, str], list[dict] | None] = {}
     verified_layers: dict[tuple[str, str], bool] = {}
+    source_modes: dict[tuple[str, str], str] = {}
     source_bytes = 0
 
     async def source(user_id: str, session_id: str) -> list[dict] | None:
@@ -96,26 +98,38 @@ async def prompted_roots(
             if _revision(records or []) is None:
                 cache[key] = None
                 return None
-            # A valid source alone does not establish an upgraded, uploader-
-            # bound sender. Legacy/unregistered hashes must not manufacture
-            # phone or platform root counts.
-            for digest in {row.get("layer_hash") for row in records}:
-                layer_key = (user_id, digest)
-                if layer_key not in verified_layers:
-                    verified_layers[layer_key] = bool(
-                        isinstance(digest, str)
-                        and digest.startswith(("v2_", "v3_"))
-                        and await db.scalar(
-                            text(
-                                "SELECT 1 FROM mobile_verified_layers WHERE project_id=:project "
-                                "AND user_id=:user AND harness='pi' AND layer_hash=:hash"
-                            ),
-                            {"project": project, "user": uuid.UUID(user_id), "hash": digest},
-                        )
-                    )
-                if not verified_layers[layer_key]:
+            digests = {row.get("layer_hash") for row in records}
+            legacy = bool(digests) and all(
+                isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{16}", digest) for digest in digests
+            )
+            if legacy:
+                # Old pre-pin uploads may support *only* the uploader's own
+                # observed general prompted roots. No component or Author
+                # identity is inferred, and a mixed old/new source is denied.
+                until = _source_retained_until(records, _revision(records))
+                if until is None or until <= datetime.now(UTC):
                     cache[key] = None
                     return None
+                source_modes[key] = "legacy"
+            else:
+                for digest in digests:
+                    layer_key = (user_id, digest)
+                    if layer_key not in verified_layers:
+                        verified_layers[layer_key] = bool(
+                            isinstance(digest, str)
+                            and digest.startswith(("v2_", "v3_"))
+                            and await db.scalar(
+                                text(
+                                    "SELECT 1 FROM mobile_verified_layers WHERE project_id=:project "
+                                    "AND user_id=:user AND harness='pi' AND layer_hash=:hash"
+                                ),
+                                {"project": project, "user": uuid.UUID(user_id), "hash": digest},
+                            )
+                        )
+                    if not verified_layers[layer_key]:
+                        cache[key] = None
+                        return None
+                source_modes[key] = "verified"
             size = sum(len(row["raw_line"].encode("utf-8")) for row in records)
             if source_bytes + size > 8 * 1024 * 1024:
                 cache[key] = None
@@ -177,7 +191,25 @@ async def prompted_roots(
             if len(parents) > 1 or (parents and any(row.get("parent_session_id") not in parents for row in lines)):
                 break
             if not parents:
-                witnessed = await db.scalar(
+                legacy_root = source_modes.get((user_id, current)) == "legacy"
+                if legacy_root:
+                    # No prospective runtime nonce exists on old source. Its
+                    # complete, parent-free header is a *lower-bound observed*
+                    # general root only when no new run identity already owns
+                    # the session. The caller still applies self-User or the
+                    # platform minimum-cell gate.
+                    if header.get("parentSession") or any(row.get("parent_session_id") for row in lines):
+                        break
+                    existing_run = await db.scalar(
+                        text(
+                            "SELECT 1 FROM mobile_run_instances WHERE project_id=:project AND user_id=:user "
+                            "AND harness='pi' AND session_id=:session LIMIT 1"
+                        ),
+                        {"project": project, "user": uuid.UUID(user_id), "session": current},
+                    )
+                    if existing_run:
+                        break
+                witnessed = legacy_root or await db.scalar(
                     text(
                         "SELECT 1 FROM mobile_run_instances WHERE project_id=:project AND user_id=:user "
                         "AND harness='pi' AND session_id=:session AND root_verified=true "

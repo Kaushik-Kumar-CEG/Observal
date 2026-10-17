@@ -12,7 +12,7 @@ import pytest
 from services import mobile_general_sessions as general
 
 SUBJECT = uuid.UUID("11111111-1111-4111-8111-111111111111")
-END = datetime(2026, 9, 30, tzinfo=UTC)
+END = datetime.now(UTC).replace(microsecond=0)
 START = END - timedelta(days=7)
 
 
@@ -64,6 +64,7 @@ def line(offset, kind, timestamp, *, parent=None, content="prompt"):
         "raw_line_truncated": False,
         "raw_line": json.dumps({"type": "message", "timestamp": timestamp, "message": message}),
         "event_type": kind,
+        "timestamp": timestamp,
         "parent_session_id": parent,
     }
 
@@ -151,6 +152,36 @@ async def test_legacy_or_unregistered_sender_cannot_create_general_or_platform_c
     assert await general.prompted_roots(Db(), "default", START, END, subject=SUBJECT) is None
     header["layer_hash"] = row["layer_hash"] = "v2_" + "b" * 64
     assert await general.prompted_roots(Db(), "default", START, END) is None
+
+
+@pytest.mark.asyncio
+async def test_complete_old_unpinned_root_is_self_general_partial_only_and_never_duplicates_verified_run(monkeypatch):
+    timestamp = (END - timedelta(days=1)).isoformat()
+    root = session_header("old-root", timestamp)
+    prompt = line(1, "user_prompt", timestamp)
+    for record in (root, prompt):
+        record["layer_hash"] = "a" * 16  # Older Pi upload hash, never a v2/v3 component pin.
+    rows = [root, prompt]
+    monkeypatch.setattr(
+        general,
+        "_query",
+        AsyncMock(return_value=Response([{"user_id": str(SUBJECT), "session_id": "old-root"}])),
+    )
+    monkeypatch.setattr(general, "_rows", AsyncMock(side_effect=lambda *_: rows))
+    assert await general.prompted_roots(Db(witness=False), "default", START, END, subject=SUBJECT) == {
+        "active_accounts": 1,
+        "roots": 1,
+        "eligible_sessions": 1,
+    }
+    assert await general.prompted_roots(Db(witness=True), "default", START, END, subject=SUBJECT) is None
+    prompt["layer_hash"] = "v2_" + "a" * 64
+    assert await general.prompted_roots(Db(witness=False), "default", START, END, subject=SUBJECT) is None
+    prompt["layer_hash"] = "a" * 16
+    root["timestamp"] = (END - timedelta(days=35)).isoformat()
+    assert await general.prompted_roots(Db(witness=False), "default", START, END, subject=SUBJECT) is None
+    root["timestamp"] = timestamp
+    root["parent_session_id"] = "unknown-parent"
+    assert await general.prompted_roots(Db(witness=False), "default", START, END, subject=SUBJECT) is None
 
 
 @pytest.mark.asyncio

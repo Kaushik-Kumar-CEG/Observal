@@ -81,6 +81,23 @@ assert.match(String(ingestPayloads[0].run_incarnation), /^[0-9a-f-]{36}$/);
 assert.match(String(ingestPayloads[0].run_header_hash), /^[0-9a-f]{64}$/);
 assert.equal(ingestPayloads[0].run_origin, "pi_session_start_root_v1",
   "only a fresh Pi runtime session_start plus unparented header may claim root origin");
+const cached = JSON.parse(fs.readFileSync(path.join(observalDir, "layer_snapshot.json"), "utf-8"));
+assert.equal(cached.uploaded_to, crypto.createHash("sha256").update(origin).digest("hex"));
+assert.ok(!fs.readFileSync(path.join(observalDir, "layer_snapshot.json"), "utf-8").includes(origin),
+  "do not persist server URL or any embedded URL credentials in cache");
+assert.equal(cached.uploaded_by, "user");
+assert.equal(fs.statSync(path.join(observalDir, "layer_snapshot.json")).mode & 0o077, 0,
+  "snapshot cache carries account binding and must remain private");
+const acknowledgedSnapshots = snapshotRequests.length;
+await handlers.get("session_start")!({ reason: "reload" }, context);
+assert.equal(snapshotRequests.length, acknowledgedSnapshots, "same account and digest reuse acknowledged snapshot");
+fs.writeFileSync(path.join(observalDir, "config.json"),
+  JSON.stringify({ server_url: origin, access_token: "desktop-token", user_id: "different-user" }));
+await handlers.get("session_start")!({ reason: "reload" }, context);
+assert.equal(snapshotRequests.length, acknowledgedSnapshots + 1,
+  "same local hash must be uploaded for a different authenticated account");
+fs.writeFileSync(path.join(observalDir, "config.json"),
+  JSON.stringify({ server_url: origin, access_token: "desktop-token", user_id: "user" }));
 accept = false;
 await handlers.get("session_start")!({ reason: "reload" }, context);
 fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: "next" } })}\n`);

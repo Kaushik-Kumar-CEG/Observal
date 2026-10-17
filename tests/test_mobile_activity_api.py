@@ -344,6 +344,30 @@ async def test_self_readings_are_never_unqualified_zeros(app):
 
 
 @pytest.mark.asyncio
+async def test_observed_old_prompted_roots_affect_only_permissioned_user_general_not_author_or_typed(app, monkeypatch):
+    from api.routes import mobile_activity as activity
+
+    api, viewer, _other, _db, _enabled = app
+    general = AsyncMock(return_value={"active_accounts": 1, "roots": 1, "eligible_sessions": 1})
+    monkeypatch.setattr(activity, "prompted_roots", general)
+    monkeypatch.setattr(activity, "readable", AsyncMock(return_value=True))
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
+        user = await c.get(f"/api/v1/mobile-activity/v1/people/{viewer.id}/summary?scope=user&period=1w")
+        forbidden = await c.get(f"/api/v1/mobile-activity/v1/people/{viewer.id}/summary?scope=author&period=1w")
+        viewer.role = UserRole.admin
+        author = await c.get(f"/api/v1/mobile-activity/v1/people/{viewer.id}/summary?scope=author&period=1w")
+    assert forbidden.status_code == 403 and forbidden.content == b""
+    assert user.status_code == author.status_code == 200
+    assert user.json()["general_sessions"]["value"] == 1
+    assert user.json()["general_sessions"]["status"] == "partial"
+    assert author.json()["general_sessions"]["value"] is None
+    for body in (user.json(), author.json()):
+        assert body["mcp_calls"]["value"] is None
+        assert body["component_trace_union"]["value"] is None
+    assert general.await_count == 1, "author scope must not even ask for uploader general activity"
+
+
+@pytest.mark.asyncio
 async def test_only_self_verified_zero_subset_is_partial_and_other_kinds_remain_unavailable(app, monkeypatch):
     from api.routes import mobile_activity as activity
 

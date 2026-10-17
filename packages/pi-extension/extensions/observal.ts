@@ -634,20 +634,28 @@ export default function (pi: ExtensionAPI) {
       return [];
     }
     const found: string[] = [];
-    const skipDirs = new Set([".git", "node_modules", "sessions"]);
+
+    function mayContainPiLayerFile(rel: string): boolean {
+      const parts = rel.split("/");
+      if (rel === "skills" || rel === "agents" || rel === "sandboxes" || rel.startsWith("sandboxes/")) return true;
+      if (parts[0] === "skills") return parts.length === 2;
+      if (parts[0] !== "agents") return false;
+      if (parts.length === 2) return true;
+      if (parts[2] === "sandboxes") return true;
+      return parts[2] === "skills" && parts.length <= 4;
+    }
 
     function walk(dir: string): void {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (entry.isDirectory() && skipDirs.has(entry.name)) continue;
         const abs = path.join(dir, entry.name);
+        const rel = path.relative(root, abs).split(path.sep).join("/");
         if (entry.isDirectory()) {
-          walk(abs);
+          // Do not descend into unrelated extension/package trees at every
+          // session start. Only the file shapes below affect Pi's layer hash.
+          if (mayContainPiLayerFile(rel)) walk(abs);
           continue;
         }
-        if (!entry.isFile()) continue;
-
-        const rel = path.relative(root, abs).split(path.sep).join("/");
-        if (!isPiLayerFile(rel)) continue;
+        if (!entry.isFile() || !isPiLayerFile(rel)) continue;
 
         try {
           const stat = fs.statSync(abs);
@@ -830,32 +838,40 @@ export default function (pi: ExtensionAPI) {
     if (receipt?.hash === hash && receipt?.mapped_components === components.length + skills.length + hooks.length) s.layerHash = hash;
   }
 
-  function needsLayerUpload(hash: string): boolean {
+  function needsLayerUpload(config: ObservalConfig, hash: string): boolean {
     try {
-      if (!fs.existsSync(LAYER_SNAPSHOT_PATH)) return true;
+      if (!config.user_id || !fs.existsSync(LAYER_SNAPSHOT_PATH)) return true;
       const data = JSON.parse(fs.readFileSync(LAYER_SNAPSHOT_PATH, "utf-8"));
-      return data.hash !== hash;
+      // The CLI's older hash-only cache cannot attest an acknowledgement by
+      // this account on this server. Reupload after login/server switches.
+      return data.hash !== hash || data.uploaded_to !== crypto.createHash("sha256").update(config.server_url).digest("hex")
+        || data.uploaded_by !== config.user_id;
     } catch {
       return true;
     }
   }
 
-  function saveLayerSnapshot(snapshot: LayerSnapshot): void {
+  function saveLayerSnapshot(snapshot: LayerSnapshot, config: ObservalConfig): void {
+    let temporary: string | undefined;
     try {
-      const serialized = JSON.stringify(snapshot, null, 2);
+      const serialized = JSON.stringify({ ...snapshot,
+        uploaded_to: crypto.createHash("sha256").update(config.server_url).digest("hex"),
+        uploaded_by: config.user_id }, null, 2);
       if (serialized.length > 5 * 1024 * 1024) return;
       fs.mkdirSync(OBSERVAL_DIR, { recursive: true });
-      fs.writeFileSync(LAYER_SNAPSHOT_PATH, `${serialized}\n`);
+      temporary = `${LAYER_SNAPSHOT_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      fs.writeFileSync(temporary, `${serialized}\n`, { mode: 0o600, flag: "wx" });
+      fs.renameSync(temporary, LAYER_SNAPSHOT_PATH);
     } catch {
-      return;
+      if (temporary) { try { fs.unlinkSync(temporary); } catch { /* Nothing to clean. */ } }
     }
   }
 
   async function uploadLayerSnapshot(config: ObservalConfig, snapshot: LayerSnapshot): Promise<boolean> {
-    if (!needsLayerUpload(snapshot.hash)) return true;
+    if (!needsLayerUpload(config, snapshot.hash)) return true;
     const result = await postJsonWithTimeout(config, "/api/v1/layer-snapshots", JSON.stringify(snapshot));
     if (result?.hash !== snapshot.hash) return false;
-    saveLayerSnapshot(snapshot);
+    saveLayerSnapshot(snapshot, config);
     return true;
   }
 
