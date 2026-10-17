@@ -51,12 +51,13 @@ def extract_hook_receipts(rows: list[dict]) -> tuple[list[HookReceipt], bool]:
             for block in msg["content"]:
                 if isinstance(block, dict) and block.get("type") == "toolCall" and isinstance(block.get("id"), str):
                     calls.setdefault(block["id"], []).append((offset, generation))
-        elif (
-            msg.get("role") == "toolResult"
-            and isinstance(msg.get("toolCallId"), str)
-            and isinstance(msg.get("isError"), bool)
-        ):
-            results.setdefault(msg["toolCallId"], []).append((offset, msg["isError"], generation))
+        elif msg.get("role") == "toolResult" and isinstance(msg.get("toolCallId"), str):
+            # A malformed duplicate is still a result for uniqueness checks;
+            # ignoring it would allow an ambiguous hook run to qualify.
+            is_error = msg.get("isError")
+            results.setdefault(msg["toolCallId"], []).append(
+                (offset, is_error if isinstance(is_error, bool) else None, generation)
+            )
     facts = []
     seen = set()
     for offset, generation, record in parsed:
@@ -92,8 +93,9 @@ def extract_hook_receipts(rows: list[dict]) -> tuple[list[HookReceipt], bool]:
             len(made) != 1
             or made[0][0] >= offset
             or made[0][1] != generation
-            or (event == "tool_result" and (len(linked) != 1 or linked[0][0] <= made[0][0]))
-            or (outcome == "blocked" and any(not error for _, error, _ in linked))
+            or (event == "tool_result" and (len(linked) != 1 or linked[0][0] <= offset))
+            or any(error is None for _, error, _ in linked)
+            or (outcome == "blocked" and any(error is False for _, error, _ in linked))
             or any(result_generation != generation for _, _, result_generation in linked)
         ):
             malformed = True

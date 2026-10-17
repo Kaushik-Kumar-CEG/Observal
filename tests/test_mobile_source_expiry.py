@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Typed counts must expire before any supporting ClickHouse raw-line TTL."""
 
+import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
 
 from jobs.mobile_evidence import _source_retained_until
-from services.mobile_activity_query import _trace_from
+from services.mobile_activity_query import _trace_from, qualified_zero_subset
 
 
 def _row(offset: int, stamp: datetime) -> dict:
@@ -30,6 +34,22 @@ def test_missing_or_suffix_source_cannot_claim_a_retention_floor():
     assert _source_retained_until([{"line_offset": 0}], "a" * 64) is None
     assert _source_retained_until([{"line_offset": 0, "timestamp": "not-a-date"}], "a" * 64) is None
     assert _source_retained_until([{"line_offset": 0, "timestamp": "1960-01-01 00:00:00"}], "a" * 64) is None
+
+
+@pytest.mark.asyncio
+async def test_tool_free_self_user_zero_requires_complete_unexpired_source():
+    class InspectReadOnlySql:
+        async def execute(self, statement, _params):
+            sql = str(statement)
+            assert "pub.status='complete'" in sql
+            assert "pub.source_retained_until>now()" in sql
+            assert "pub.source_revision=z.source_revision" in sql
+            return SimpleNamespace(all=lambda: [])
+
+    now = datetime.now(UTC)
+    assert (
+        await qualified_zero_subset(InspectReadOnlySql(), uuid.uuid4(), "default", now - timedelta(days=7), now) is None
+    )
 
 
 def test_all_typed_kinds_require_root_or_every_intermediate_source_ttl():

@@ -118,6 +118,17 @@ def test_installation_prompt_failure_duplicate_and_shadow_are_never_a_load():
         assert not loads
 
 
+def test_malformed_read_result_and_duplicate_never_confirm_skill():
+    for invalid in ({}, {"isError": "false"}, {"isError": None}):
+        malformed_result = _result()
+        malformed_result["message"].update(invalid)
+        if not invalid:
+            malformed_result["message"].pop("isError")
+        for results in ((malformed_result,), (_result(), malformed_result)):
+            loads, malformed = extract_skill_loads(_source(_header(), _system(), _read(), *results))
+            assert not loads and malformed
+
+
 def test_skill_and_mcp_same_verified_root_are_two_facts_but_one_actor_root_union():
     root = uuid.uuid4()
     skill_id = uuid.uuid4()

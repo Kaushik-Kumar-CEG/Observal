@@ -127,9 +127,42 @@ async def test_poison_queue_reschedules_pending_and_processes_qualified_after_it
     assert first == {"attempted": 50, "completed": 0, "failed": False}
     assert second == {"attempted": 1, "completed": 1, "failed": False}
     assert "requested_at<=now()" in db.queries[0][0]
-    retries = [sql for sql, _ in db.queries if "attempts=attempts+1" in sql]
-    assert len(retries) == 50 and all("INTERVAL '5 minutes'" in sql for sql in retries)
-    assert db.committed == 2
+    assert "attempts=q.attempts+1" in db.queries[0][0]
+    assert "INTERVAL '3 minutes'" in db.queries[0][0]
+    retries = [sql for sql, _ in db.queries if "INTERVAL '5 minutes'" in sql]
+    assert len(retries) == 50 and all("requested_at=:claimed" in sql for sql in retries)
+    assert db.committed == 53  # Two durable claims; each projection outcome releases its own transaction.
+
+
+@pytest.mark.asyncio
+async def test_parent_projection_releases_claimed_child_row_before_nested_requeue(monkeypatch):
+    class ParentChildDb(Db):
+        async def execute(self, sql, params=None):
+            self.queries.append((str(sql), params))
+            if "FOR UPDATE SKIP LOCKED" in str(sql):
+                return SimpleNamespace(
+                    all=lambda: [
+                        ("default", uuid.UUID(USER), "pi", "parent", 1),
+                        ("default", uuid.UUID(USER), "pi", "child", 2),
+                    ]
+                )
+            return SimpleNamespace()
+
+    db = ParentChildDb()
+    monkeypatch.setattr(mobile, "async_session", lambda: Context(db))
+    seen = []
+
+    async def replay(_ctx, _project, _user, _harness, session):
+        assert db.committed >= 1, "parent cannot requeue its still-locked child"
+        seen.append(session)
+        return {"status": "complete"}
+
+    monkeypatch.setattr(mobile, "project_pi_session", replay)
+    assert await mobile.run_mobile_projection_queue({}) == {"attempted": 2, "completed": 2, "failed": False}
+    assert seen == ["parent", "child"]
+    assert db.committed == 3
+    assert all("requested_at=:claimed" in sql for sql, _ in db.queries[1:])
+    assert all(args["claimed"] in (1, 2) for _, args in db.queries[1:])
 
 
 @pytest.mark.asyncio

@@ -979,44 +979,50 @@ async def run_mobile_projection_queue(ctx: dict) -> dict:
     attempted = 0
     completed = 0
     async with async_session() as db:
+        # Claim under row locks, then *commit before* projection. A parent may
+        # enqueue a direct child during its projection; keeping that child's
+        # selected row locked here would block the inner transaction forever.
+        # The durable lease also prevents another worker from replaying the
+        # same cohort while this worker processes it. A killed job retries.
         pending = (
             await db.execute(
                 text(
-                    "SELECT project_id,user_id,harness,session_id,requested_at "
+                    "WITH picked AS (SELECT project_id,user_id,harness,session_id "
                     "FROM mobile_projection_queue WHERE requested_at<=now() "
-                    "ORDER BY requested_at LIMIT 50 FOR UPDATE SKIP LOCKED"
+                    "ORDER BY requested_at LIMIT 50 FOR UPDATE SKIP LOCKED) "
+                    "UPDATE mobile_projection_queue q SET "
+                    "requested_at=now()+INTERVAL '3 minutes',attempts=q.attempts+1 "
+                    "FROM picked p WHERE q.project_id=p.project_id AND q.user_id=p.user_id "
+                    "AND q.harness=p.harness AND q.session_id=p.session_id "
+                    "RETURNING q.project_id,q.user_id,q.harness,q.session_id,q.requested_at"
                 )
             )
         ).all()
-        for project, user, harness, session, requested_at in pending:
+        await db.commit()
+        for project, user, harness, session, claimed_at in pending:
             attempted += 1
+            params = {"project": project, "user": user, "harness": harness, "session": session, "claimed": claimed_at}
             try:
                 result = await project_pi_session({}, project, str(user), harness, session)
-                # Pending mapping/source is not a completed projection; retain
-                # the key for new snapshots and source repairs.
+                # A parent can request a fresh child projection while this job
+                # runs. Exact lease equality preserves that newer request.
                 if result["status"] in ("complete", "partial", "legacy_layer", "unsupported"):
                     await db.execute(
                         text(
                             "DELETE FROM mobile_projection_queue WHERE project_id=:project AND user_id=:user "
-                            "AND harness=:harness AND session_id=:session AND requested_at<=:requested"
+                            "AND harness=:harness AND session_id=:session AND requested_at=:claimed"
                         ),
-                        {
-                            "project": project,
-                            "user": user,
-                            "harness": harness,
-                            "session": session,
-                            "requested": requested_at,
-                        },
+                        params,
                     )
                     completed += 1
                 else:
                     await db.execute(
                         text(
-                            "UPDATE mobile_projection_queue SET attempts=attempts+1,"
-                            "requested_at=now()+INTERVAL '5 minutes' "
-                            "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
+                            "UPDATE mobile_projection_queue SET requested_at=now()+INTERVAL '5 minutes' "
+                            "WHERE project_id=:project AND user_id=:user AND harness=:harness "
+                            "AND session_id=:session AND requested_at=:claimed"
                         ),
-                        {"project": project, "user": user, "harness": harness, "session": session},
+                        params,
                     )
             except Exception:
                 # Fixed logger text only: no transcript or secrets in worker logs.
@@ -1025,11 +1031,11 @@ async def run_mobile_projection_queue(ctx: dict) -> dict:
                 optic.exception("mobile evidence projection failed for scoped session")
                 await db.execute(
                     text(
-                        "UPDATE mobile_projection_queue SET attempts=attempts+1,"
-                        "requested_at=now()+INTERVAL '1 minute' "
-                        "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
+                        "UPDATE mobile_projection_queue SET requested_at=now()+INTERVAL '1 minute' "
+                        "WHERE project_id=:project AND user_id=:user AND harness=:harness "
+                        "AND session_id=:session AND requested_at=:claimed"
                     ),
-                    {"project": project, "user": user, "harness": harness, "session": session},
+                    params,
                 )
-        await db.commit()
+            await db.commit()
     return {"attempted": attempted, "completed": completed, "failed": False}

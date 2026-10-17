@@ -138,7 +138,11 @@ def extract_skill_loads(rows: list[dict]) -> tuple[list[SkillLoad], bool]:
                     )
         elif role == "toolResult":
             call_id = message.get("toolCallId")
-            if isinstance(call_id, str) and isinstance(message.get("isError"), bool):
+            if isinstance(call_id, str):
+                # Every result for a call ID participates in uniqueness, even a
+                # malformed result. Otherwise a valid read followed by an
+                # ambiguous duplicate would still qualify the skill load.
+                is_error = message.get("isError")
                 content = message.get("content")
                 text = (
                     content[0].get("text")
@@ -157,7 +161,9 @@ def extract_skill_loads(rows: list[dict]) -> tuple[list[SkillLoad], bool]:
                     else:
                         if len(encoded) <= 262144:
                             digest = hashlib.sha256(encoded).hexdigest()
-                results.setdefault(call_id, []).append((offset, message["isError"], generation, digest))
+                results.setdefault(call_id, []).append(
+                    (offset, is_error if isinstance(is_error, bool) else None, generation, digest)
+                )
     counts = Counter(call[2] for call in calls)
     facts = []
     for offset, index, call_id, scope, alias, location, stamp, generation in calls:
@@ -166,7 +172,7 @@ def extract_skill_loads(rows: list[dict]) -> tuple[list[SkillLoad], bool]:
             counts[call_id] != 1
             or len(linked) != 1
             or linked[0][0] <= offset
-            or linked[0][1]
+            or linked[0][1] is not False
             or linked[0][2] != generation
             or linked[0][3] is None
             or stamp is None

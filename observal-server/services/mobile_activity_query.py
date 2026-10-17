@@ -156,6 +156,7 @@ async def qualified_zero_subset(
                 "AND run.harness=z.harness AND run.session_id=z.session_id "
                 "WHERE z.project_id=:project AND z.user_id=:subject AND z.harness='pi' "
                 "AND z.event_time>=:start AND z.event_time<:end AND pub.status='complete' "
+                "AND pub.source_retained_until>now() "
                 "AND pub.source_revision=z.source_revision AND run.root_verified=true "
                 "AND run.run_incarnation=z.root_run_incarnation "
                 "AND EXISTS (SELECT 1 FROM mobile_layer_components map "

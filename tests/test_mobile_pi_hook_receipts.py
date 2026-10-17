@@ -102,6 +102,37 @@ def test_pasted_or_unlinked_or_contradictory_receipt_never_counts():
     assert not malformed and len(result_receipt) == 1 and result_receipt[0].event == "tool_result"
 
 
+def test_posttooluse_receipt_must_precede_its_unique_well_formed_result():
+    valid_result = _row(
+        3,
+        {
+            "type": "message",
+            "timestamp": STAMP,
+            "message": {"role": "toolResult", "toolCallId": "call1", "isError": False},
+        },
+    )
+    late_receipt = _receipt(offset=3, event="tool_result")
+    premature_result = {**valid_result, "line_offset": 2}
+    for source in (
+        [_call(), premature_result, late_receipt],
+        [
+            _call(),
+            _receipt(event="tool_result"),
+            valid_result,
+            _row(4, {"type": "message", "message": {"role": "toolResult", "toolCallId": "call1"}}),
+        ],
+        [
+            _call(),
+            _receipt(event="tool_result"),
+            _row(3, {"type": "message", "message": {"role": "toolResult", "toolCallId": "call1"}}),
+        ],
+    ):
+        facts, malformed = extract_hook_receipts(source)
+        assert not facts and malformed
+    facts, malformed = extract_hook_receipts([_call(), _receipt(event="tool_result"), valid_result])
+    assert not malformed and len(facts) == 1
+
+
 def test_binding_and_prospective_root_are_required_for_a_hook_positive():
     header = _row(0, {"type": "session", "timestamp": STAMP, "cwd": "/work"})
     source = [header, _call(), _receipt()]
