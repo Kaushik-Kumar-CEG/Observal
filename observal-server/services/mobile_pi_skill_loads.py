@@ -120,8 +120,8 @@ def extract_skill_loads(rows: list[dict]) -> tuple[list[SkillLoad], bool]:
                     and isinstance(call_id, str)
                     and 0 < len(call_id) <= 256
                     and isinstance(args, dict)
-                    and "offset" not in args
-                    and "limit" not in args
+                    and args.get("offset") is None
+                    and args.get("limit") is None
                 ):
                     scope, alias = advertised[location]
                     calls.append(

@@ -84,6 +84,16 @@ def test_advertised_exact_file_and_unique_later_success_are_a_candidate():
     assert loads[0].content_sha256 == hashlib.sha256(SKILL_TEXT.encode()).hexdigest()
 
 
+def test_null_pagination_from_pi_is_a_full_read_but_real_slices_are_not():
+    loads, malformed = extract_skill_loads(_source(_header(), _system(), _read(offset=None, limit=None), _result()))
+    assert not malformed and len(loads) == 1
+    assert loads[0].content_sha256 == hashlib.sha256(SKILL_TEXT.encode()).hexdigest()
+
+    for args in ({"offset": 0}, {"limit": 1}, {"offset": False}, {"limit": "1"}):
+        loads, _ = extract_skill_loads(_source(_header(), _system(), _read(**args), _result()))
+        assert not loads
+
+
 def test_installation_prompt_failure_duplicate_and_shadow_are_never_a_load():
     truncated = _result()
     truncated["message"]["details"] = {"truncation": {"truncated": True}}
