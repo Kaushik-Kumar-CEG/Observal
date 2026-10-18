@@ -127,7 +127,7 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
     from api.routes import mobile_activity as activity
     from services import mobile_read_control
 
-    api, viewer, _other, db, _enabled = app
+    api, viewer, other, db, _enabled = app
     viewer.role = UserRole.super_admin
     server = uuid.uuid4()
     db.scalar.return_value = server
@@ -135,7 +135,9 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
         "mobile.synthetic_test_ack": "isolated-disposable-synthetic-only-v1",
         "mobile.synthetic_test_server_id": str(server),
         "mobile.synthetic_test_viewer_id": str(viewer.id),
+        "mobile.synthetic_test_self_user_viewer_id": str(other.id),
     }
+    monkeypatch.setattr(mobile_read_control, "synthetic_principals_valid", AsyncMock(return_value=True))
     monkeypatch.setattr(activity.ds, "get", AsyncMock(side_effect=lambda key: settings.get(key, "")))
     states = {"mobile.auth_enabled": True, "mobile.synthetic_test_enabled": True}
     monkeypatch.setattr(activity.ds, "get_bool", AsyncMock(side_effect=lambda key: states.get(key, False)))
@@ -207,6 +209,7 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
 @pytest.mark.asyncio
 async def test_synthetic_self_user_viewer_requires_exact_identity_source_and_denies_other_scopes(app, monkeypatch):
     from api.routes import mobile_activity as activity
+    from services import mobile_read_control
 
     api, viewer, other, db, _enabled = app
     viewer.role = UserRole.user
@@ -218,6 +221,7 @@ async def test_synthetic_self_user_viewer_requires_exact_identity_source_and_den
         "mobile.synthetic_test_viewer_id": str(other.id),
         "mobile.synthetic_test_self_user_viewer_id": str(viewer.id),
     }
+    monkeypatch.setattr(mobile_read_control, "synthetic_principals_valid", AsyncMock(return_value=True))
     monkeypatch.setattr(activity.ds, "get", AsyncMock(side_effect=lambda key: settings.get(key, "")))
     monkeypatch.setattr(
         activity.ds,

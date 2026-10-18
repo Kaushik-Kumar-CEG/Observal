@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Opt-in isolated PostgreSQL proof of atomic mobile operator setup/open/deny."""
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -22,7 +23,7 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
     from api.routes.admin import mobile_setup as ops
     from models import Base
     from models.user import User, UserRole
-    from services.mobile_read_control import mobile_issue_allowed
+    from services.mobile_read_control import mobile_issue_allowed, synthetic_principals_valid
 
     base = make_url(os.environ["DATABASE_URL"])
     assert (base.host, base.port, base.database) == ("127.0.0.1", 15440, "observal")
@@ -96,6 +97,23 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
                 assert prepared.configured and prepared.blocked and not prepared.trace_headlines
                 opened = await ops.mobile_test_open(req, db, actor)
                 assert opened.configured and not opened.blocked and opened.generation > prepared.generation
+                assert await synthetic_principals_valid(db, author_id, user_id)
+                await db.commit()
+                async with sessionmaker() as reader, sessionmaker() as editor:
+                    assert await synthetic_principals_valid(reader, author_id, user_id)
+                    change = asyncio.create_task(
+                        editor.execute(
+                            text("UPDATE users SET email='actor@real.example' WHERE id=:id"), {"id": user_id}
+                        )
+                    )
+                    await asyncio.sleep(0.05)
+                    assert not change.done(), "SCIM-style identity update must wait behind the protected read"
+                    await reader.commit()
+                    await asyncio.wait_for(change, timeout=3)
+                    await editor.commit()
+                assert not await synthetic_principals_valid(db, author_id, user_id)
+                await db.execute(text("UPDATE users SET email='user@example.invalid' WHERE id=:id"), {"id": user_id})
+                await db.commit()
                 assert await mobile_issue_allowed(db) is True
                 await db.commit()  # release the test issuer's shared project lock before revoke
                 closed = await ops.mobile_test_revoke(db, actor)

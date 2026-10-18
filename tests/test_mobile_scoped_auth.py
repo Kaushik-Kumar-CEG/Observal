@@ -226,6 +226,23 @@ async def test_mobile_sso_verification_origin_is_browser_initial_only(identity, 
 
 
 @pytest.mark.asyncio
+async def test_mobile_challenge_uses_shared_origin_not_other_workers_stale_sync_cache(identity, monkeypatch):
+    monkeypatch.setattr(device_auth.ds, "get_sync", lambda _key, default=None: "http://localhost:3000")
+    monkeypatch.setattr(
+        device_auth.ds,
+        "get",
+        AsyncMock(side_effect=lambda key: "https://candidate.example.test" if key == "deployment.frontend_url" else ""),
+    )
+    challenge = await inspect.unwrap(device_auth.device_authorize)(
+        SimpleNamespace(headers={"host": "attacker.example", "x-forwarded-host": "attacker.example"}),
+        DeviceAuthRequest(client_id=MOBILE_CLIENT_ID),
+        identity.db,
+    )
+    assert challenge.verification_origins == ["https://candidate.example.test"]
+    assert challenge.verification_uri.startswith("https://candidate.example.test/device")
+
+
+@pytest.mark.asyncio
 async def test_public_loopback_setting_cannot_trust_a_forwarded_attacker_origin(identity, monkeypatch):
     monkeypatch.setattr(
         device_auth.ds,

@@ -59,6 +59,7 @@ async def test_open_requires_exact_cohort_and_audit_before_commit(monkeypatch):
         AsyncMock(return_value={"mobile.trace_qualification_server_id": "", "mobile.trace_qualification_ack": ""}),
     )
     monkeypatch.setattr(ops, "_record_transition", audit)
+    monkeypatch.setattr(ops, "synthetic_principals_valid", AsyncMock(return_value=True))
     monkeypatch.setattr(ops, "_audit", AsyncMock())
     actor = SimpleNamespace(id=uuid.uuid4(), role=UserRole.super_admin)
     await ops.mobile_test_open(req, db, actor)

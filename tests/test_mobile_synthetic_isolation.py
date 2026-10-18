@@ -16,6 +16,28 @@ from models.user import UserRole
 
 
 @pytest.mark.asyncio
+async def test_disposable_principals_rechecked_under_share_locks_after_email_or_role_edit():
+    from services.mobile_read_control import synthetic_principals_valid
+
+    author, actor = uuid.uuid4(), uuid.uuid4()
+    rows = [
+        SimpleNamespace(id=author, email="author@example.test", role="super_admin", auth_provider="local"),
+        SimpleNamespace(id=actor, email="actor@example.invalid", role="reviewer", auth_provider="local"),
+    ]
+    db = SimpleNamespace(execute=AsyncMock(side_effect=lambda *_args: SimpleNamespace(all=lambda: rows)))
+    assert await synthetic_principals_valid(db, author, actor)
+    assert "FOR SHARE" in str(db.execute.call_args.args[0])
+    rows[1].email = "actor@real.example"
+    assert not await synthetic_principals_valid(db, author, actor)
+    rows[1].email = "actor@example.invalid"
+    rows[0].role = "user"
+    assert not await synthetic_principals_valid(db, author, actor)
+    rows[0].role = "super_admin"
+    rows[1].auth_provider = "deactivated"
+    assert not await synthetic_principals_valid(db, author, actor)
+
+
+@pytest.mark.asyncio
 async def test_test_admin_cannot_request_third_subject_or_global_overview(monkeypatch):
     author, actor, outsider = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     viewer = SimpleNamespace(id=author, role=UserRole.super_admin)

@@ -9,6 +9,8 @@ asynchronous delete. A read linearized earlier may finish afterward; already
 sent bytes cannot be recalled. A missing control row is denied.
 """
 
+from uuid import UUID
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +54,28 @@ async def mobile_issue_allowed(db: AsyncSession) -> bool:
     return value == "true"
 
 
+def _disposable_email(value: str) -> bool:
+    return "@" in value and value.rsplit("@", 1)[1].lower().endswith((".test", ".invalid"))
+
+
+async def synthetic_principals_valid(db: AsyncSession, author_id: UUID, user_id: UUID) -> bool:
+    """Lock both current identities through this read; SCIM edits cannot swap them mid-response."""
+    if author_id == user_id:
+        return False
+    rows = (
+        await db.execute(
+            text("SELECT id,email,role,auth_provider FROM users WHERE id IN (:author,:actor) FOR SHARE"),
+            {"author": author_id, "actor": user_id},
+        )
+    ).all()
+    by_id = {row.id: row for row in rows}
+    return (
+        len(by_id) == 2
+        and by_id[author_id].role == UserRole.super_admin.value
+        and all(row.auth_provider != "deactivated" and _disposable_email(row.email) for row in by_id.values())
+    )
+
+
 async def active_mobile_cohort(db: AsyncSession, viewer: User, *, server_id: str | None = None) -> str | None:
     """Authorize this viewer on the barrier-bound server, not merely a valid phone token.
 
@@ -83,12 +107,16 @@ async def active_mobile_cohort(db: AsyncSession, viewer: User, *, server_id: str
         and await ds.get("mobile.synthetic_test_server_id") == server_id
         and await ds.get("mobile.synthetic_test_ack") == "isolated-disposable-synthetic-only-v1"
     ):
-        if await ds.get("mobile.synthetic_test_self_user_viewer_id") == str(viewer.id):
+        try:
+            author_id = UUID(await ds.get("mobile.synthetic_test_viewer_id"))
+            user_id = UUID(await ds.get("mobile.synthetic_test_self_user_viewer_id"))
+        except (ValueError, TypeError):
+            return None
+        if viewer.id not in (author_id, user_id) or not await synthetic_principals_valid(db, author_id, user_id):
+            return None
+        if viewer.id == user_id:
             return "synthetic-user"
-        if await ds.get("mobile.synthetic_test_viewer_id") == str(viewer.id) and (
-            viewer.role == UserRole.super_admin
-            or (viewer.role == UserRole.admin and not await ds.get_bool("security.trace_privacy"))
-        ):
+        if viewer.role == UserRole.super_admin:
             return "synthetic-author"
     return None
 

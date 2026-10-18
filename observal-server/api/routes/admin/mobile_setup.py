@@ -19,6 +19,7 @@ from api.deps import get_db, require_role
 from models.enterprise_config import EnterpriseConfig
 from models.user import User, UserRole
 from observal_shared.migration.constants import DEFAULT_PROJECT_ID
+from services.mobile_read_control import synthetic_principals_valid
 from services.redis import get_redis
 from services.security_events import EventType, SecurityEvent, Severity, emit_security_event
 from services.token_revocation import revoke_user_tokens
@@ -259,8 +260,9 @@ async def mobile_test_open(
         or status.author_viewer_id != req.author_viewer_id
         or status.user_viewer_id != req.user_viewer_id
         or req.author_viewer_id == req.user_viewer_id
+        or not await synthetic_principals_valid(db, req.author_viewer_id, req.user_viewer_id)
     ):
-        raise HTTPException(409, "Closed, matching, live-disabled test setup required")
+        raise HTTPException(409, "Closed, matching, disposable, live-disabled test setup required")
     changed = await db.execute(
         text(
             "UPDATE mobile_read_controls SET blocked=false,generation=generation+1,updated_at=now() "
