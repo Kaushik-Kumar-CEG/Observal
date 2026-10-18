@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for demo account seeding and cleanup."""
@@ -32,6 +33,20 @@ _patch_username_gen = patch("services.demo_accounts.generate_unique_username", s
 
 
 class TestSeedDemoAccounts:
+    @pytest.mark.asyncio
+    async def test_disabled_seeding_never_creates_demo_super_admin_even_if_credentials_configured(self):
+        from services.demo_accounts import seed_demo_accounts
+
+        db = AsyncMock()
+        with patch("services.demo_accounts.settings") as config:
+            config.SEED_DEMO_ACCOUNTS = False
+            config.DEMO_SUPER_ADMIN_EMAIL = "configured@demo.example"
+            config.DEMO_SUPER_ADMIN_PASSWORD = "unused-test-placeholder"
+            assert await seed_demo_accounts(db) == 0
+        db.scalar.assert_not_awaited()
+        db.add.assert_not_called()
+        db.commit.assert_not_awaited()
+
     @pytest.mark.asyncio
     @_patch_username_gen
     async def test_seeds_when_no_real_users(self, _mock_gen):

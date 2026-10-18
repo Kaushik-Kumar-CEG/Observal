@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Demo account seeding and lifecycle management.
@@ -40,6 +41,12 @@ async def seed_demo_accounts(db: AsyncSession) -> int:
     Returns the number of accounts created.  Idempotent - skips accounts
     that already exist.
     """
+    # An explicit opt-out must win even when legacy DEMO_* credentials remain configured.
+    if not settings.SEED_DEMO_ACCOUNTS:
+        return 0
+    from services.first_admin import lock_first_user
+
+    await lock_first_user(db)
     # Bail out if ANY real (non-demo) user exists
     optic.info("seeding demo accounts")
     real_count = await db.scalar(select(func.count()).select_from(User).where(User.is_demo.is_(False)))

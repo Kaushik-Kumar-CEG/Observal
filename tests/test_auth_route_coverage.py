@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Focused route coverage for authentication lifecycle and security boundaries."""
@@ -295,20 +296,20 @@ async def test_init_and_bootstrap_rules(monkeypatch):
     initialized = _db()
     initialized.scalar.return_value = 1
     with pytest.raises(HTTPException) as exc:
-        await auth.init_admin(InitRequest(email="admin@example.com", name="Admin"), initialized)
+        await auth.init_admin(_request(), InitRequest(email="admin@example.com", name="Admin"), initialized)
     assert exc.value.status_code == 400
 
     invalid_name = _db()
     auth.generate_unique_username.side_effect = ValueError("username unavailable")
     with pytest.raises(HTTPException) as exc:
-        await auth.init_admin(InitRequest(email="admin@example.com", name="Admin"), invalid_name)
+        await auth.init_admin(_request(), InitRequest(email="admin@example.com", name="Admin"), invalid_name)
     assert exc.value.status_code == 409
 
     auth.generate_unique_username.side_effect = None
     conflict = _db()
     conflict.commit.side_effect = IntegrityError("insert", {}, Exception("duplicate"))
     with pytest.raises(HTTPException) as exc:
-        await auth.init_admin(InitRequest(email="admin@example.com", name="Admin"), conflict)
+        await auth.init_admin(_request(), InitRequest(email="admin@example.com", name="Admin"), conflict)
     assert exc.value.status_code == 409
     conflict.rollback.assert_awaited_once()
 
@@ -321,12 +322,16 @@ async def test_init_and_bootstrap_rules(monkeypatch):
 
     fresh.refresh.side_effect = refresh_admin
     response = await auth.init_admin(
-        InitRequest(email="admin@example.com", name="Admin", password="Valid1!Password"), fresh
+        _request(), InitRequest(email="admin@example.com", name="Admin", password="Valid1!Password"), fresh
     )
     assert response.user.role == UserRole.admin
     set_password.assert_called_once()
 
     remote = _request(host="198.51.100.7")
+    with pytest.raises(HTTPException) as exc:
+        await auth.init_admin(remote, InitRequest(email="admin@example.com", name="Admin"), _db())
+    assert exc.value.status_code == 403
+
     with pytest.raises(HTTPException) as exc:
         await auth.bootstrap(remote, _db())
     assert exc.value.status_code == 403
@@ -349,6 +354,20 @@ async def test_init_and_bootstrap_rules(monkeypatch):
     response = await auth.bootstrap(_request(), bootstrap_db)
     assert response.user.email == "admin@localhost"
     assert response.user.role == UserRole.admin
+
+
+@pytest.mark.asyncio
+async def test_init_remote_http_response_ignores_spoofed_loopback_headers():
+    app = _route_app(_db())
+    transport = ASGITransport(app=app, client=("198.51.100.7", 443), raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="https://test") as client:
+        response = await client.post(
+            "/api/v1/auth/init",
+            json={"email": "rival@example.com", "name": "Rival"},
+            headers={"X-Forwarded-For": "127.0.0.1", "X-Forwarded-Host": "localhost"},
+        )
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Initialization is only available from localhost"}
 
 
 @pytest.mark.asyncio

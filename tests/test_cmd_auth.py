@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 amogh-dongre <amoghdongre16@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Behavioral tests for :mod:`observal_cli.cmd_auth`."""
@@ -398,6 +399,7 @@ def test_login_fresh_server_rejects_mismatched_confirmation(
     ("status", "body", "category"),
     [
         (400, "Already Initialized by another request", ErrorCategory.CONFLICT),
+        (403, "Initialization is only available from localhost", ErrorCategory.PERMISSION),
         (500, "database unavailable", ErrorCategory.UNAVAILABLE),
     ],
 )

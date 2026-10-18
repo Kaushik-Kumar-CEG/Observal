@@ -453,6 +453,18 @@ def login(
                     json={"email": admin_email, "name": admin_name, "password": admin_password},
                     timeout=30,
                 )
+            if response.status_code == 403 and "only available from localhost" in response.text.lower():
+                fail(
+                    ErrorCategory.PERMISSION,
+                    "Public first-user initialization is disabled on this server.",
+                    operation="Initialize Observal administrator",
+                    resource=resource,
+                    remediation=(
+                        "An authorized host operator must use the local, auditable first-super-admin "
+                        "provisioner on an empty isolated server; investigate existing users before proceeding."
+                    ),
+                    http_status=403,
+                )
             if response.status_code == 400 and "already initialized" in response.text.lower():
                 fail(
                     ErrorCategory.CONFLICT,

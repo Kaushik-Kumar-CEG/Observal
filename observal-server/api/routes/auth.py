@@ -280,8 +280,15 @@ async def _issue_tokens(
 
 
 @router.post("/init", response_model=InitResponse, dependencies=[Depends(require_password_auth)])
-async def init_admin(req: InitRequest, db: AsyncSession = Depends(get_db)):
+async def init_admin(request: Request, req: InitRequest, db: AsyncSession = Depends(get_db)):
+    # A public first-user window is an unauthenticated administrator takeover.
+    # Use the in-container, interactive provisioner for an isolated super-admin.
+    if not request.client or request.client.host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Initialization is only available from localhost")
     optic.trace("email={}", req.email)
+    from services.first_admin import lock_first_user
+
+    await lock_first_user(db)
     count = await db.scalar(select(func.count()).select_from(User))
     if count and count > 0:
         raise HTTPException(status_code=400, detail="System already initialized")
@@ -325,6 +332,9 @@ async def bootstrap(request: Request, db: AsyncSession = Depends(get_db)):
     if client_host not in ("127.0.0.1", "::1", "localhost"):
         raise HTTPException(status_code=403, detail="Bootstrap is only available from localhost")
 
+    from services.first_admin import lock_first_user
+
+    await lock_first_user(db)
     count = await db.scalar(select(func.count()).select_from(User))
     if count and count > 0:
         raise HTTPException(status_code=400, detail="System already initialized")
