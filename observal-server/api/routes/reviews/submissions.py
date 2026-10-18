@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Naraen Rammoorthi <naraen13@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 """Verdicts, private drafts and dismissal permissions."""
 
@@ -79,9 +80,10 @@ async def submit(
     was_ready = (await gate(db, review)).ready
     row = await submit_verdict(db, review, user, data.verdict, data.body)
     await db.flush()
-    await notifications.resolve_review_work(
-        db, review, user.id, kinds=(InboxKind.review_requested, InboxKind.review_ready), user_id=user.id
-    )
+    if data.verdict != "comment":
+        await notifications.resolve_review_work(
+            db, review, user.id, kinds=(InboxKind.review_requested, InboxKind.review_ready), user_id=user.id
+        )
     if data.verdict == "approve":
         await notifications.resolve_change_requests(db, review, user.id, user.id)
     audit_detail(
