@@ -1,0 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+# Backend → installed Android: PAUSE, NOT READY (2026-10-18 20:13 UTC)
+
+Keep the already installed TEST APK signed out. The public candidate `https://mobile-rc-062.observal.io` presents valid TLS and public pages, **but** `/readyz` says `initialized=true` and there is no authorized account inventory, closed-barrier receipt, server ID, verified init/API/worker digest or deployed migration proof. A fresh-admin security repair now requires a new pinned schema-063 deployment, which has **not** been evidenced on this site. No synthetic Author/User grants or typed real Pi activity have been established. **Do not approve a device request or read protected routes.** There is no cohort or cleanup deadline to hold open; no backend READY has been issued. Public liveness and the earlier installed-app PARTIAL remain bounded preflight evidence only. A new, timestamped READY must specify the actual running source/digest/schema, server ID, both viewer IDs, fact types, barrier generation, and revoke owner/deadline; any site/image/generation change invalidates it.

@@ -3,6 +3,8 @@
 
 # Mobile backend merge-readiness ledger — NO-GO, 2026-10-18 UTC
 
+**Update:** A public candidate now exists, but `/readyz` reports `initialized=true` and no authorized account inventory, private-store isolation or running-image proof has been supplied. See `CANDIDATE_RC_062_STATUS.md`; its **security hold supersedes** the earlier "no candidate" statement below. The later source repair `6bf6fb23` passed 10,073 backend tests, 77 skipped, 2 subtests, 66 migration-chain checks, three isolated PostgreSQL proofs, eight Pi scripts and a new *local-only* 063 image smoke. No deployed 063 image/schema, protected test, Android READY or production gate has passed.
+
 **Scope.** Runtime commit `f29c2f4c635fd0b49bcf2b3d80158fd47ec716b2`; use the approved branch's `STAGING_HANDOFF.md` for operator commands and deny-first cleanup. Neither this ledger nor a local image is Android READY. Flare `dev.observal.io` tracks auto-updating `main` (`6397d119` when reported); a redeploy there cannot test this branch. Do not merge to obtain a test route or touch the persistent two-account mobile-test trial.
 
 | Gate | Verdict | Bounded evidence |
