@@ -80,7 +80,11 @@ async def test_existing_publication_gets_null_retained_floor_on_upgrade():
         verify = create_async_engine(target)
         try:
             async with verify.connect() as db:
-                assert await db.scalar(text("SELECT version_num FROM alembic_version")) == "062_mobile_operator_audit"
+                assert (
+                    await db.scalar(text("SELECT version_num FROM alembic_version"))
+                    == "063_first_admin_provision_audit"
+                )
+                assert await db.scalar(text("SELECT count(*) FROM first_admin_provision_audit")) == 0
                 assert (
                     await db.scalar(
                         text(
