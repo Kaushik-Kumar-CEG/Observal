@@ -333,11 +333,11 @@ test("close review asks for a reason in a dialog", async ({ page }) => {
 });
 
 for (const subject_type of ["agent", "mcp"] as const) {
-  for (const own of [true, false]) test(`${subject_type} ${own ? "author" : "reviewer"} separates verdict from comment`, async ({ page }, testInfo) => {
-    await page.addInitScript(() => {
+  for (const own of [true, false]) test(`${subject_type} ${own ? "author" : "reviewer"} separates verdict from comment`, async ({ page }) => {
+    await page.addInitScript(role => {
       sessionStorage.setItem("observal_access_token", "review-ui-test");
-      localStorage.setItem("observal_user_role", "reviewer");
-    });
+      localStorage.setItem("observal_user_role", role);
+    }, own ? "user" : "reviewer");
     const comments: unknown[] = [];
     const verdicts: unknown[] = [];
     const detail = {
@@ -352,7 +352,7 @@ for (const subject_type of ["agent", "mcp"] as const) {
     };
     await page.route("**/api/v1/**", route => route.fulfill({ json: { items: [], unread: 0, action_required: 0 } }));
     await page.route("**/api/v1/config/public", route => route.fulfill({ json: { experimental_review_checks: false } }));
-    await page.route("**/api/v1/auth/whoami", route => route.fulfill({ json: { id, username: "tester", role: "reviewer" } }));
+    await page.route("**/api/v1/auth/whoami", route => route.fulfill({ json: { id, username: "tester", role: own ? "user" : "reviewer" } }));
     await page.route("**/api/v1/reviews/42**", route => {
       const suffix = new URL(route.request().url()).pathname.replace("/api/v1/reviews/42", "");
       if (suffix === "/threads" && route.request().method() === "POST") {
@@ -396,11 +396,9 @@ for (const subject_type of ["agent", "mcp"] as const) {
     expect(verdicts).toHaveLength(0);
     await expect(page.getByLabel("Conversation on review").getByText("A general comment")).toBeVisible();
     await expect(page.getByText("Review updated", { exact: true })).toHaveCount(0, { timeout: 12000 });
-    await page.screenshot({ path: testInfo.outputPath(`obs-1446-${subject_type}-${own ? "author" : "reviewer"}.png`), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByRole("button", { name: "Comment on review" })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: testInfo.outputPath(`obs-1446-${subject_type}-${own ? "author" : "reviewer"}-mobile.png`), fullPage: true });
     if (!own) {
       await reviewAction.click();
       await expect(page.getByRole("radio", { name: "Approve" })).toBeVisible();
