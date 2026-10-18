@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Behavioral tests for the operations, admin, trace, and self CLI commands."""
@@ -1521,7 +1522,7 @@ def test_every_admin_workflow_has_output_contract():
                 yield name, child
 
     rows = list(leaves(command))
-    assert len(rows) == 21
+    assert len(rows) == 25
     assert all(any(parameter.name == "output" for parameter in leaf.params) for _name, leaf in rows)
 
 

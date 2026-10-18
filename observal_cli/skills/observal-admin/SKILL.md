@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: 2026 Hemalatha Madeswaran <hemalathamadeswaran@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 name: observal-admin
 command: observal
@@ -29,7 +30,7 @@ Core administration requires an admin role. Review actions also work for authori
 
 | User intent | Read |
 | --- | --- |
-| Users, settings, diagnostics, reviews, security, audit, SAML, or SCIM | [Governance and identity](references/governance-and-identity.md) |
+| Users, settings, diagnostics, reviews, security, audit, SAML, SCIM, or disposable mobile-test setup/status/revoke | [Governance and identity](references/governance-and-identity.md) |
 | Local services, versions, upgrades, rollback, reset, or data migration | [Server operations](references/server-operations.md) |
 
 Read the selected reference completely before executing.
@@ -42,6 +43,7 @@ Read the selected reference completely before executing.
 - Export and import destinations must be explicit. Validate an archive before import.
 - Use the project's migration commands. Never replace them with ad hoc SQL.
 - A server command is successful only when the final status confirms the requested service or version state.
+- For mobile testing, use `observal admin mobile-test-status`, `mobile-test-setup --server-id UUID --author-viewer-id UUID --user-viewer-id UUID`, `mobile-test-open` with the same three flags only after closed-gate checks, then `mobile-test-revoke` before deleting source or credentials. Never set `mobile.*` or `trace_headlines` via generic settings or raw SQL; never use real-person accounts for the synthetic cohort.
 
 ## Completion
 

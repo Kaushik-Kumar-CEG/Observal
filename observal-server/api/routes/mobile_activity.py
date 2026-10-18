@@ -270,9 +270,37 @@ async def _subject(db: AsyncSession, subject_id: UUID) -> User:
     return subject
 
 
+async def _synthetic_subjects(db: AsyncSession, viewer: User) -> set[UUID] | None:
+    """Synthetic viewers may name only the two disposable cohort principals."""
+    # The route dependency denies unqualified viewers; live paths need no
+    # synthetic lookup when the isolated cohort switch is off.
+    if await ds.get("mobile.synthetic_test_enabled") != "true":
+        return None
+    cohort = await active_mobile_cohort(db, viewer)
+    if cohort == "live":
+        return None
+    if cohort not in ("synthetic-author", "synthetic-user"):
+        return set()
+    try:
+        return {
+            UUID(await ds.get("mobile.synthetic_test_viewer_id")),
+            UUID(await ds.get("mobile.synthetic_test_self_user_viewer_id")),
+        }
+    except (ValueError, TypeError):
+        return set()
+
+
 async def _authorize(viewer: User, subject_id: UUID, scope: Scope, db: AsyncSession) -> bool:
     # Do not reveal whether a different subject exists to unauthorized viewers.
-    if (scope == "author" or subject_id != viewer.id) and not await _trace_allowed(viewer):
+    subjects = await _synthetic_subjects(db, viewer)
+    if subjects is not None and subject_id not in subjects:
+        return False
+    # The ordinary actor must not gain foreign or Author readings even when
+    # temporarily granted an admin role to review the other account's listings.
+    privileged = await _trace_allowed(viewer)
+    if await ds.get("mobile.synthetic_test_enabled") == "true":
+        privileged = (await active_mobile_cohort(db, viewer)) == "synthetic-author"
+    if (scope == "author" or subject_id != viewer.id) and not privileged:
         return False
     await _subject(db, subject_id)
     return True
@@ -350,7 +378,14 @@ async def _summary(
                 ),
             )
     observed = await trace_union(
-        db, subject_id, scope, str(DEFAULT_PROJECT_ID), window.start, window.end, viewer_self=viewer.id == subject_id
+        db,
+        subject_id,
+        scope,
+        str(DEFAULT_PROJECT_ID),
+        window.start,
+        window.end,
+        viewer_self=viewer.id == subject_id,
+        actor_ids=await _synthetic_subjects(db, viewer),
     )
     if observed:
         kinds = _observed_kinds(observed)
@@ -385,7 +420,13 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
     if test_only:
         window = _window("1w")
         observed = await trace_union(
-            db, viewer.id, "author" if author_viewer else "user", str(DEFAULT_PROJECT_ID), window.start, window.end
+            db,
+            viewer.id,
+            "author" if author_viewer else "user",
+            str(DEFAULT_PROJECT_ID),
+            window.start,
+            window.end,
+            actor_ids=await _synthetic_subjects(db, viewer),
         )
         if observed and observed["roots"] > 0:
             kinds = [
@@ -405,7 +446,7 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
         # Production is all-kind only after the owner qualifies all three
         # positive evidence paths; unsupported zeros remain Not recorded.
         supported_kinds=["mcp_calls", "confirmed_skill_loads", "recorded_hook_runs"] if live else kinds,
-        platform_overview=await _trace_allowed(viewer),
+        platform_overview=live and await _trace_allowed(viewer),
         trace_headlines=live,
         synthetic_test_cohort=test_only,
     )
@@ -415,7 +456,8 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
 async def platform_overview(
     period: Period, db: AsyncSession = Depends(get_db), viewer: User = Depends(get_mobile_user)
 ):
-    if not await _trace_allowed(viewer):
+    # Synthetic cohorts must not expose global measurements from other accounts.
+    if await _synthetic_subjects(db, viewer) is not None or not await _trace_allowed(viewer):
         return Response(status_code=403)
     result = PlatformOverview(window=_window(period, platform=True), revision="unqualified")
     if not await readable(db, str(DEFAULT_PROJECT_ID)):
@@ -465,7 +507,12 @@ async def person_summaries(
     subject_ids = request.subject_ids
     if len(set(subject_ids)) != len(subject_ids):
         raise HTTPException(status_code=422, detail="Distinct subjects required")
+    subjects = await _synthetic_subjects(db, viewer)
+    if subjects is not None and any(subject_id not in subjects for subject_id in subject_ids):
+        return Response(status_code=403)
     privileged = await _trace_allowed(viewer)
+    if await ds.get("mobile.synthetic_test_enabled") == "true":
+        privileged = (await active_mobile_cohort(db, viewer)) == "synthetic-author"
     if not privileged and viewer.id not in subject_ids:
         return Response(status_code=403)
     if privileged:
@@ -495,7 +542,14 @@ async def person_summaries(
     # mixed batch; the neutral status is identical for absent and forbidden IDs.
     permitted_ids = subject_ids if privileged else [viewer.id]
     authors, users = await trace_pair_batch(
-        db, permitted_ids, viewer.id, str(DEFAULT_PROJECT_ID), window.start, window.end, include_author=privileged
+        db,
+        permitted_ids,
+        viewer.id,
+        str(DEFAULT_PROJECT_ID),
+        window.start,
+        window.end,
+        include_author=privileged,
+        actor_ids=subjects,
     )
     items = []
     for subject_id in subject_ids:
@@ -575,11 +629,13 @@ async def people_search(
                 and_(User.username == page["last_name"], User.id > UUID(page["last_id"])),
             ),
         )
+    subjects = await _synthetic_subjects(db, viewer)
     rows = await db.scalars(
         select(User)
         .where(
             User.auth_provider != "deactivated",
             or_(User.username.ilike(pattern, escape="\\"), User.name.ilike(pattern, escape="\\")),
+            *((User.id.in_(subjects),) if subjects is not None else ()),
             *order,
         )
         .order_by(User.username, User.id)
@@ -603,10 +659,16 @@ async def people_search(
 async def resolve_people(
     request: ResolveRequest, db: AsyncSession = Depends(get_db), viewer: User = Depends(get_mobile_user)
 ):
-    del viewer
+    subjects = await _synthetic_subjects(db, viewer)
     if len(set(request.subject_ids)) != len(request.subject_ids):
         raise HTTPException(422, "Distinct subjects required")
-    rows = await db.scalars(select(User).where(User.id.in_(request.subject_ids), User.auth_provider != "deactivated"))
+    rows = await db.scalars(
+        select(User).where(
+            User.id.in_(request.subject_ids),
+            User.auth_provider != "deactivated",
+            *((User.id.in_(subjects),) if subjects is not None else ()),
+        )
+    )
     indexed = {row.id: row for row in rows.all()}
     return PeoplePage(
         items=[
@@ -670,6 +732,7 @@ async def components(
         window.start,
         window.end,
         viewer_self=viewer.id == subject_id,
+        actor_ids=await _synthetic_subjects(db, viewer),
         after=after,
     )
     if found is None:
@@ -728,6 +791,7 @@ async def component_detail(
         window.start,
         window.end,
         viewer_self=viewer.id == subject_id,
+        actor_ids=await _synthetic_subjects(db, viewer),
         component=component_id,
         kind=kind,
         limit=1,

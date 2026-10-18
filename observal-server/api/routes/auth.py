@@ -1744,8 +1744,11 @@ async def refresh_token(request: Request, req: RefreshRequest, db: AsyncSession 
     stored_user_id = stored.decode() if isinstance(stored, bytes) else stored
     client_id = payload.get("client_id")
     device_id = payload.get("device_id") if client_id == MOBILE_CLIENT_ID else None
-    if client_id == MOBILE_CLIENT_ID and not await ds.get_bool("mobile.auth_enabled"):
-        raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
+    if client_id == MOBILE_CLIENT_ID:
+        from services.mobile_read_control import mobile_issue_allowed
+
+        if not await mobile_issue_allowed(db):
+            raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
     if stored_user_id != user_id or is_revoked(marker, token_issued_us(payload)):
         raise HTTPException(status_code=401, detail="Refresh token has been revoked or expired")
 

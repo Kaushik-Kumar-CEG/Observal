@@ -424,6 +424,7 @@ def upsert_standalone(
     version_id: str | None = None,
     digest: str | None = None,
     requested_version: str | None = None,
+    config_sha256: str | None = None,
 ) -> None:
     """Add or update a standalone component (MCP, skill, hook, etc.) in the lock file.
 
@@ -457,6 +458,8 @@ def upsert_standalone(
         entry["digest"] = digest
     if requested_version:
         entry["requested_version"] = requested_version
+    if config_sha256:
+        entry["config_sha256"] = config_sha256
 
     def update(data: dict) -> None:
         url = current_registry_url()

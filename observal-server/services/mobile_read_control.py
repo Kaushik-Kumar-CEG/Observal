@@ -37,6 +37,21 @@ async def readable(db: AsyncSession, project: str) -> bool:
     )
 
 
+async def mobile_issue_allowed(db: AsyncSession) -> bool:
+    """Serialize mobile token mint with audited operator revoke.
+
+    A process-local or Redis setting may lag another API worker's revoke. Read
+    the authoritative PostgreSQL value under the same transaction lock held by
+    setup/revoke, and hold the shared lock through token issuance.
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+        {"key": _lock_key(str(DEFAULT_PROJECT_ID))},
+    )
+    value = await db.scalar(text("SELECT value FROM enterprise_config WHERE key='mobile.auth_enabled'"))
+    return value == "true"
+
+
 async def active_mobile_cohort(db: AsyncSession, viewer: User, *, server_id: str | None = None) -> str | None:
     """Authorize this viewer on the barrier-bound server, not merely a valid phone token.
 

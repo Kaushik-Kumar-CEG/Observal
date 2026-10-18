@@ -27,6 +27,10 @@ Every command available in the installed CLI. This block is generated from the T
 - `observal admin create-user`: Create a new user account. Requires admin privileges.
 - `observal admin delete-user`: Delete a user account. Requires admin privileges.
 - `observal admin diagnostics`: Show system diagnostics and health status.
+- `observal admin mobile-test-open`: Open only the exact preconfigured synthetic cohort after a closed-gate test.
+- `observal admin mobile-test-revoke`: Commit the DENY barrier first, then clear the disposable cohort.
+- `observal admin mobile-test-setup`: Configure only two disposable viewers; the read barrier stays CLOSED.
+- `observal admin mobile-test-status`: Read the exact mobile test barrier and two-viewer setup (super-admin only).
 - `observal admin recommend`: Mark or unmark an agent or component as recommended.
 - `observal admin reset-password`: Reset a user's password. Requires admin privileges.
 - `observal admin saml-config`: View current SAML SSO configuration.

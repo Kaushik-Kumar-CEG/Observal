@@ -683,116 +683,35 @@ class TestDeviceAuthFullFlow:
 
 
 class TestResolveFrontendUrl:
-    """Unit tests for _resolve_frontend_url to verify URL resolution priority."""
+    """Worker-independent origin resolution never trusts request-controlled fallbacks."""
 
-    def _make_request(self, headers=None):
-        """Create a mock Request with the given headers."""
-        req = MagicMock()
-        req.headers = headers or {}
-        return req
-
-    @patch("services.dynamic_settings.get_sync")
-    def test_uses_configured_frontend_url(self, mock_get_sync):
-        """When deployment.frontend_url is a real domain, use it directly."""
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("frontend", "public", "headers", "expected"),
+        [
+            ("https://app.example.com", "", {}, ("https://app.example.com", True)),
+            ("https://app.example.com/", "", {}, ("https://app.example.com", True)),
+            ("http://localhost", "https://api.example.com", {}, ("https://api.example.com", True)),
+            (
+                "http://localhost",
+                "",
+                {"x-forwarded-proto": "https", "host": "observal.company.io"},
+                ("https://observal.company.io", False),
+            ),
+            ("http://localhost:3000", "", {"host": "app.example.com:8080"}, ("http://app.example.com:8080", False)),
+            ("http://localhost", "", {}, ("http://localhost", False)),
+            ("http://localhost:3000", "https://deploy.example.com:9000", {}, ("https://deploy.example.com:9000", True)),
+        ],
+    )
+    async def test_shared_origin_priority(self, frontend, public, headers, expected, monkeypatch):
         from api.routes.device_auth import _resolve_frontend_url
+        from services import dynamic_settings as ds
 
-        mock_get_sync.side_effect = lambda key, *a: {
-            "deployment.frontend_url": "https://app.example.com",
-            "deployment.public_url": "",
-        }.get(key, "")
-
-        request = self._make_request()
-        result = _resolve_frontend_url(request)
-        assert result == "https://app.example.com"
-
-    @patch("services.dynamic_settings.get_sync")
-    def test_strips_trailing_slash(self, mock_get_sync):
-        """Trailing slash is removed from configured URL."""
-        from api.routes.device_auth import _resolve_frontend_url
-
-        mock_get_sync.side_effect = lambda key, *a: {
-            "deployment.frontend_url": "https://app.example.com/",
-            "deployment.public_url": "",
-        }.get(key, "")
-
-        request = self._make_request()
-        result = _resolve_frontend_url(request)
-        assert result == "https://app.example.com"
-
-    @patch("services.dynamic_settings.get_sync")
-    def test_falls_back_to_public_url_when_frontend_is_localhost(self, mock_get_sync):
-        """When frontend_url is localhost, derive from public_url."""
-        from api.routes.device_auth import _resolve_frontend_url
-
-        mock_get_sync.side_effect = lambda key, *a: {
-            "deployment.frontend_url": "http://localhost",
-            "deployment.public_url": "https://api.example.com",
-        }.get(key, "")
-
-        request = self._make_request()
-        result = _resolve_frontend_url(request)
-        assert result == "https://api.example.com"
-
-    @patch("services.dynamic_settings.get_sync")
-    def test_falls_back_to_request_headers(self, mock_get_sync):
-        """When both settings are localhost, infer from request Host header."""
-        from api.routes.device_auth import _resolve_frontend_url
-
-        mock_get_sync.side_effect = lambda key, *a: {
-            "deployment.frontend_url": "http://localhost",
-            "deployment.public_url": "",
-        }.get(key, "")
-
-        request = self._make_request(
-            headers={
-                "x-forwarded-proto": "https",
-                "host": "observal.company.io",
-            }
-        )
-        result = _resolve_frontend_url(request)
-        assert result == "https://observal.company.io"
-
-    @patch("services.dynamic_settings.get_sync")
-    def test_falls_back_to_host_header_without_forwarded_proto(self, mock_get_sync):
-        """Infer from Host header even without x-forwarded-proto."""
-        from api.routes.device_auth import _resolve_frontend_url
-
-        mock_get_sync.side_effect = lambda key, *a: {
-            "deployment.frontend_url": "http://localhost:3000",
-            "deployment.public_url": "",
-        }.get(key, "")
-
-        request = self._make_request(headers={"host": "app.example.com:8080"})
-        result = _resolve_frontend_url(request)
-        assert result == "http://app.example.com:8080"
-
-    @patch("services.dynamic_settings.get_sync")
-    def test_localhost_fallback_when_no_headers(self, mock_get_sync):
-        """When nothing is configured and no useful headers, fall back to localhost."""
-        from api.routes.device_auth import _resolve_frontend_url
-
-        mock_get_sync.side_effect = lambda key, *a: {
-            "deployment.frontend_url": "http://localhost",
-            "deployment.public_url": "",
-        }.get(key, "")
-
-        request = self._make_request(headers={})
-        result = _resolve_frontend_url(request)
-        assert result == "http://localhost"
-
-    @patch("services.dynamic_settings.get_sync")
-    def test_localhost_with_port_treated_as_unconfigured(self, mock_get_sync):
-        """http://localhost:3000 is also treated as unconfigured."""
-        from api.routes.device_auth import _resolve_frontend_url
-
-        mock_get_sync.side_effect = lambda key, *a: {
-            "deployment.frontend_url": "http://localhost:3000",
-            "deployment.public_url": "https://deploy.example.com:9000",
-        }.get(key, "")
-
-        request = self._make_request()
-        result = _resolve_frontend_url(request)
-        assert result == "https://deploy.example.com:9000"
+        values = {"deployment.frontend_url": frontend, "deployment.public_url": public}
+        getter = AsyncMock(side_effect=lambda key: values.get(key, ""))
+        monkeypatch.setattr(ds, "get", getter)
+        assert await _resolve_frontend_url(MagicMock(headers=headers)) == expected
+        assert getter.await_count == 2
 
 
 class TestCliVerificationUriRewrite:

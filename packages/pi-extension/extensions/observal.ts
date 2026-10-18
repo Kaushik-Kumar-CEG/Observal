@@ -700,7 +700,23 @@ export default function (pi: ExtensionAPI) {
     return registry ? sha256(Buffer.from(JSON.stringify(registry))).slice(0, 16) : "0".repeat(16);
   }
 
+  function canonicalMcpEntry(value: any): string {
+    if (Array.isArray(value)) return `[${value.map(canonicalMcpEntry).join(",")}]`;
+    if (value !== null && typeof value === "object") {
+      return `{${Object.keys(value).sort().map((key) =>
+        `${JSON.stringify(key)}:${canonicalMcpEntry(value[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  }
+
   function registeredMcpPins(): Array<{ id: string; version: string; alias: string }> {
+    // An explicit adapter config path may replace the global MCP definition.
+    // Programmatic in-memory adapter configs cannot be attested by this sender;
+    // such SDK integrations must not claim independently verified execution.
+    if (process.argv.some((arg) => arg === "--mcp-config" || arg.startsWith("--mcp-config=")) ||
+        (typeof pi.getFlag === "function" && pi.getFlag("mcp-config"))) return [];
+    if (process.env.PI_CODING_AGENT_DIR &&
+        path.resolve(process.env.PI_CODING_AGENT_DIR) !== path.join(os.homedir(), ".pi", "agent")) return [];
     const section = currentRegistryLockfile()?.harnesses?.pi;
     if (!section || typeof section !== "object") return [];
     // A lockfile may also contain Claude/Codex registrations. Only aliases
@@ -715,6 +731,31 @@ export default function (pi: ExtensionAPI) {
     } catch {
       return [];
     }
+    // Project MCP files outrank the global Pi config in pi-mcp-adapter. A
+    // same-named project entry can otherwise execute unrelated code while
+    // the sender claims the global registry pin. Fail closed for that alias,
+    // including unreadable/oversized/symlinked project configs.
+    const overridden = new Set<string>();
+    let directory = process.cwd();
+    for (;;) {
+      for (const relative of [".mcp.json", path.join(".pi", "mcp.json")]) {
+        const candidate = path.join(directory, relative);
+        try {
+          const stat = fs.lstatSync(candidate);
+          if (!stat.isFile() || stat.size > MAX_LAYER_FILE_SIZE) return [];
+          const project = JSON.parse(fs.readFileSync(candidate, "utf-8"));
+          if (!project || typeof project !== "object" || project.imports || project.plugins ||
+              !project.mcpServers ||
+              typeof project.mcpServers !== "object" || Array.isArray(project.mcpServers)) return [];
+          for (const name of Object.keys(project.mcpServers)) overridden.add(name);
+        } catch (error: any) {
+          if (error?.code !== "ENOENT") return [];
+        }
+      }
+      const parent = path.dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
     const pins: Array<{ id: string; version: string; alias: string }> = [];
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     const alias = /^[A-Za-z0-9_-]{1,128}$/;
@@ -725,7 +766,9 @@ export default function (pi: ExtensionAPI) {
       if (typeof pin.id !== "string" || !uuid.test(pin.id) ||
           typeof pin.version !== "string" || !version.test(pin.version) ||
           typeof native !== "string" || !alias.test(native) ||
-          !Object.hasOwn(active, native)) return [];
+          typeof pin.config_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(pin.config_sha256) ||
+          !Object.hasOwn(active, native) || overridden.has(native) ||
+          sha256(Buffer.from(canonicalMcpEntry(active[native]))) !== pin.config_sha256) return [];
       pins.push({ id: pin.id.toLowerCase(), version: pin.version, alias: native });
     }
     const unique = [...new Map(pins.map((pin) => [pin.id, pin])).values()];

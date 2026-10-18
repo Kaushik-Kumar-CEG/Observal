@@ -9,6 +9,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "observal-pi-verified-"));
+const originalCwd = process.cwd();
+process.chdir(home);
 process.env.HOME = home;
 const observalDir = path.join(home, ".observal");
 const piHome = path.join(home, ".pi", "agent");
@@ -18,7 +20,8 @@ const sentinel = "private-setting-value-do-not-send";
 fs.writeFileSync(path.join(piHome, "settings.json"), JSON.stringify({ token: sentinel }));
 fs.writeFileSync(path.join(piHome, "mcp.json"), JSON.stringify({ mcpServers: { alpha: { command: "synthetic" } } }));
 const id = "a11c01d1-1111-4111-8111-111111111111";
-const pin = { id, type: "mcp", name: sentinel, version: "1.2.3", local_name: "alpha", secret: sentinel };
+const pin = { id, type: "mcp", name: sentinel, version: "1.2.3", local_name: "alpha", secret: sentinel,
+  config_sha256: crypto.createHash("sha256").update(JSON.stringify({ command: "synthetic" })).digest("hex") };
 const sessionFile = path.join(home, "session.jsonl");
 fs.writeFileSync(sessionFile, `${JSON.stringify({ type: "session", id: "pi-v2", timestamp: new Date().toISOString() })}\n`);
 const canonical = JSON.stringify([[id, "1.2.3", "alpha"]]);
@@ -110,6 +113,30 @@ assert.equal(ingestPayloads.at(-1)?.run_origin, "pi_session_start_root_v1",
 
 accept = true;
 const uploaded = manifestRequests.length;
+process.argv.push("--mcp-config=alternate.json");
+await handlers.get("session_start")!({ reason: "reload" }, context);
+fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: "alternate config" } })}\n`);
+await handlers.get("agent_end")!({}, context);
+assert.equal(manifestRequests.length, uploaded, "explicit alternate adapter config cannot claim global Pi registry identity");
+assert.equal(ingestPayloads.at(-1)?.layer_hash?.startsWith("v2_"), false);
+process.argv.pop();
+fs.writeFileSync(path.join(piHome, "mcp.json"),
+  JSON.stringify({ mcpServers: { alpha: { command: "tampered-global-server" } } }));
+await handlers.get("session_start")!({ reason: "reload" }, context);
+fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: "global edit" } })}\n`);
+await handlers.get("agent_end")!({}, context);
+assert.equal(manifestRequests.length, uploaded, "edited global server cannot retain installed registry identity");
+assert.equal(ingestPayloads.at(-1)?.layer_hash?.startsWith("v2_"), false);
+fs.writeFileSync(path.join(piHome, "mcp.json"),
+  JSON.stringify({ mcpServers: { alpha: { command: "synthetic" } } }));
+fs.writeFileSync(path.join(home, ".pi", "mcp.json"),
+  JSON.stringify({ mcpServers: { alpha: { command: "unrelated-project-server" } } }));
+await handlers.get("session_start")!({ reason: "reload" }, context);
+fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: "project override" } })}\n`);
+await handlers.get("agent_end")!({}, context);
+assert.equal(manifestRequests.length, uploaded, "project override cannot claim global installed MCP identity");
+assert.equal(ingestPayloads.at(-1)?.layer_hash?.startsWith("v2_"), false);
+fs.rmSync(path.join(home, ".pi", "mcp.json"));
 fs.rmSync(path.join(piHome, "mcp.json"));
 await handlers.get("session_start")!({ reason: "reload" }, context);
 fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "user", content: "stale pin" } })}\n`);
@@ -145,5 +172,6 @@ assert.equal(ingestPayloads.at(-1)?.parent_session_id, "pi-v2");
 assert.equal(ingestPayloads.at(-1)?.parent_run_incarnation, ingestPayloads[0].run_incarnation);
 assert.equal(ingestPayloads.at(-1)?.parent_header_hash, ingestPayloads[0].run_header_hash);
 server.close();
+process.chdir(originalCwd);
 fs.rmSync(home, { recursive: true, force: true });
 console.log("verified layer sender ok");

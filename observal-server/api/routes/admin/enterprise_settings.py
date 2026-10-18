@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Hemalatha Madeswaran <hemalathamadeswaran@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Admin settings, diagnostics, and resource tuning routes."""
@@ -39,6 +40,8 @@ from .helpers import _validate_branding_app_name, _validate_branding_logo
 def _require_dedicated_review_policy_route(key: str) -> None:
     if key == "review.policy" or key.startswith("review.policy.team."):
         raise HTTPException(status_code=409, detail="Use the dedicated review-policy endpoint")
+    if key.startswith("mobile.") or key == "trace_headlines":
+        raise HTTPException(status_code=409, detail="Use the dedicated mobile-test operator endpoint")
 
 
 def _require_usage_ping_super_admin(key: str, current_user: User) -> None:

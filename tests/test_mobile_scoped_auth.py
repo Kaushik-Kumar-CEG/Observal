@@ -52,6 +52,7 @@ def identity(monkeypatch, tmp_path):
     user.auth_provider = "local"
     db = MagicMock()
     db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: user))
+    db.scalar = AsyncMock(return_value="true")  # authoritative mobile issuance flag under shared PG lock
     return SimpleNamespace(redis=redis, user=user, db=db)
 
 
@@ -183,8 +184,8 @@ async def test_device_grant_creates_scope_preserving_read_only_phone_tokens(iden
 async def test_mobile_sso_verification_origin_is_browser_initial_only(identity, monkeypatch):
     monkeypatch.setattr(
         device_auth.ds,
-        "get_sync",
-        lambda key, default=None: "https://browser.example.test" if key == "deployment.frontend_url" else default,
+        "get",
+        AsyncMock(side_effect=lambda key: "https://browser.example.test" if key == "deployment.frontend_url" else ""),
     )
     grant = await inspect.unwrap(device_auth.device_authorize)(
         SimpleNamespace(headers={"host": "untrusted.example"}),
@@ -196,9 +197,9 @@ async def test_mobile_sso_verification_origin_is_browser_initial_only(identity, 
     assert "untrusted.example" not in grant.verification_uri
     monkeypatch.setattr(
         device_auth.ds,
-        "get_sync",
-        lambda key, default=None: (
-            "https://attacker.example.test/redirect" if key == "deployment.frontend_url" else default
+        "get",
+        AsyncMock(
+            side_effect=lambda key: "https://attacker.example.test/redirect" if key == "deployment.frontend_url" else ""
         ),
     )
     with pytest.raises(HTTPException) as exc:
@@ -208,7 +209,7 @@ async def test_mobile_sso_verification_origin_is_browser_initial_only(identity, 
             identity.db,
         )
     assert exc.value.status_code == 503
-    monkeypatch.setattr(device_auth.ds, "get_sync", lambda _key, default=None: default)
+    monkeypatch.setattr(device_auth.ds, "get", AsyncMock(return_value=""))
     with pytest.raises(HTTPException) as exc:
         await inspect.unwrap(device_auth.device_authorize)(
             SimpleNamespace(
@@ -225,11 +226,29 @@ async def test_mobile_sso_verification_origin_is_browser_initial_only(identity, 
 
 
 @pytest.mark.asyncio
+async def test_public_loopback_setting_cannot_trust_a_forwarded_attacker_origin(identity, monkeypatch):
+    monkeypatch.setattr(
+        device_auth.ds,
+        "get",
+        AsyncMock(side_effect=lambda key: "https://localhost:18443" if key == "deployment.public_url" else ""),
+    )
+    with pytest.raises(HTTPException) as exc:
+        await inspect.unwrap(device_auth.device_authorize)(
+            SimpleNamespace(
+                headers={"host": "api.test", "x-forwarded-host": "attacker.test", "x-forwarded-proto": "https"}
+            ),
+            DeviceAuthRequest(client_id=MOBILE_CLIENT_ID),
+            identity.db,
+        )
+    assert exc.value.status_code == 503
+
+
+@pytest.mark.asyncio
 async def test_explicit_isolated_loopback_https_origin_never_uses_spoofed_forwarded_host(identity, monkeypatch):
     monkeypatch.setattr(
         device_auth.ds,
-        "get_sync",
-        lambda key, default=None: "https://localhost:18443" if key == "deployment.frontend_url" else "",
+        "get",
+        AsyncMock(side_effect=lambda key: "https://localhost:18443" if key == "deployment.frontend_url" else ""),
     )
     request = SimpleNamespace(
         headers={"host": "attacker.test", "x-forwarded-host": "attacker.test", "x-forwarded-proto": "http"}
@@ -241,8 +260,10 @@ async def test_explicit_isolated_loopback_https_origin_never_uses_spoofed_forwar
     assert grant.verification_uri.startswith("https://localhost:18443/device")
     monkeypatch.setattr(
         device_auth.ds,
-        "get_sync",
-        lambda key, default=None: "https://localhost:18443/redirect" if key == "deployment.frontend_url" else "",
+        "get",
+        AsyncMock(
+            side_effect=lambda key: "https://localhost:18443/redirect" if key == "deployment.frontend_url" else ""
+        ),
     )
     with pytest.raises(HTTPException) as exc:
         await inspect.unwrap(device_auth.device_authorize)(
@@ -352,6 +373,7 @@ async def test_disable_rollout_burns_approved_phone_grant_and_blocks_active_read
         identity.user, client_id=MOBILE_CLIENT_ID, device_id="phone-before-disable"
     )
     monkeypatch.setattr(device_auth.ds, "get_bool", AsyncMock(return_value=False))
+    identity.db.scalar.return_value = "false"
     with pytest.raises(HTTPException) as exc:
         await inspect.unwrap(device_auth.device_token)(
             request,

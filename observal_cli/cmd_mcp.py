@@ -1113,6 +1113,7 @@ def _install_impl(
     env_file: str | None = None,
     no_prompt: bool = False,
     output: OutputMode = OutputMode.table,
+    apply: bool = False,
 ):
     optic.trace("mcp_id={}, harness={}, version={}", mcp_id, harness, version)
     import json as _json
@@ -1258,6 +1259,20 @@ def _install_impl(
         )
 
     snippet = result.get("config_snippet", {})
+    if apply:
+        if any(not value or value.startswith("<") for value in (*env_values.values(), *header_values.values())):
+            fail(
+                ErrorCategory.VALIDATION,
+                "Cannot apply Pi MCP with missing required values or placeholders.",
+                operation="Apply Pi MCP server",
+                resource=resolved,
+                remediation="Provide all required inputs before applying the configuration.",
+            )
+        from observal_cli.pi_mcp_apply import apply_pi_mcp
+
+        alias = apply_pi_mcp(result, listing)
+        rprint(f"[green]✓ Applied Pi MCP {esc(alias)} at pinned version {esc(result['version'])}[/green]")
+        return
     if raw:
         print(_json.dumps(snippet, indent=2))
         return
@@ -1522,6 +1537,7 @@ def install(
     env_file: str | None = typer.Option(None, "--env-file", help="Path to .env file for environment variables"),
     no_prompt: bool = typer.Option(False, "--no-prompt", "-y", help="Skip interactive prompts"),
     output: OutputMode = typer.Option("table", "--output", "-o", help="Output format: table or json"),
+    apply: bool = typer.Option(False, "--apply", help="Apply to Pi mcp.json and pin identity after disk readback"),
 ):
     """Generate an install config snippet for an MCP server.
 
@@ -1542,6 +1558,14 @@ def install(
         observal registry mcp install my-server --harness cursor --raw > .cursor/mcp.json
     """
     optic.trace("mcp_id={}, harness={}", mcp_id, harness)
+    if apply and (harness != "pi" or raw or output == "json"):
+        fail(
+            ErrorCategory.VALIDATION,
+            "--apply is only available for Pi in table mode without --raw.",
+            operation="Apply Pi MCP server",
+            resource="output options",
+            remediation="Use --harness pi --apply without --raw or --output json.",
+        )
     if raw and output == "json":
         fail(
             ErrorCategory.VALIDATION,
@@ -1590,6 +1614,7 @@ def install(
         env_file=env_file,
         no_prompt=no_prompt,
         output=output,
+        apply=apply,
     )
 
 

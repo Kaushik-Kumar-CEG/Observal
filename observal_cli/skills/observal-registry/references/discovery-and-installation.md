@@ -79,6 +79,7 @@ Choose the exact harness and scope before writing files.
 ```bash
 observal registry mcp install NAMESPACE/SLUG --harness kiro --no-prompt --output json
 observal registry mcp install NAMESPACE/SLUG --harness cursor --version 2.1.0 --no-prompt --output json
+observal registry mcp install NAMESPACE/SLUG --harness pi --version 2.1.0 --apply
 observal registry skill install NAMESPACE/SLUG --harness claude-code --scope project --output json
 observal registry skill install NAMESPACE/SLUG --harness kiro --scope user --version 1.2.0 --output json
 observal registry skill install NAMESPACE/SLUG --harness kiro --scope user --version 1.3.0 --check-upgrade --output json
@@ -96,6 +97,8 @@ Use raw output only when the user explicitly asks for a config snippet or raw re
 ```bash
 observal registry mcp install NAMESPACE/SLUG --harness claude-code --raw
 ```
+
+For Pi, `--apply` writes the exact returned MCP entry to the active user-level `~/.pi/agent/mcp.json` and reads it back before recording the server-bound registry identity pin. It refuses colliding aliases, invalid config, missing inputs and placeholder values. The Pi MCP adapter must still be installed and actually load the server; a lockfile pin is **not** a verified invocation or connection. Without `--apply`, the MCP command only generates a snippet and must not be treated as an installed Pi server. Never paste or print secret env/header values.
 
 Complete registry folders have managed receipts; upgrades require both exact reviewed provenance and an unchanged complete installed tree. Preview with `--check-upgrade` (it lists `added`, `removed`, `modified` and `mode_changed` paths), then opt in with `--upgrade`. A first install needs no backup root; replacing a folder does, so use `--backup-root DIR` only for a private, Git-ignored, same-filesystem root outside harness skill discovery. Backups are retained until explicitly pruned; restore refuses local modifications. Older unreceipted folders need an unambiguous exact-version lock entry and matching reviewed folder bytes; untracked folders cannot be silently adopted. Git and resource-less direct skills retain their existing install semantics. Never combine raw and JSON modes. JSON MCP installation requires `--no-prompt`; missing required values return a nonzero `error.result.needs_input` response before install generation. Raw mode is the only template workflow that may intentionally contain placeholders. Never print supplied environment or header values.
 

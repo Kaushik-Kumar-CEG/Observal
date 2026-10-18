@@ -342,10 +342,15 @@ def _trace_scope(scope: Scope, *, viewer_self: bool) -> str:
     return " AND e.user_id=:subject AND " + public
 
 
-def _trace_branches(columns: str, scope: Scope, viewer_self: bool, *, kind: str | None = None) -> str:
+def _trace_branches(
+    columns: str, scope: Scope, viewer_self: bool, *, kind: str | None = None, actor_ids: bool = False
+) -> str:
     """Same visibility and original-author check independently for each type."""
     return " UNION ALL ".join(
-        f"SELECT '{item}' AS kind,{columns} " + _trace_from(item) + _trace_scope(scope, viewer_self=viewer_self)
+        f"SELECT '{item}' AS kind,{columns} "
+        + _trace_from(item)
+        + _trace_scope(scope, viewer_self=viewer_self)
+        + (" AND e.user_id=ANY(CAST(:actor_ids AS uuid[]))" if actor_ids else "")
         for item in _TRACE_TABLES
         if kind is None or kind == item
     )
@@ -360,6 +365,7 @@ async def trace_union(
     end: datetime,
     *,
     viewer_self: bool = False,
+    actor_ids: set[uuid.UUID] | None = None,
 ) -> dict | None:
     """Partial-only distinct actor/root union; no source JSONL per card.
 
@@ -376,13 +382,18 @@ async def trace_union(
         "count(*) FILTER (WHERE typed.kind='skill') AS skill_loads, "
         "count(*) FILTER (WHERE typed.kind='hook') AS hook_runs, "
         "count(DISTINCT (typed.event_time AT TIME ZONE 'UTC')::date) AS days FROM ("
-        + _trace_branches("e.user_id,e.root_run_incarnation,e.event_time", scope, viewer_self)
+        + _trace_branches(
+            "e.user_id,e.root_run_incarnation,e.event_time", scope, viewer_self, actor_ids=actor_ids is not None
+        )
         + ") typed"
     )
     # A concentrated original author otherwise provokes one nested lookup per
     # event into run, publication and account tables (10K+ repeated lookups).
     await db.execute(text("SET LOCAL enable_nestloop=off"))
-    row = (await db.execute(text(sql), {"project": project, "subject": subject, "start": start, "end": end})).one()
+    params = {"project": project, "subject": subject, "start": start, "end": end}
+    if actor_ids is not None:
+        params["actor_ids"] = list(actor_ids)
+    row = (await db.execute(text(sql), params)).one()
     return (
         {
             "roots": row.roots,
@@ -405,6 +416,7 @@ async def trace_pair_batch(
     end: datetime,
     *,
     include_author: bool = True,
+    actor_ids: set[uuid.UUID] | None = None,
 ) -> tuple[dict[uuid.UUID, dict], dict[uuid.UUID, dict]]:
     """Materialize bounded viewer-relevant facts once, then group two independent scopes."""
     from services.mobile_read_control import readable
@@ -412,6 +424,8 @@ async def trace_pair_batch(
     if not await readable(db, project):
         return {}, {}
     params = {"project": project, "subjects": subjects, "viewer": viewer, "start": start, "end": end}
+    if actor_ids is not None:
+        params["actor_ids"] = list(actor_ids)
     # The materialized CTE prevents repeated run/visibility/approval lookups
     # when both scopes are requested in the same viewport. It contains only
     # actors/authors on the requested 12 IDs, not the global evidence corpus.
@@ -420,6 +434,7 @@ async def trace_pair_batch(
         "p.original_author_id,l.is_private,l.submitted_by,v.status AS version_status,"
         "approval.status AS publication_status "
         + _trace_from(kind)
+        + (" AND e.user_id=ANY(CAST(:actor_ids AS uuid[]))" if actor_ids is not None else "")
         + " AND ((:include_author AND p.original_author_id=ANY(CAST(:subjects AS uuid[]))) "
         "OR e.user_id=ANY(CAST(:subjects AS uuid[])))"
         for kind in _TRACE_TABLES
@@ -477,6 +492,7 @@ async def trace_component_page(
     component: uuid.UUID | None = None,
     kind: Literal["mcp", "skill", "hook"] | None = None,
     limit: int = 20,
+    actor_ids: set[uuid.UUID] | None = None,
 ) -> list[dict] | None:
     """Indexed PG fact aggregation with stable reach/id keyset, 21-row probe."""
     from services.mobile_read_control import readable
@@ -485,6 +501,8 @@ async def trace_component_page(
         return None
     params = {"project": project, "subject": subject, "start": start, "end": end, "limit": limit + 1}
     component_sql = ""
+    if actor_ids is not None:
+        params["actor_ids"] = list(actor_ids)
     if component is not None:
         component_sql = " AND l.id=:component"
         params["component"] = component
@@ -501,6 +519,7 @@ async def trace_component_page(
         "origin.name AS author_name,e.user_id,e.root_run_incarnation "
         + _trace_from(item)
         + _trace_scope(scope, viewer_self=viewer_self)
+        + (" AND e.user_id=ANY(CAST(:actor_ids AS uuid[]))" if actor_ids is not None else "")
         + component_sql
         for item in _TRACE_TABLES
         if kind is None or item == kind

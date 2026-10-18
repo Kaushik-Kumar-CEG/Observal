@@ -102,7 +102,7 @@ def _explicit_loopback_https(value: str) -> bool:
         return False
 
 
-def _resolve_frontend_url(request: Request) -> str:
+async def _resolve_frontend_url(request: Request) -> tuple[str, bool]:
     """Derive the frontend base URL for verification links.
 
     Resolution order:
@@ -111,15 +111,15 @@ def _resolve_frontend_url(request: Request) -> str:
       3. Request headers (x-forwarded-proto/host, or Host)
       4. Fallback to http://localhost (local dev only)
     """
-    import services.dynamic_settings as ds
-
-    # 1. Explicitly configured frontend URL
-    configured = ds.get_sync("deployment.frontend_url")
+    # Read the shared settings store on every challenge. The process-local sync
+    # cache is refreshed only by the API worker that handles an admin write;
+    # other workers otherwise keep issuing stale verification origins forever.
+    configured = await ds.get("deployment.frontend_url")
+    public_url = await ds.get("deployment.public_url")
     if configured and (not _is_localhost_url(configured) or _explicit_loopback_https(configured)):
-        return configured.rstrip("/")
+        return configured.rstrip("/"), True
 
     # 2. Derive from public_url if set
-    public_url = ds.get_sync("deployment.public_url")
     if public_url and not _is_localhost_url(public_url):
         parsed = urlparse(public_url)
         scheme = parsed.scheme or "https"
@@ -128,7 +128,7 @@ def _resolve_frontend_url(request: Request) -> str:
         port_suffix = ""
         if parsed.port and parsed.port not in (80, 443):
             port_suffix = f":{parsed.port}"
-        return f"{scheme}://{host}{port_suffix}"
+        return f"{scheme}://{host}{port_suffix}", True
 
     # 3. Infer from request headers (works behind any reverse proxy)
     forwarded_proto = request.headers.get("x-forwarded-proto")
@@ -147,10 +147,10 @@ def _resolve_frontend_url(request: Request) -> str:
             inferred_scheme = "http"
         scheme = forwarded_proto or inferred_scheme
         if not _is_localhost_url(f"{scheme}://{clean_host}"):
-            return f"{scheme}://{clean_host}"
+            return f"{scheme}://{clean_host}", False
 
     # 4. Local dev fallback
-    return "http://localhost"
+    return "http://localhost", False
 
 
 async def _saml_configured(db: AsyncSession) -> bool:
@@ -189,15 +189,11 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
                 status_code=400,
                 detail=f"{'Google' if requested_provider == 'google' else 'GitHub'} sign-in is not configured on this server",
             )
-    frontend_url = _resolve_frontend_url(request)
+    frontend_url, trusted_public_origin = await _resolve_frontend_url(request)
     verification_origins = None
     if client_id == MOBILE_CLIENT_ID:
         parsed = urlparse(frontend_url)
         safe_local = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
-        trusted_public_origin = any(
-            configured and (not _is_localhost_url(configured) or _explicit_loopback_https(configured))
-            for configured in (ds.get_sync("deployment.frontend_url"), ds.get_sync("deployment.public_url"))
-        )
         if (not safe_local and not trusted_public_origin) or (
             (parsed.scheme != "https" and not safe_local)
             or not parsed.hostname
@@ -341,8 +337,11 @@ async def device_token(request: Request, req: DeviceTokenRequest, db: AsyncSessi
             return JSONResponse(status_code=400, content={"error": "expired_token"})
         # The feature may have been disabled after an approved device code was
         # created. The consumed grant stays burned; it must not mint credentials.
-        if client_id == MOBILE_CLIENT_ID and not await ds.get_bool("mobile.auth_enabled"):
-            raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
+        if client_id == MOBILE_CLIENT_ID:
+            from services.mobile_read_control import mobile_issue_allowed
+
+            if not await mobile_issue_allowed(db):
+                raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
         access_token, refresh_token, expires_in = await _issue_tokens(
             user, client_id=client_id, device_id=consumed_data.get("device_id")
         )

@@ -463,6 +463,77 @@ admin_app = typer.Typer(
 )
 
 
+_MOBILE_TEST_ACK = "isolated-disposable-synthetic-only-v1"
+
+
+def _mobile_test_print(result: dict, output: OutputMode) -> None:
+    if output == "json":
+        output_json(result)
+        return
+    state = "CLOSED" if result.get("blocked", True) else "OPEN (DISPOSABLE TEST ONLY)"
+    rprint(
+        f"Mobile test: {state}; generation={result.get('generation', 0)}; "
+        f"configured={result.get('configured', False)}; "
+        f"revocation_pending={result.get('revocation_pending', False)}"
+    )
+
+
+@admin_app.command(name="mobile-test-status")
+def admin_mobile_test_status(output: OutputMode = typer.Option("table", "--output", "-o")):
+    """Read the exact mobile test barrier and two-viewer setup (super-admin only)."""
+    _mobile_test_print(client.get("/api/v1/admin/mobile-test/status"), output)
+
+
+@admin_app.command(name="mobile-test-setup")
+def admin_mobile_test_setup(
+    server_id: str = typer.Option(..., "--server-id"),
+    author_viewer_id: str = typer.Option(..., "--author-viewer-id"),
+    user_viewer_id: str = typer.Option(..., "--user-viewer-id"),
+    output: OutputMode = typer.Option("table", "--output", "-o"),
+):
+    """Configure only two disposable viewers; the read barrier stays CLOSED."""
+    _mobile_test_print(
+        client.post(
+            "/api/v1/admin/mobile-test/setup",
+            {
+                "server_id": server_id,
+                "author_viewer_id": author_viewer_id,
+                "user_viewer_id": user_viewer_id,
+                "acknowledgement": _MOBILE_TEST_ACK,
+            },
+        ),
+        output,
+    )
+
+
+@admin_app.command(name="mobile-test-open")
+def admin_mobile_test_open(
+    server_id: str = typer.Option(..., "--server-id"),
+    author_viewer_id: str = typer.Option(..., "--author-viewer-id"),
+    user_viewer_id: str = typer.Option(..., "--user-viewer-id"),
+    output: OutputMode = typer.Option("table", "--output", "-o"),
+):
+    """Open only the exact preconfigured synthetic cohort after a closed-gate test."""
+    _mobile_test_print(
+        client.post(
+            "/api/v1/admin/mobile-test/open",
+            {
+                "server_id": server_id,
+                "author_viewer_id": author_viewer_id,
+                "user_viewer_id": user_viewer_id,
+                "acknowledgement": _MOBILE_TEST_ACK,
+            },
+        ),
+        output,
+    )
+
+
+@admin_app.command(name="mobile-test-revoke")
+def admin_mobile_test_revoke(output: OutputMode = typer.Option("table", "--output", "-o")):
+    """Commit the DENY barrier first, then clear the disposable cohort."""
+    _mobile_test_print(client.post("/api/v1/admin/mobile-test/revoke", {}), output)
+
+
 @admin_app.command(name="settings")
 def admin_settings(output: OutputMode = typer.Option("table", "--output", "-o")):
     """List server settings.
