@@ -188,6 +188,13 @@ async def mobile_test_setup(
     current = await _status(db)
     if not current.blocked or current.trace_headlines or current.revocation_pending or not current.generation:
         raise HTTPException(409, "A migrated, closed read barrier and disabled live qualification are required")
+    # A closed setup may already have issued mobile grants. Never overwrite
+    # its viewer IDs or extend its deadline: audited revoke must retire both
+    # principals' grants first, even when the proposed pair is unchanged.
+    if current.configured:
+        raise HTTPException(409, "Revoke the current disposable cohort before another setup")
+    if not await db.scalar(text("SELECT source_policy_ready FROM mobile_read_controls WHERE project_id='default'")):
+        raise HTTPException(409, "Verified ClickHouse source retention is required before test setup")
     server_id = await db.scalar(text("SELECT server_id FROM mobile_server_identity WHERE singleton=true"))
     if str(server_id) != str(req.server_id):
         raise HTTPException(409, "This is not the selected mobile server")
@@ -260,6 +267,7 @@ async def mobile_test_open(
     if (
         not status.blocked
         or status.revocation_pending
+        or not await db.scalar(text("SELECT source_policy_ready FROM mobile_read_controls WHERE project_id='default'"))
         or not status.configured
         or status.trace_headlines
         or values["mobile.trace_qualification_server_id"]

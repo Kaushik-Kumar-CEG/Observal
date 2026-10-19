@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Focused coverage for enterprise settings administration routes."""
@@ -427,6 +428,8 @@ async def test_get_setting_returns_external_plain_and_masks_all_secret_storage(m
 
 @pytest.mark.asyncio
 async def test_upsert_retention_setting_normalizes_persists_and_refreshes_cache(boundaries, monkeypatch):
+    apply_policy = AsyncMock()
+    monkeypatch.setattr(es, "_apply_retention_setting", apply_policy)
     db = _db(_one(None))
     monkeypatch.setattr(es.ds, "is_externally_managed", lambda _key: False)
 
@@ -445,6 +448,7 @@ async def test_upsert_retention_setting_normalizes_persists_and_refreshes_cache(
     db.refresh.assert_awaited_once_with(stored)
     boundaries.invalidate.assert_awaited_once_with("data.retention_days")
     boundaries.refresh.assert_awaited_once_with()
+    apply_policy.assert_awaited_once_with()
     event = boundaries.emit.await_args.args[0]
     assert event.event_type is EventType.SETTING_CHANGED
     assert event.severity is Severity.WARNING
@@ -460,6 +464,24 @@ async def test_upsert_retention_setting_normalizes_persists_and_refreshes_cache(
         "is_set": True,
         "is_externally_managed": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_retention_setting_failure_keeps_committed_deny_and_exposes_retry(boundaries, monkeypatch):
+    monkeypatch.setattr(es.ds, "is_externally_managed", lambda _key: False)
+    monkeypatch.setattr(es, "_apply_retention_setting", AsyncMock(side_effect=HTTPException(503, "TTL unavailable")))
+    db = _db(_one(None))
+    with pytest.raises(HTTPException) as denied:
+        await es.upsert_setting("data.retention_days", EnterpriseConfigUpdate(value="7"), db=db, current_user=_actor())
+    assert denied.value.status_code == 503
+    db.commit.assert_awaited_once_with()  # PG trigger has already fenced every mobile reader.
+    boundaries.emit.assert_awaited_once()
+    for invalid in ("-1", "36600", "7.5", "bad", "NaN"):
+        with pytest.raises(HTTPException) as invalid_error:
+            await es.upsert_setting(
+                "data.retention_days", EnterpriseConfigUpdate(value=invalid), db=_db(_one(None)), current_user=_actor()
+            )
+        assert invalid_error.value.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -768,6 +790,8 @@ async def test_revoke_sensitive_restart_setting_deletes_and_emits_critical_event
 
 @pytest.mark.asyncio
 async def test_delete_and_revoke_nonrestart_settings_skip_restart_marker(boundaries, monkeypatch):
+    apply_policy = AsyncMock()
+    monkeypatch.setattr(es, "_apply_retention_setting", apply_policy)
     monkeypatch.setattr(es.ds, "is_externally_managed", lambda _key: False)
     delete_cfg = SimpleNamespace(key="data.retention_days", value="90")
     revoke_cfg = SimpleNamespace(key="insights.api_key", value="enc:key")
@@ -788,7 +812,8 @@ async def test_delete_and_revoke_nonrestart_settings_skip_restart_marker(boundar
         call("insights.api_key"),
     ]
     assert boundaries.refresh.await_count == 2
-    boundaries.emit.assert_awaited_once()
+    apply_policy.assert_awaited_once_with()
+    assert boundaries.emit.await_count == 2
 
 
 @pytest.mark.asyncio

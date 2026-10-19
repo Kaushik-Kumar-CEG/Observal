@@ -248,7 +248,8 @@ async def _scope_revision(db: AsyncSession, viewer: User, subject: UUID, scope: 
         deadline_sql = text(
             "SELECT source_retained_until FROM mobile_session_publications "
             "WHERE project_id=:project AND user_id=:subject AND source_retained_until>clock_timestamp() "
-            "AND status IN ('complete','partial') ORDER BY source_retained_until LIMIT 1"
+            "AND status IN ('complete','partial') AND source_policy_epoch=(SELECT source_policy_epoch "
+            "FROM mobile_read_controls WHERE project_id=:project) ORDER BY source_retained_until LIMIT 1"
         )
     else:
         deadline_sql = text(
@@ -256,6 +257,8 @@ async def _scope_revision(db: AsyncSession, viewer: User, subject: UUID, scope: 
             "JOIN LATERAL (SELECT source_retained_until FROM mobile_session_publications pub "
             "WHERE pub.project_id=link.project_id AND pub.user_id=link.actor_id "
             "AND pub.source_retained_until>clock_timestamp() AND pub.status IN ('complete','partial') "
+            "AND pub.source_policy_epoch=(SELECT source_policy_epoch FROM mobile_read_controls "
+            "WHERE project_id=:project) "
             "ORDER BY pub.source_retained_until LIMIT 1) next_source ON true "
             "WHERE link.project_id=:project AND link.author_id=:subject"
         )
@@ -325,6 +328,7 @@ async def _scope_revisions(db: AsyncSession, viewer: User, subjects: list[tuple[
               SELECT pub.source_retained_until AS floor FROM mobile_session_publications pub
               WHERE requested.scope='user' AND pub.project_id=:project AND pub.user_id=requested.subject_id
                 AND pub.status IN ('complete','partial') AND pub.source_retained_until>clock_timestamp()
+                AND pub.source_policy_epoch=g.source_policy_epoch
               ORDER BY pub.source_retained_until LIMIT 1
             ) user_deadline ON true
             LEFT JOIN LATERAL (
@@ -333,6 +337,7 @@ async def _scope_revisions(db: AsyncSession, viewer: User, subjects: list[tuple[
                 SELECT pub.source_retained_until AS floor FROM mobile_session_publications pub
                 WHERE pub.project_id=link.project_id AND pub.user_id=link.actor_id
                   AND pub.status IN ('complete','partial') AND pub.source_retained_until>clock_timestamp()
+                  AND pub.source_policy_epoch=g.source_policy_epoch
                 ORDER BY pub.source_retained_until LIMIT 1
               ) next_source ON true
               WHERE requested.scope='author' AND link.project_id=:project
@@ -568,7 +573,7 @@ async def platform_overview(
     if not await readable(db, str(DEFAULT_PROJECT_ID)):
         return result
     general = await prompted_roots(db, str(DEFAULT_PROJECT_ID), result.window.start, result.window.end)
-    if general is None or general["active_accounts"] < 10:
+    if general is None or general["active_accounts"] < 10 or not await readable(db, str(DEFAULT_PROJECT_ID)):
         return result  # Same redacted shape for suppressed, purged, unsupported.
     coverage = Coverage(
         eligible_sessions=general["eligible_sessions"], supported_harnesses=["pi"], projection="partial"

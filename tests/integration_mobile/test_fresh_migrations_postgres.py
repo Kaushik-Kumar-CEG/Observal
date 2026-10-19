@@ -65,8 +65,16 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
         try:
             async with verify.connect() as conn:
                 assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == (
-                    "066_mobile_scope_retention_clock"
+                    "067_mobile_short_retention_fence"
                 )
+                assert (
+                    await conn.execute(
+                        text(
+                            "SELECT source_policy_ready,source_policy_epoch FROM mobile_read_controls "
+                            "WHERE project_id='default'"
+                        )
+                    )
+                ).one() == (False, 1)
                 assert (
                     await conn.execute(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'"))
                 ).scalar_one() is True
@@ -88,6 +96,24 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
                         )
                     )
                 ).scalar_one() == 0
+        finally:
+            await verify.dispose()
+        # An unused 067 installation may still downgrade. Both triggers
+        # using the source-epoch function must be removed before that function.
+        for args in (("downgrade", "066_mobile_scope_retention_clock"), ("upgrade", "head")):
+            subprocess.run(
+                [sys.executable, "-m", "alembic", *args],
+                env=env,
+                check=True,
+                capture_output=True,
+                timeout=105,
+            )
+        verify = create_async_engine(scratch_url)
+        try:
+            async with verify.connect() as conn:
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == (
+                    "067_mobile_short_retention_fence"
+                )
         finally:
             await verify.dispose()
     finally:

@@ -41,7 +41,9 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
     # This transaction never commits. Its verified root witness flags are
     # SYNTHETIC acceptance fixtures, not a claim about an eligible live sender.
     async with async_session() as db:
-        await db.execute(text("UPDATE mobile_read_controls SET blocked=false WHERE project_id='default'"))
+        await db.execute(
+            text("UPDATE mobile_read_controls SET blocked=false,source_policy_ready=true WHERE project_id='default'")
+        )
         await db.execute(
             text("""
             INSERT INTO users(id,email,username,name,role,created_at)
@@ -149,7 +151,18 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
         )
         for table in ("mobile_evidence_events", "mobile_run_instances", "mobile_session_publications"):
             await db.execute(text(f"ANALYZE {table}"))
-        await db.execute(text("SET LOCAL statement_timeout='15000ms'"))
+        # Seeded, fully synthetic source witnesses stand in for a completed
+        # worker recheck under this disposable DB's current 067 policy epoch.
+        await db.execute(
+            text(
+                "UPDATE mobile_session_publications SET source_policy_epoch=1,source_highest_line=1 "
+                "WHERE project_id='default' AND source_policy_epoch=0"
+            )
+        )
+        # Extend timeout only for explicit EXPLAIN diagnostics; the normal
+        # 15-second fixture still catches catastrophic regressions.
+        diagnostic_timeout = "60000ms" if os.getenv("MOBILE_TRACE_EXPLAIN") == "1" else "15000ms"
+        await db.execute(text(f"SET LOCAL statement_timeout='{diagnostic_timeout}'"))
         print("scale_fixture_ready", flush=True)
         assert (
             await db.scalar(
@@ -233,10 +246,16 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
                     "temp",
                     node.get("Temp Read Blocks", 0),
                     node.get("Temp Written Blocks", 0),
+                    "filter",
+                    str(node.get("Filter") or node.get("Join Filter") or node.get("Hash Cond") or "")[:160],
+                    "subplan",
+                    node.get("Subplan Name", ""),
+                    "removed",
+                    node.get("Rows Removed by Filter", 0),
                     flush=True,
                 )
                 for child in node.get("Plans", []):
-                    if depth < 7:
+                    if depth < 15:
                         walk(child, depth + 1)
 
             print("plan_total_ms", round(plan["Execution Time"], 1), flush=True)

@@ -339,6 +339,29 @@ class TestDeviceToken:
             _cleanup()
 
     @pytest.mark.asyncio
+    async def test_mobile_pending_uses_accepted_400_without_changing_cli_428(self):
+        fake_redis = FakeRedis()
+        device_code = "test-mobile-pending-code"
+        await fake_redis.setex(
+            f"device_auth:{device_code}",
+            600,
+            json.dumps(
+                {"user_code": "BCDF-GHJK", "status": "pending", "client_id": "observal-mobile", "created_at": 1000}
+            ),
+        )
+        try:
+            with patch("api.routes.device_auth.get_redis", return_value=fake_redis):
+                async with _make_async_client() as client:
+                    resp = await client.post(
+                        "/api/v1/auth/device/token",
+                        json={"device_code": device_code, "grant_type": "urn:ietf:params:oauth:grant-type:device_code"},
+                    )
+            assert resp.status_code == 400
+            assert resp.json() == {"error": "authorization_pending"}
+        finally:
+            _cleanup()
+
+    @pytest.mark.asyncio
     async def test_denied_returns_400(self):
         fake_redis = FakeRedis()
         device_code = "test-device-code-denied"

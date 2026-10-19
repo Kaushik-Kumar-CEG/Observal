@@ -760,7 +760,10 @@ export default function (pi: ExtensionAPI) {
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     const alias = /^[A-Za-z0-9_-]{1,128}$/;
     const version = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,49}$/;
-    for (const pin of [...(section.standalone ?? []), ...(section.agents ?? []).flatMap((agent: any) => agent.components ?? [])]) {
+    // Agent pulls write isolated Pi profiles, not the active global adapter
+    // config; their lock entries lack a verified local alias/digest. Never
+    // let one unverified profile erase otherwise valid standalone MCP pins.
+    for (const pin of section.standalone ?? []) {
       if (pin.type !== "mcp") continue;
       const native = pin.local_name;
       if (typeof pin.id !== "string" || !uuid.test(pin.id) ||
@@ -823,8 +826,10 @@ export default function (pi: ExtensionAPI) {
   }> {
     const section = currentRegistryLockfile()?.harnesses?.pi;
     if (!section || typeof section !== "object") return [];
-    const entries = [...(section.standalone ?? []), ...(section.agents ?? []).flatMap((agent: any) => agent.components ?? [])]
-      .filter((pin: any) => pin.type === "skill");
+    // Isolated agent-profile skills are not active global/project skills.
+    // Their lock entries do not prove Pi loaded those files; exclude them
+    // without suppressing independently verified standalone skill pins.
+    const entries = (section.standalone ?? []).filter((pin: any) => pin.type === "skill");
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     const alias = /^[A-Za-z0-9_-]{1,128}$/;
     const version = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,49}$/;

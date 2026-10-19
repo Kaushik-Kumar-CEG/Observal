@@ -246,6 +246,15 @@ async def test_skill_hook_only_child_revisions_change_on_ancestor_and_clock_expi
                 timeout=120,
             )
             async with sessions() as db:
+                # The seeded typed facts stand in for a completed CH recheck;
+                # fresh 067 intentionally quarantines pre-migration receipts.
+                await db.execute(
+                    text("UPDATE mobile_read_controls SET source_policy_ready=true WHERE project_id='default'")
+                )
+                await db.execute(
+                    text("UPDATE mobile_session_publications SET source_policy_epoch=1,source_highest_line=1")
+                )
+                await db.commit()
                 assert (
                     await db.scalar(
                         text(
@@ -516,14 +525,14 @@ async def test_skill_hook_only_child_revisions_change_on_ancestor_and_clock_expi
                 await db.execute(
                     text(
                         "UPDATE mobile_session_publications SET status='complete',"
-                        "source_retained_until=clock_timestamp()+interval '0.3 seconds' WHERE session_id=:middle"
+                        "source_retained_until=clock_timestamp()+interval '30 seconds' WHERE session_id=:middle"
                     ),
                     {"middle": sessions_ids[1]},
                 )
                 await db.commit()
                 before_clock = await revisions()
                 assert (await counts())[0] is not None
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(30.2)
                 # Keep the same PostgreSQL transaction alive across expiry:
                 # transaction-start now() would otherwise admit expired facts
                 # under a freshly computed revision.

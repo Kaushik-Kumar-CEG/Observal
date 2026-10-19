@@ -33,4 +33,11 @@ def upgrade():
 
 
 def downgrade():
+    # Closed/revoked does not mean its authorization history is disposable.
+    # Unlike an unused fresh install, an exercised cohort cannot downgrade
+    # past this table without destroying its only durable operator trail.
+    if op.get_bind().scalar(sa.text("SELECT EXISTS (SELECT 1 FROM mobile_operator_audit)")):
+        raise RuntimeError(
+            "Refusing to discard committed mobile operator audit receipts; restore from an approved backup"
+        )
     op.drop_table("mobile_operator_audit")

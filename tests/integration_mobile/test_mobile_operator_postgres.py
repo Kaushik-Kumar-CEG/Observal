@@ -49,6 +49,11 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
             author_id, user_id = uuid.uuid4(), uuid.uuid4()
             sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
             async with sessionmaker() as db:
+                # This fixture has no ClickHouse; simulate only the startup
+                # assertion that a finite source TTL was applied and verified.
+                await db.execute(
+                    text("UPDATE mobile_read_controls SET source_policy_ready=true WHERE project_id='default'")
+                )
                 db.add_all(
                     [
                         User(
@@ -97,6 +102,18 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
                 prepared = await ops.mobile_test_setup(req, db, actor)
                 assert prepared.configured and prepared.blocked and not prepared.trace_headlines
                 assert prepared.expires_at is not None
+                await db.commit()
+                for replacement in (
+                    req,
+                    req.model_copy(update={"user_viewer_id": uuid.uuid4()}),
+                    req.model_copy(update={"expires_in_minutes": 120}),
+                ):
+                    with pytest.raises(HTTPException) as denied:
+                        await ops.mobile_test_setup(replacement, db, actor)
+                    assert denied.value.status_code == 409
+                    await db.rollback()
+                    await db.refresh(actor)  # Rollback expires authenticated principal ORM fields.
+                assert await db.scalar(text("SELECT count(*) FROM mobile_operator_audit WHERE action='setup'")) == 1
                 await db.commit()
                 rollback = subprocess.run(
                     [sys.executable, "-m", "alembic", "downgrade", "064_mobile_revoke_guard"],
@@ -191,6 +208,82 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
                 assert (
                     await db.scalar(text("SELECT value FROM enterprise_config WHERE key='mobile.auth_enabled'"))
                 ) == "false"
+                await db.commit()
+                downgrade = subprocess.run(
+                    [sys.executable, "-m", "alembic", "downgrade", "061_mobile_source_expiry_floor"],
+                    env=env,
+                    capture_output=True,
+                    timeout=60,
+                )
+                assert downgrade.returncode != 0, "Audited closed cohort cannot discard operator receipts"
+                assert b"Cannot discard committed mobile source policy epochs or qualified receipts" in downgrade.stderr
+                # The 067 policy transition is independent of revoke: neither
+                # deadline expiry nor a later TTL increase can resurrect a
+                # publication from an older unverified source epoch.
+                before = await db.scalar(
+                    text("SELECT source_policy_epoch FROM mobile_read_controls WHERE project_id='default'")
+                )
+                await db.execute(
+                    text(
+                        "INSERT INTO enterprise_config(id,key,value,updated_at) VALUES (:id,'data.retention_days','90',now())"
+                    ),
+                    {"id": uuid.uuid4()},
+                )
+                await db.commit()
+                epoch = await db.scalar(
+                    text("SELECT source_policy_epoch FROM mobile_read_controls WHERE project_id='default'")
+                )
+                assert epoch == before + 1
+                assert not await db.scalar(
+                    text("SELECT source_policy_ready FROM mobile_read_controls WHERE project_id='default'")
+                )
+                await db.execute(text("UPDATE enterprise_config SET value='90' WHERE key='data.retention_days'"))
+                await db.commit()
+                assert (
+                    await db.scalar(
+                        text("SELECT source_policy_epoch FROM mobile_read_controls WHERE project_id='default'")
+                    )
+                    == epoch
+                )
+                await db.execute(text("UPDATE enterprise_config SET value='7' WHERE key='data.retention_days'"))
+                await db.commit()
+                assert (
+                    await db.scalar(
+                        text("SELECT source_policy_epoch FROM mobile_read_controls WHERE project_id='default'")
+                    )
+                    == epoch + 1
+                )
+                # Simulate CH verification only in this disposable PG fixture;
+                # a real API may set ready only after applying and checking TTL.
+                await db.execute(
+                    text("UPDATE mobile_read_controls SET source_policy_ready=true WHERE project_id='default'")
+                )
+                await db.commit()
+                async with sessionmaker() as reader, sessionmaker() as writer:
+                    from services.mobile_read_control import readable
+
+                    assert not await readable(reader, "default")  # barrier still closed after revoke
+                    task = asyncio.create_task(
+                        writer.execute(text("UPDATE enterprise_config SET value='90' WHERE key='data.retention_days'"))
+                    )
+                    await asyncio.sleep(0.05)
+                    assert not task.done(), "TTL setting change waits for the reader's project lock"
+                    await reader.commit()
+                    await asyncio.wait_for(task, timeout=3)
+                    await writer.commit()
+                assert not await db.scalar(
+                    text("SELECT source_policy_ready FROM mobile_read_controls WHERE project_id='default'")
+                )
+                refusal = subprocess.run(
+                    [sys.executable, "-m", "alembic", "downgrade", "066_mobile_scope_retention_clock"],
+                    env=env,
+                    capture_output=True,
+                    timeout=50,
+                )
+                assert (
+                    refusal.returncode != 0
+                    and b"Cannot discard committed mobile source policy epochs" in refusal.stderr
+                )
         finally:
             await engine.dispose()
     finally:

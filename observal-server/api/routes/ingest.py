@@ -6,6 +6,7 @@
 
 """Session JSONL ingest endpoint."""
 
+import asyncio
 from typing import Literal
 from uuid import UUID
 
@@ -13,8 +14,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger as optic
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.deps import require_role
+from api.deps import get_db, require_role
 from api.ratelimit import limiter
 from database import async_session
 from models.user import User, UserRole
@@ -24,6 +26,10 @@ MAX_SHORT_STRING_LENGTH = 512
 MAX_TEXT_LENGTH = 1_048_576
 
 router = APIRouter(prefix="/api/v1/ingest", tags=["ingest"])
+# Waiting on a PostgreSQL project advisory lock consumes a pooled connection.
+# Bound same-process Pi ingress to leave pool headroom for auth, denial,
+# high-water writes, ordinary API requests and the projection worker.
+_MOBILE_INGEST_SLOTS = asyncio.Semaphore(4)
 
 MAX_SESSION_LINES = 1000
 MAX_SESSION_TOTAL_LINES = 10_000_000
@@ -162,6 +168,7 @@ async def ingest_session(
     req: SessionIngestRequest,
     request: Request,
     current_user: User = Depends(require_role(UserRole.user)),
+    auth_db: AsyncSession = Depends(get_db),
 ):
     """Ingest raw JSONL transcript lines from an harness session.
 
@@ -169,16 +176,24 @@ async def ingest_session(
     Lines are stored as-is and classified server-side.
     """
     optic.trace("user_id={}", current_user.id)
-    from services.session_ingest import (
-        SessionRecordConflictError,
-        advance_session_checkpoint,
-        check_session_integrity,
-        ingest_session_lines,
-    )
-
     user_id = str(current_user.id)
     project_id = DEFAULT_PROJECT_ID
+    if req.harness == "pi":
+        # get_db is the cached JWT-auth dependency. Its read-only transaction
+        # must release the pool connection BEFORE the bounded semaphore AND
+        # BEFORE run admission (which itself awaits ClickHouse with PG held).
+        # expire_on_commit=False preserves the authenticated User fields.
+        await auth_db.commit()
+        async with _MOBILE_INGEST_SLOTS:
+            await _admit_run_if_claimed(req, current_user, project_id)
+            if len(req.session_id) <= 256 and (req.lines or req.final):
+                return await _ingest_pi_with_gate(req, current_user, user_id, project_id)
+            return await _ingest_session_after_admit(req, current_user, user_id, project_id)
+    await _admit_run_if_claimed(req, current_user, project_id)
+    return await _ingest_session_after_admit(req, current_user, user_id, project_id)
 
+
+async def _admit_run_if_claimed(req: SessionIngestRequest, current_user: User, project_id: str) -> None:
     if (
         req.harness == "pi"
         or req.run_incarnation is not None
@@ -203,6 +218,39 @@ async def ingest_session(
             parent_run_incarnation=req.parent_run_incarnation,
             parent_header_hash=req.parent_header_hash,
         )
+
+
+async def _ingest_pi_with_gate(req: SessionIngestRequest, current_user: User, user_id: str, project_id: str):
+    # Keep one physical PG connection's session-level exclusive project lock
+    # THROUGH CH insertion, finalization and PG work-item commit. A separate
+    # deny transaction commits first while the session lock blocks stale
+    # readers and projectors; a transaction lock would release too early.
+    async with async_session() as gate_db:
+        await gate_db.execute(text("SELECT pg_advisory_lock(hashtextextended('mobile-read:default',0))"))
+        try:
+            async with async_session() as deny_db:
+                await deny_db.execute(
+                    text(
+                        "UPDATE mobile_session_publications SET status='pending_source',source_policy_epoch=0,"
+                        "updated_at=now() WHERE project_id=:project AND user_id=:user AND harness='pi' "
+                        "AND session_id=:session AND (status!='pending_source' OR source_policy_epoch!=0)"
+                    ),
+                    {"project": str(project_id), "user": current_user.id, "session": req.session_id},
+                )
+                await deny_db.commit()
+            return await _ingest_session_after_admit(req, current_user, user_id, project_id)
+        finally:
+            await gate_db.execute(text("SELECT pg_advisory_unlock(hashtextextended('mobile-read:default',0))"))
+            await gate_db.commit()
+
+
+async def _ingest_session_after_admit(req: SessionIngestRequest, current_user: User, user_id: str, project_id: str):
+    from services.session_ingest import (
+        SessionRecordConflictError,
+        advance_session_checkpoint,
+        check_session_integrity,
+        ingest_session_lines,
+    )
 
     optic.debug(
         "ingest request: session={}, harness={}, lines={}, offset={}, final={}",
@@ -240,6 +288,27 @@ async def ingest_session(
         user_id,
         req.harness,
     )
+    if req.harness == "pi" and len(req.session_id) <= 256 and acknowledged_line >= 0:
+        # PG persists the server-acknowledged maximum independently of CH
+        # source retention and CH integrity-repair checkpoint rewinds. A lost
+        # terminal record may leave a contiguous surviving prefix; it cannot
+        # be mistaken for a tool-free full session after a short TTL interval.
+        async with async_session() as highwater_db:
+            await highwater_db.execute(
+                text(
+                    "INSERT INTO mobile_source_line_highwater(project_id,user_id,harness,session_id,max_line) "
+                    "VALUES (:project,:user,'pi',:session,:line) "
+                    "ON CONFLICT (project_id,user_id,harness,session_id) "
+                    "DO UPDATE SET max_line=GREATEST(mobile_source_line_highwater.max_line,EXCLUDED.max_line)"
+                ),
+                {
+                    "project": str(project_id),
+                    "user": current_user.id,
+                    "session": req.session_id,
+                    "line": acknowledged_line,
+                },
+            )
+            await highwater_db.commit()
 
     if req.capabilities_used:
         from services.clickhouse import insert_session_capabilities
@@ -252,6 +321,7 @@ async def ingest_session(
             uses=[c.model_dump() for c in req.capabilities_used],
         )
 
+    integrity = None
     integrity_ok = None
     if req.final and req.total_line_count is not None:
         integrity = await check_session_integrity(
@@ -288,10 +358,46 @@ async def ingest_session(
                 req.total_offset,
             )
 
+    if (
+        req.harness == "pi"
+        and len(req.session_id) <= 256
+        and req.final
+        and integrity is not None
+        and integrity.ok
+        and req.total_line_count is not None
+        and req.total_line_count > 0
+        and req.hashed_line_count == req.total_line_count
+        and req.session_hash is not None
+        and integrity.server_hash == req.session_hash
+    ):
+        # A contiguous checkpoint is not the sender's complete transcript:
+        # persist finality only after the server rehashes every source line.
+        # Later appends advance the independent high-water and hide old facts
+        # until a new final receipt and projection attest the full transcript.
+        async with async_session() as final_db:
+            await final_db.execute(
+                text(
+                    "INSERT INTO mobile_source_final_receipts"
+                    "(project_id,user_id,harness,session_id,final_line,source_hash) "
+                    "VALUES (:project,:user,'pi',:session,:line,:hash) "
+                    "ON CONFLICT (project_id,user_id,harness,session_id) DO UPDATE SET "
+                    "final_line=EXCLUDED.final_line,source_hash=EXCLUDED.source_hash "
+                    "WHERE EXCLUDED.final_line>=mobile_source_final_receipts.final_line"
+                ),
+                {
+                    "project": str(project_id),
+                    "user": current_user.id,
+                    "session": req.session_id,
+                    "line": req.total_line_count - 1,
+                    "hash": req.session_hash,
+                },
+            )
+            await final_db.commit()
+
     # Durable projection request is committed after the ClickHouse checkpoint.
     # A transient Postgres failure makes the client retry the idempotent push;
     # never acknowledge new Pi evidence without a replayable work item.
-    if req.harness == "pi" and len(req.session_id) <= 256 and (result.ingested > 0 or req.final):
+    if req.harness == "pi" and len(req.session_id) <= 256 and (req.lines or req.final):
         async with async_session() as db:
             await db.execute(
                 text(

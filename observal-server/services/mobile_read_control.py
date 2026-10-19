@@ -34,7 +34,8 @@ async def readable(db: AsyncSession, project: str) -> bool:
     )
     return bool(
         await db.scalar(
-            text("SELECT NOT blocked FROM mobile_read_controls WHERE project_id=:project"), {"project": project}
+            text("SELECT NOT blocked AND source_policy_ready FROM mobile_read_controls WHERE project_id=:project"),
+            {"project": project},
         )
     )
 
@@ -53,13 +54,13 @@ async def mobile_issue_allowed(db: AsyncSession) -> bool:
     state = (
         await db.execute(
             text(
-                "SELECT revocation_pending,synthetic_expires_at > clock_timestamp() AS synthetic_valid "
+                "SELECT revocation_pending,source_policy_ready,synthetic_expires_at > clock_timestamp() AS synthetic_valid "
                 "FROM mobile_read_controls WHERE project_id=:project"
             ),
             {"project": str(DEFAULT_PROJECT_ID)},
         )
     ).one_or_none()
-    if state is None or state.revocation_pending:
+    if state is None or state.revocation_pending or not state.source_policy_ready:
         return False
     value = await db.scalar(text("SELECT value FROM enterprise_config WHERE key='mobile.auth_enabled'"))
     synthetic = await db.scalar(text("SELECT value FROM enterprise_config WHERE key='mobile.synthetic_test_enabled'"))

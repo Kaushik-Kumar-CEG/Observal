@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 """ClickHouse runtime initialization and resource-tuning settings."""
 
@@ -118,25 +119,83 @@ async def init_clickhouse():
     await _materialize_if_needed()
     await apply_resource_settings()
 
-    import services.dynamic_settings as ds
+    from sqlalchemy import text
 
-    retention_days = await ds.get_int("data.retention_days")
-    if retention_days > 0:
-        ttl_stmts = [
-            f"ALTER TABLE session_events MODIFY TTL toDate(timestamp) + INTERVAL {retention_days} DAY",
-        ]
-        applied = 0
-        for stmt in ttl_stmts:
-            try:
-                await _client._query(stmt)
-                applied += 1
-            except Exception as e:
-                optic.warning("TTL statement failed: {}", e)
-        if applied == len(ttl_stmts):
-            optic.info("ClickHouse retention configured: {} days across all tables", retention_days)
-        else:
-            optic.warning(
-                "retention only applied to {}/{} tables - some data may not auto-expire", applied, len(ttl_stmts)
+    from database import async_session
+
+    # Invalidate all reads before applying the non-transactional ClickHouse
+    # TTL. API replicas and the worker observe one PostgreSQL read barrier.
+    async with async_session() as db:
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+        await db.execute(
+            text(
+                "UPDATE mobile_read_controls SET source_policy_ready=false,generation=generation+1 "
+                "WHERE project_id='default'"
             )
-    else:
-        optic.info("data retention disabled (retention_days=0), data kept indefinitely")
+        )
+        await db.commit()
+    # Hold the exclusive project lock across CH ALTER, metadata readback and
+    # readiness commit. Two restarting API replicas could otherwise interleave
+    # ALT 90 / ALT 7 and let the losing writer change CH after the winning
+    # writer has reopened mobile reads under the wrong whole-row TTL.
+    async with async_session() as db:
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+        configured = await db.scalar(text("SELECT value FROM enterprise_config WHERE key='data.retention_days'"))
+        try:
+            retention_days = int(configured) if configured is not None else 90
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("Unverifiable ClickHouse source retention policy") from exc
+        if not 0 <= retention_days <= 36500:
+            raise RuntimeError("Valid ClickHouse source retention required for mobile qualification")
+        statement = (
+            f"ALTER TABLE session_events MODIFY TTL toDate(timestamp) + INTERVAL {retention_days} DAY"
+            if retention_days
+            else "ALTER TABLE session_events REMOVE TTL"
+        )
+        if retention_days == 0:
+            before = await _client._query(
+                "SELECT create_table_query FROM system.tables WHERE database=currentDatabase() "
+                "AND name='session_events' FORMAT JSON"
+            )
+            before.raise_for_status()
+            existing = str((before.json().get("data") or [{}])[0].get("create_table_query") or "")
+            # ClickHouse rejects REMOVE TTL if the whole-row TTL is already
+            # absent. Do not mistake the 30-day raw_line column TTL for it.
+            if " TTL " in existing.split(" ENGINE =", 1)[-1]:
+                removed = await _client._query(statement)
+                removed.raise_for_status()
+        else:
+            applied = await _client._query(statement)
+            applied.raise_for_status()  # The HTTP client does not raise on 4xx/5xx.
+        actual = await _client._query(
+            "SELECT create_table_query FROM system.tables WHERE database=currentDatabase() "
+            "AND name='session_events' FORMAT JSON"
+        )
+        actual.raise_for_status()
+        import re
+
+        ddl = str((actual.json().get("data") or [{}])[0].get("create_table_query") or "")
+        # system.tables has no ttl_expression column in ClickHouse 26.6.
+        # Both whole-row and raw-line column TTL must match the source clock.
+        whole_row = rf"\bTTL\s+toDate\(timestamp\)\s*\+\s*toIntervalDay\({retention_days}\)"
+        engine_clause = ddl.split(" ENGINE =", 1)[-1] if " ENGINE =" in ddl else ""
+        correct_row_ttl = bool(re.search(whole_row, engine_clause)) if retention_days else " TTL " not in engine_clause
+        raw_column = r"`?raw_line`?\s+String(?:\s+CODEC\(ZSTD\(3\)\))?\s+TTL\s+timestamp\s*\+\s*toIntervalDay\(30\)"
+        if not (correct_row_ttl and re.search(raw_column, ddl)):
+            raise RuntimeError("ClickHouse whole-row/raw-column TTL did not match verified mobile source policy")
+        await db.execute(
+            text(
+                "UPDATE mobile_read_controls SET source_policy_ready=true,"
+                "source_policy_since=COALESCE(source_policy_since,clock_timestamp()) WHERE project_id='default'"
+            )
+        )
+        await db.execute(
+            text(
+                "INSERT INTO mobile_source_policy_audit(project_id,source_policy_epoch,event,retention_days) "
+                "SELECT project_id,source_policy_epoch,'ttl_verified',:days FROM mobile_read_controls "
+                "WHERE project_id='default'"
+            ),
+            {"days": retention_days},
+        )
+        await db.commit()
+    optic.info("ClickHouse mobile source retention verified: {} days", retention_days)

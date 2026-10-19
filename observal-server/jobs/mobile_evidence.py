@@ -101,11 +101,62 @@ def _revision(rows: list[dict], *, retained_suffix: bool = False) -> str | None:
     ).hexdigest()
 
 
-def _source_retained_until(rows: list[dict], revision: str | None) -> datetime | None:
-    """Conservative TTL floor derived from every source row's ClickHouse UTC timestamp.
+def _policy_source_complete(
+    rows: list[dict],
+    revision: str | None,
+    previous_revision: str | None,
+    previous_highest: int | None,
+    highwater: int | None,
+    policy_since: datetime | None,
+    final_line: int | None = None,
+    final_hash: str | None = None,
+) -> bool:
+    """No surviving prefix may masquerade as the complete original session.
 
-    Raw_line expires at timestamp + 30 days. The one-day margin ensures a
-    positive typed reading stops before any supporting source row can expire.
+    Original pre-067 records have a published full digest; new sessions need
+    both the ingest-side monotonic max line and a post-verification header.
+    This does not infer a zero from an unknown or vanished source.
+    """
+    if not rows or revision is None or rows[0].get("line_offset") != 0 or policy_since is None:
+        return False
+    last = rows[-1].get("line_offset")
+    if (
+        not isinstance(last, int)
+        or (highwater is not None and last != highwater)
+        or (previous_highest is not None and last < previous_highest)
+    ):
+        return False
+    # An old publication digest proves only which prefix the old worker saw,
+    # not that the uploader ever sent the terminal record. Both old and new
+    # sessions need a freshly server-verified full-file final receipt.
+    if highwater is None or final_line != last or not final_hash:
+        return False
+    fingerprint = hashlib.sha256()
+    for row in rows:
+        # The server finalization manifest hashes SHA-256 of original JSONL,
+        # not the xxh128 line_hash used for the projection revision.
+        if not isinstance(row.get("source_sha256"), str) or len(row["source_sha256"]) != 64:
+            return False
+        fingerprint.update(row["source_sha256"].encode())
+        fingerprint.update(b"\n")
+    if fingerprint.hexdigest() != final_hash:
+        return False
+    if previous_revision == revision:
+        return True  # exact historical bytes, now independently finalized
+    try:
+        ch_ingested = datetime.fromisoformat(str(rows[0]["ingested_at"]).replace("Z", "+00:00"))
+    except (KeyError, ValueError, TypeError):
+        return False
+    first_ingested = ch_ingested.replace(tzinfo=UTC) if ch_ingested.tzinfo is None else ch_ingested.astimezone(UTC)
+    return first_ingested >= policy_since
+
+
+def _source_retained_until(rows: list[dict], revision: str | None, *, retention_days: int = 30) -> datetime | None:
+    """Earliest actual UTC whole-row TTL or one-day-buffered raw-line TTL.
+
+    Whole rows expire at toDate(timestamp) + N days (midnight UTC), not at
+    timestamp + N days. A later TTL increase never revives a missing source:
+    every policy transition quarantines old publications until reprojected.
     """
     if revision is None or not rows or rows[0].get("line_offset") != 0:
         return None
@@ -120,7 +171,14 @@ def _source_retained_until(rows: list[dict], revision: str | None) -> datetime |
             if not 1971 <= stamp.year < 2100:
                 return None
             times.append(stamp)
-        return min(times) + timedelta(days=29) if times else None
+        if not times or retention_days < 0:
+            return None
+        earliest = min(times)
+        raw_cutoff = earliest + timedelta(days=29)
+        if retention_days == 0:  # Whole-row TTL disabled; raw_line still expires at 30 days.
+            return raw_cutoff
+        midnight_cutoff = earliest.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=retention_days)
+        return min(raw_cutoff, midnight_cutoff)
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -295,7 +353,8 @@ async def _rows(project: str, user: str, harness: str, session: str) -> list[dic
         return None
     response = await _query(
         f"SELECT project_id,user_id,harness,session_id,line_offset,line_hash,source_sha256,raw_line,raw_line_truncated,"
-        f"layer_hash,parent_session_id,is_source_record,event_type,timestamp FROM session_events FINAL WHERE {_PARAMS} "
+        f"layer_hash,parent_session_id,is_source_record,event_type,timestamp,ingested_at "
+        f"FROM session_events FINAL WHERE {_PARAMS} "
         f"AND is_source_record=1 ORDER BY line_offset LIMIT {_MAX_LINES + 1} FORMAT JSON",
         params,
     )
@@ -353,16 +412,80 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
     if harness != "pi" or not session or len(session) > 256:
         return {"status": "unsupported"}
     owner = uuid.UUID(user)
-    rows = await _rows(project, user, harness, session)
-    revision = _revision(rows or [], retained_suffix=True)
-    retained_until = _source_retained_until(rows or [], revision)
-    first_source_offset = rows[0]["line_offset"] if revision is not None else 0
     scope = {"project": project, "user": owner, "harness": harness, "session": session}
     async with async_session() as db:
+        # The project shared lock covers both ClickHouse reads and the final
+        # PostgreSQL publication commit. A TTL transition takes the exclusive
+        # lock before applying ClickHouse changes; retries cannot publish a
+        # stale epoch after an operator closes the barrier.
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"), {"key": "mobile-read:" + project}
+        )
+        policy = (
+            await db.execute(
+                text(
+                    "SELECT source_policy_epoch,source_policy_ready,source_policy_since "
+                    "FROM mobile_read_controls WHERE project_id=:project"
+                ),
+                {"project": project},
+            )
+        ).one_or_none()
+        if policy is None or not policy.source_policy_ready or policy.source_policy_since is None:
+            raise RuntimeError("Mobile source policy not verified; retry projection after TTL application")
+        configured = await db.scalar(text("SELECT value FROM enterprise_config WHERE key='data.retention_days'"))
+        try:
+            days = int(configured) if configured is not None else 90
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Invalid mobile source retention") from exc
+        if not 0 <= days <= 36500:
+            raise RuntimeError("Verifiable mobile source retention required")
+        rows = await _rows(project, user, harness, session)
+        revision = _revision(rows or [], retained_suffix=True)
+        retained_until = _source_retained_until(rows or [], revision, retention_days=days)
+        observed_revision, observed_floor = revision, retained_until
+        first_source_offset = rows[0]["line_offset"] if revision is not None else 0
         await db.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
             {"scope": json.dumps([project, user, harness, session])},
         )
+        original = (
+            await db.execute(
+                text(
+                    "SELECT source_revision,source_highest_line FROM mobile_session_publications "
+                    "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
+                ),
+                scope,
+            )
+        ).one_or_none()
+        highest = await db.scalar(
+            text(
+                "SELECT max_line FROM mobile_source_line_highwater WHERE project_id=:project "
+                "AND user_id=:user AND harness=:harness AND session_id=:session"
+            ),
+            scope,
+        )
+        final = (
+            await db.execute(
+                text(
+                    "SELECT final_line,source_hash FROM mobile_source_final_receipts "
+                    "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
+                ),
+                scope,
+            )
+        ).one_or_none()
+        if revision is not None and not _policy_source_complete(
+            rows or [],
+            revision,
+            original.source_revision if original else None,
+            original.source_highest_line if original else None,
+            highest,
+            policy.source_policy_since,
+            final.final_line if final else None,
+            final.source_hash if final else None,
+        ):
+            revision = None
+            retained_until = None
+            first_source_offset = 0
         status = "pending_source"
         valid: list[dict] = []
         valid_skills: list[dict] = []
@@ -529,7 +652,8 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         current = (
             await db.execute(
                 text(
-                    "SELECT source_revision,status,first_source_offset,source_retained_until FROM mobile_session_publications "
+                    "SELECT source_revision,status,first_source_offset,source_retained_until,source_policy_epoch,source_highest_line "
+                    "FROM mobile_session_publications "
                     "WHERE project_id=:project AND user_id=:user AND harness=:harness AND session_id=:session"
                 ),
                 scope,
@@ -545,11 +669,15 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
             current.status,
             current.first_source_offset,
             current.source_retained_until,
+            current.source_policy_epoch,
+            current.source_highest_line,
         ) == (
             revision or "unknown",
             status,
             first_source_offset,
             retained_until,
+            policy.source_policy_epoch,
+            rows[-1]["line_offset"] if revision is not None and rows else current.source_highest_line,
         ):
             # Newly upgraded zero-cohort projection may be missing even when
             # positive facts/publication were previously idempotent.
@@ -727,12 +855,15 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         await db.execute(
             text(
                 "INSERT INTO mobile_session_publications(project_id,user_id,harness,session_id,source_revision,status,"
-                "first_source_offset,source_retained_until) "
-                "VALUES (:project,:user,:harness,:session,:revision,:status,:first_source_offset,:retained_until) "
+                "first_source_offset,source_retained_until,source_policy_epoch,source_highest_line) "
+                "VALUES (:project,:user,:harness,:session,:revision,:status,:first_source_offset,:retained_until,"
+                ":policy_epoch,:highest_line) "
                 "ON CONFLICT (project_id,user_id,harness,session_id) DO UPDATE "
                 "SET source_revision=EXCLUDED.source_revision,status=EXCLUDED.status,"
                 "first_source_offset=EXCLUDED.first_source_offset,"
-                "source_retained_until=EXCLUDED.source_retained_until,updated_at=now()"
+                "source_retained_until=EXCLUDED.source_retained_until,source_policy_epoch=EXCLUDED.source_policy_epoch,"
+                "source_highest_line=GREATEST(mobile_session_publications.source_highest_line,EXCLUDED.source_highest_line),"
+                "updated_at=now()"
             ),
             {
                 **scope,
@@ -740,6 +871,8 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
                 "status": status,
                 "first_source_offset": first_source_offset,
                 "retained_until": retained_until,
+                "policy_epoch": policy.source_policy_epoch,
+                "highest_line": rows[-1]["line_offset"] if revision is not None and rows else None,
             },
         )
         changed_components = set(old_components) | {fact["component_id"] for fact in valid}
@@ -817,8 +950,8 @@ async def project_pi_session(ctx: dict, project: str, user: str, harness: str, s
         # of committing an already-stale generation.
         fresh = await _rows(project, user, harness, session)
         if (
-            _revision(fresh or [], retained_suffix=True) != revision
-            or _source_retained_until(fresh or [], revision) != retained_until
+            _revision(fresh or [], retained_suffix=True) != observed_revision
+            or _source_retained_until(fresh or [], observed_revision, retention_days=days) != observed_floor
         ):
             await db.rollback()
             raise RuntimeError("Mobile source or retention floor changed during evidence publication")
@@ -938,8 +1071,11 @@ async def run_mobile_retention_sweep(ctx: dict) -> dict:
             await db.execute(
                 text(
                     "SELECT project_id,user_id,harness,session_id FROM mobile_session_publications "
-                    "WHERE status IN ('complete','partial') AND updated_at<now()-INTERVAL '1 day' "
-                    "AND (last_checked_at IS NULL OR last_checked_at<now()-INTERVAL '12 hours') "
+                    "WHERE status IN ('complete','partial') AND ("
+                    "(source_policy_epoch != (SELECT source_policy_epoch FROM mobile_read_controls "
+                    "WHERE project_id='default') AND (last_checked_at IS NULL OR "
+                    "last_checked_at<clock_timestamp()-INTERVAL '5 minutes')) OR (updated_at<now()-INTERVAL '1 day' "
+                    "AND (last_checked_at IS NULL OR last_checked_at<now()-INTERVAL '12 hours'))) "
                     "ORDER BY last_checked_at NULLS FIRST,updated_at,project_id,user_id,session_id LIMIT 500"
                 )
             )
@@ -960,6 +1096,8 @@ async def run_mobile_retention_sweep(ctx: dict) -> dict:
                 failed = True
             finally:
                 checked += 1
+                # A failed proof gets a short durable retry lease; without
+                # one a permanently bad first key would starve later rows.
                 await db.execute(
                     text(
                         "UPDATE mobile_session_publications SET last_checked_at=now() "

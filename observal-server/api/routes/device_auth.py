@@ -299,7 +299,11 @@ async def device_token(request: Request, req: DeviceTokenRequest, db: AsyncSessi
     status = data.get("status")
 
     if status == "pending":
-        return JSONResponse(status_code=428, content={"error": "authorization_pending"})
+        # Mobile v1.2 advertises 400 for a pending one-use grant. Preserve
+        # the legacy CLI's 428; the client identity comes from stored
+        # server-issued challenge state, never the poll request body.
+        code = 400 if data.get("client_id") == MOBILE_CLIENT_ID else 428
+        return JSONResponse(status_code=code, content={"error": "authorization_pending"})
 
     if status == "denied":
         try:

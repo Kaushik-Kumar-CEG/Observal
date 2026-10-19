@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from jobs.mobile_evidence import _revision, _rows, _source_retained_until
+from jobs.mobile_evidence import _policy_source_complete, _revision, _rows, _source_retained_until
 from models.user import User
 from services.clickhouse.client import _query
 
@@ -45,6 +45,24 @@ async def prompted_roots(
 ) -> dict | None:
     """Count only proven prompted roots; None means no complete bounded cohort."""
     max_sessions = 20 if subject else 100
+    configured = await db.scalar(text("SELECT value FROM enterprise_config WHERE key='data.retention_days'"), {})
+    try:
+        retention_days = int(configured) if configured is not None else 90
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= retention_days <= 36500:
+        return None
+    policy = (
+        await db.execute(
+            text(
+                "SELECT source_policy_epoch,source_policy_since FROM mobile_read_controls "
+                "WHERE project_id=:project AND source_policy_ready"
+            ),
+            {"project": project},
+        )
+    ).one_or_none()
+    if policy is None or policy.source_policy_since is None:
+        return None
     params = {
         "param_project": project,
         "param_start": start.strftime("%Y-%m-%d %H:%M:%S.%f")[:23],
@@ -95,21 +113,67 @@ async def prompted_roots(
             if len(cache) >= (32 if subject else 128):
                 return None
             records = await _rows(project, user_id, "pi", session_id)
-            if _revision(records or []) is None:
+            revision = _revision(records or [])
+            identity = {"project": project, "user": uuid.UUID(user_id), "session": session_id}
+            publication = (
+                await db.execute(
+                    text(
+                        "SELECT source_revision,source_highest_line,status,source_policy_epoch "
+                        "FROM mobile_session_publications WHERE project_id=:project AND user_id=:user "
+                        "AND harness='pi' AND session_id=:session"
+                    ),
+                    identity,
+                )
+            ).one_or_none()
+            highwater = await db.scalar(
+                text(
+                    "SELECT max_line FROM mobile_source_line_highwater WHERE project_id=:project "
+                    "AND user_id=:user AND harness='pi' AND session_id=:session"
+                ),
+                identity,
+            )
+            final = (
+                await db.execute(
+                    text(
+                        "SELECT final_line,source_hash FROM mobile_source_final_receipts "
+                        "WHERE project_id=:project AND user_id=:user AND harness='pi' AND session_id=:session"
+                    ),
+                    identity,
+                )
+            ).one_or_none()
+            if (
+                revision is None
+                or publication is None
+                or publication.source_revision != revision
+                or publication.status not in ("complete", "partial")
+                or publication.source_policy_epoch != policy.source_policy_epoch
+                or publication.source_highest_line is None
+                or publication.source_highest_line != records[-1]["line_offset"]
+                or not _policy_source_complete(
+                    records,
+                    revision,
+                    publication.source_revision,
+                    publication.source_highest_line,
+                    highwater,
+                    policy.source_policy_since,
+                    final.final_line if final else None,
+                    final.source_hash if final else None,
+                )
+            ):
                 cache[key] = None
                 return None
             digests = {row.get("layer_hash") for row in records}
             legacy = bool(digests) and all(
                 isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{16}", digest) for digest in digests
             )
+            until = _source_retained_until(records, revision, retention_days=retention_days)
+            if until is None or until <= datetime.now(UTC):
+                cache[key] = None
+                return None
             if legacy:
                 # Old pre-pin uploads may support *only* the uploader's own
                 # observed general prompted roots. No component or Author
                 # identity is inferred, and a mixed old/new source is denied.
-                until = _source_retained_until(records, _revision(records))
-                if until is None or until <= datetime.now(UTC):
-                    cache[key] = None
-                    return None
                 source_modes[key] = "legacy"
             else:
                 for digest in digests:
@@ -310,6 +374,17 @@ async def prompted_roots(
             current = parent_id
     if not roots:
         return None
+    # A source may cross its UTC-midnight whole-row cutoff while we traverse
+    # at most 32/128 bounded sessions. Never return an earlier positive after
+    # its supporting raw bytes become eligible for deletion mid-request.
+    now = datetime.now(UTC)
+    for source_rows in cache.values():
+        if source_rows and (
+            (floor := _source_retained_until(source_rows, _revision(source_rows), retention_days=retention_days))
+            is None
+            or floor <= now
+        ):
+            return None
     return {
         "active_accounts": len({user for user, _ in roots}),
         "roots": len(roots),

@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prompted roots are independently sourced, not inferred from MCP invocations."""
 
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -34,18 +36,56 @@ class Result:
     def all(self):
         return self.ids
 
+    def one_or_none(self):
+        return self.ids
+
 
 class Db:
-    def __init__(self, surviving=None, *, witness=True):
+    def __init__(self, surviving=None, *, witness=True, retention=None, publication=True):
         self.surviving = surviving if surviving is not None else [SUBJECT]
         self.witness = witness
+        self.retention = retention
+        self.publication = publication
+
+    async def execute(self, query, params):
+        statement = str(query)
+        if "mobile_read_controls" in statement:
+            return Result(SimpleNamespace(source_policy_epoch=1, source_policy_since=START - timedelta(days=60)))
+        if "mobile_source_final_receipts" in statement:
+            rows = await general._rows("default", str(params["user"]), "pi", params["session"])
+            if not rows:
+                return Result(None)
+            for row in rows:
+                row["source_sha256"] = hashlib.sha256(row["raw_line"].encode()).hexdigest()
+            digest = hashlib.sha256("".join(row["source_sha256"] + "\n" for row in rows).encode()).hexdigest()
+            return Result(SimpleNamespace(final_line=rows[-1]["line_offset"], source_hash=digest))
+        if "mobile_session_publications" in statement:
+            if not self.publication:
+                return Result(None)
+            rows = await general._rows("default", str(params["user"]), "pi", params["session"])
+            if not rows or general._revision(rows) is None:
+                return Result(None)
+            return Result(
+                SimpleNamespace(
+                    source_revision=general._revision(rows),
+                    source_highest_line=rows[-1]["line_offset"],
+                    status="complete",
+                    source_policy_epoch=1,
+                )
+            )
+        raise AssertionError(f"unexpected SQL: {statement}")
 
     async def scalars(self, query):
         return Result(self.surviving)
 
     async def scalar(self, query, params):
+        if "enterprise_config" in str(query):
+            return self.retention  # Missing setting uses the server's 90-day default.
         if "mobile_run_instances" in str(query):
             return 1 if self.witness else None
+        if "mobile_source_line_highwater" in str(query):
+            rows = await general._rows("default", str(params["user"]), "pi", params["session"])
+            return rows[-1]["line_offset"] if rows else None
         return 1 if params["hash"] in {"v2_" + "a" * 64, "v3_" + "a" * 64} else None
 
 
@@ -67,6 +107,36 @@ def line(offset, kind, timestamp, *, parent=None, content="prompt"):
         "timestamp": timestamp,
         "parent_session_id": parent,
     }
+
+
+@pytest.mark.asyncio
+async def test_prompted_root_expiring_after_source_read_before_response_is_not_recorded(monkeypatch):
+    midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    source_time = midnight - timedelta(days=7) + timedelta(hours=23, minutes=59)
+    before = midnight - timedelta(microseconds=1)
+    after = midnight + timedelta(microseconds=1)
+    rows = [session_header("short-root", source_time.isoformat()), line(1, "user_prompt", source_time.isoformat())]
+    monkeypatch.setattr(
+        general, "_query", AsyncMock(return_value=Response([{"user_id": str(SUBJECT), "session_id": "short-root"}]))
+    )
+    monkeypatch.setattr(general, "_rows", AsyncMock(return_value=rows))
+
+    class Clock(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            return before if cls.calls == 1 else after
+
+    monkeypatch.setattr(general, "datetime", Clock)
+    assert (
+        await general.prompted_roots(
+            Db(retention="7"), "default", source_time - timedelta(days=1), after + timedelta(hours=1), subject=SUBJECT
+        )
+        is None
+    )
+    assert Clock.calls == 2, "the final response check must fence a source expiring during traversal"
 
 
 @pytest.mark.asyncio
@@ -168,6 +238,10 @@ async def test_complete_old_unpinned_root_is_self_general_partial_only_and_never
         AsyncMock(return_value=Response([{"user_id": str(SUBJECT), "session_id": "old-root"}])),
     )
     monkeypatch.setattr(general, "_rows", AsyncMock(side_effect=lambda *_: rows))
+    assert (
+        await general.prompted_roots(Db(witness=False, publication=False), "default", START, END, subject=SUBJECT)
+        is None
+    )
     assert await general.prompted_roots(Db(witness=False), "default", START, END, subject=SUBJECT) == {
         "active_accounts": 1,
         "roots": 1,

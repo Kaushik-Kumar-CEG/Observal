@@ -37,6 +37,21 @@ from ._router import router
 from .helpers import _validate_branding_app_name, _validate_branding_logo
 
 
+async def _apply_retention_setting() -> None:
+    """Commit deny first, then reverify actual CH TTL; errors remain closed."""
+    from services.clickhouse.schema import init_clickhouse
+
+    try:
+        await init_clickhouse()
+    except Exception as exc:
+        optic.exception("ClickHouse retention setting committed but source policy remains closed")
+        raise HTTPException(
+            503,
+            "Retention setting stored but ClickHouse verification failed; mobile reads remain closed. "
+            "Retry the setting or run the reviewed init job.",
+        ) from exc
+
+
 def _require_dedicated_review_policy_route(key: str) -> None:
     if key == "review.policy" or key.startswith("review.policy.team."):
         raise HTTPException(status_code=409, detail="Use the dedicated review-policy endpoint")
@@ -270,6 +285,10 @@ async def upsert_setting(
         value = value.lower()
         if value not in {"true", "false"}:
             raise HTTPException(status_code=422, detail="Usage reporting must be true or false")
+    elif key == "data.retention_days" and (
+        not isinstance(value, str) or not value.isascii() or not value.isdecimal() or not 0 <= int(value) <= 36500
+    ):
+        raise HTTPException(422, "Data retention must be an integer from 0 to 36500 days")
 
     sensitive = key in ds.SENSITIVE_KEYS
     store_value = ds.encrypt_value(value) if sensitive else value
@@ -317,6 +336,8 @@ async def upsert_setting(
             target_type="setting",
         )
     )
+    if key == "data.retention_days":
+        await _apply_retention_setting()
     # Sensitive values are only visible in this single response (the moment of entry).
     # All subsequent GET requests will return the redacted constant.
     return EnterpriseConfigResponse(
@@ -349,6 +370,20 @@ async def delete_setting(
     await db.commit()
     await ds.invalidate(key)
     await ds.refresh_sync_cache()
+    if key == "data.retention_days":
+        await emit_security_event(
+            SecurityEvent(
+                event_type=EventType.SETTING_CHANGED,
+                severity=Severity.WARNING,
+                outcome="success",
+                actor_id=str(current_user.id),
+                actor_email=current_user.email,
+                actor_role=current_user.role.value,
+                target_id=key,
+                target_type="setting",
+            )
+        )
+        await _apply_retention_setting()
     return {"deleted": key}
 
 

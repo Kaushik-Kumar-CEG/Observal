@@ -53,8 +53,12 @@ def identity(monkeypatch, tmp_path):
     db = MagicMock()
 
     async def execute(sql, *_args, **_kwargs):
-        if "revocation_pending,synthetic_expires_at" in str(sql):
-            return MagicMock(one_or_none=lambda: SimpleNamespace(revocation_pending=False, synthetic_valid=True))
+        if "revocation_pending,source_policy_ready,synthetic_expires_at" in str(sql):
+            return MagicMock(
+                one_or_none=lambda: SimpleNamespace(
+                    revocation_pending=False, source_policy_ready=True, synthetic_valid=True
+                )
+            )
         return MagicMock(scalar_one_or_none=lambda: user)
 
     db.execute = AsyncMock(side_effect=execute)

@@ -59,7 +59,11 @@ assert(addr && typeof addr === "object");
 const origin = `http://127.0.0.1:${addr.port}`;
 fs.writeFileSync(path.join(local, "config.json"), JSON.stringify({ server_url: origin, access_token: "desktop-token" }));
 fs.writeFileSync(path.join(local, "lockfile.json"), JSON.stringify({ registries: {
-  [origin]: { harnesses: { pi: { standalone: [pin], agents: [] } } },
+  [origin]: { harnesses: { pi: { standalone: [pin], agents: [
+    { id: "b11c01d1-1111-4111-8111-111111111111", components: [
+      { id: "c11c01d1-1111-4111-8111-111111111111", type: "skill", version: "1.2.3" },
+    ] },
+  ] } } },
 } }));
 const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>();
 const extension = await import(`../extensions/observal.ts?skill=${Date.now()}`);
@@ -69,7 +73,8 @@ const ctx = { cwd: home, hasUI: false, sessionManager: {
 } };
 await handlers.get("session_start")!({ reason: "startup" }, ctx);
 await handlers.get("agent_end")!({}, ctx);
-assert.deepEqual(manifests, [{ harness: "pi", components: [], skills: [expected] }]);
+assert.deepEqual(manifests, [{ harness: "pi", components: [], skills: [expected] }],
+  "unverified agent-profile skill cannot suppress independently verified standalone skill");
 assert.equal(ingests[0]?.layer_hash, hash);
 assert(!JSON.stringify(manifests).includes(secret));
 assert(!JSON.stringify(manifests).includes(content));

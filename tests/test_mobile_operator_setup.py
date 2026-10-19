@@ -81,7 +81,7 @@ async def test_setup_refuses_a_real_email_even_with_correct_server_and_ack(monke
         scalars=AsyncMock(return_value=SimpleNamespace(all=lambda: [author, user])),
     )
     monkeypatch.setattr(ops, "_lock", AsyncMock())
-    monkeypatch.setattr(ops, "_status", AsyncMock(return_value=_status(req)))
+    monkeypatch.setattr(ops, "_status", AsyncMock(return_value=_status(req).model_copy(update={"configured": False})))
     monkeypatch.setattr(
         ops,
         "_settings",
@@ -93,6 +93,27 @@ async def test_setup_refuses_a_real_email_even_with_correct_server_and_ack(monke
         await ops.mobile_test_setup(req, db, author)
     assert denied.value.status_code == 422
     write.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closed_configured_cohort_cannot_be_replaced_or_extended_without_revoke(monkeypatch):
+    req = _req()
+    actor = SimpleNamespace(id=req.author_viewer_id, role=UserRole.super_admin)
+    db = SimpleNamespace(scalar=AsyncMock(return_value=req.server_id), execute=AsyncMock())
+    monkeypatch.setattr(ops, "_lock", AsyncMock())
+    monkeypatch.setattr(ops, "_status", AsyncMock(return_value=_status(req)))
+    write = AsyncMock()
+    monkeypatch.setattr(ops, "_write", write)
+    for replacement in (
+        req,
+        req.model_copy(update={"user_viewer_id": uuid.uuid4()}),
+        req.model_copy(update={"expires_in_minutes": 120}),
+    ):
+        with pytest.raises(HTTPException) as denied:
+            await ops.mobile_test_setup(replacement, db, actor)
+        assert denied.value.status_code == 409
+    write.assert_not_awaited()
+    db.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -61,7 +61,11 @@ const origin = `http://127.0.0.1:${address.port}`;
 fs.writeFileSync(path.join(observalDir, "config.json"),
   JSON.stringify({ server_url: origin, access_token: "desktop-token", user_id: "user" }));
 fs.writeFileSync(path.join(observalDir, "lockfile.json"),
-  JSON.stringify({ registries: { [origin]: { harnesses: { pi: { agents: [], standalone: [pin] } } } } }));
+  JSON.stringify({ registries: { [origin]: { harnesses: { pi: { agents: [
+    { id: "b11c01d1-1111-4111-8111-111111111111", components: [
+      { id: "c11c01d1-1111-4111-8111-111111111111", type: "mcp", version: "1.2.3" },
+    ] },
+  ], standalone: [pin] } } } } }));
 const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
 const extension = await import(`../extensions/observal.ts?verified=${Date.now()}`);
 extension.default({ on: (event: string, handler: any) => handlers.set(event, handler), registerCommand() {} } as any);
@@ -74,6 +78,8 @@ const context = { cwd: home, hasUI: false, sessionManager: {
 await handlers.get("session_start")!({ reason: "startup" }, context);
 await handlers.get("agent_end")!({}, context);
 assert.equal(manifestRequests.length, 1);
+assert.equal(JSON.parse(manifestRequests[0]).components.length, 1,
+  "unverified agent-profile MCP cannot suppress independently verified standalone pin");
 assert.deepEqual(JSON.parse(manifestRequests[0]), { harness: "pi", components: [{ id, version: "1.2.3", alias: "alpha" }] });
 assert(!manifestRequests[0].includes(sentinel), "sender must not expose local secret or unreviewed pin fields");
 assert(snapshotRequests.length > 0);

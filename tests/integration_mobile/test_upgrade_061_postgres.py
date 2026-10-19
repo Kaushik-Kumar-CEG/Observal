@@ -27,10 +27,14 @@ async def test_existing_publication_gets_null_retained_floor_on_upgrade():
     created = False
     try:
         async with admin.connect() as conn:
-            assert (
-                await conn.scalar(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'")) is True
-            )
-            assert await conn.scalar(text("SELECT count(*) FROM users WHERE email NOT LIKE '%@demo.example'")) == 0
+            if await conn.scalar(text("SELECT to_regclass('public.users')")) is not None:
+                # Never run this scratch fixture against a populated or open
+                # base database, even though it creates its own child DB.
+                assert (
+                    await conn.scalar(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'"))
+                    is True
+                )
+                assert await conn.scalar(text("SELECT count(*) FROM users WHERE email NOT LIKE '%@demo.example'")) == 0
             await conn.execute(text("CREATE DATABASE " + name))
             created = True
         target = base.set(database=name)
@@ -82,7 +86,7 @@ async def test_existing_publication_gets_null_retained_floor_on_upgrade():
             async with verify.connect() as db:
                 assert (
                     await db.scalar(text("SELECT version_num FROM alembic_version"))
-                    == "066_mobile_scope_retention_clock"
+                    == "067_mobile_short_retention_fence"
                 )
                 assert await db.scalar(text("SELECT count(*) FROM first_admin_provision_audit")) == 0
                 assert (
@@ -109,6 +113,14 @@ async def test_existing_publication_gets_null_retained_floor_on_upgrade():
                 )
         finally:
             await verify.dispose()
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "066_mobile_scope_retention_clock"],
+            env=env,
+            capture_output=True,
+            timeout=60,
+        )
+        assert downgrade.returncode != 0, "An old publication must block pre-verification downgrade to 066"
+        assert b"Cannot discard committed mobile source policy epochs or qualified receipts" in downgrade.stderr
     finally:
         if created:
             async with admin.connect() as conn:

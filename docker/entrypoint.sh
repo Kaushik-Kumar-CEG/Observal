@@ -83,4 +83,11 @@ echo "Backfilling pending version reviews before serving traffic..."
 echo "Running ClickHouse migrations..."
 /app/.venv/bin/python -m services.clickhouse.migrations
 
+# API containers skip startup DDL. Initializing here, after both migration
+# chains, is the supported audited recovery from a retention setting change.
+# This fails closed on any mismatch; never mark source policy ready from a
+# configuration value without reading back the actual ClickHouse table TTL.
+echo "Verifying ClickHouse raw-source TTL and mobile read policy..."
+/app/.venv/bin/python -c 'import asyncio; from services.clickhouse.schema import init_clickhouse; asyncio.run(init_clickhouse())'
+
 echo "Initialization complete."

@@ -34,6 +34,12 @@ JOIN mcp_listings l ON l.id=e.component_id AND l.is_private=false
 JOIN mcp_versions v ON v.id=map.version_id AND v.listing_id=l.id AND v.status IN ('approved','archived')
 JOIN mobile_session_publications pub ON pub.project_id=e.project_id AND pub.user_id=e.user_id
  AND pub.harness=e.harness AND pub.session_id=e.session_id AND pub.status IN ('complete','partial')
+ AND pub.source_retained_until>clock_timestamp() AND pub.source_highest_line IS NOT NULL
+LEFT JOIN mobile_source_line_highwater hw ON hw.project_id=pub.project_id AND hw.user_id=pub.user_id
+ AND hw.harness=pub.harness AND hw.session_id=pub.session_id
+JOIN mobile_read_controls policy ON policy.project_id=pub.project_id AND policy.source_policy_ready
+ AND policy.source_policy_epoch=pub.source_policy_epoch
+ AND (hw.max_line IS NULL OR hw.max_line<=pub.source_highest_line)
 WHERE e.project_id=:project AND e.harness='pi' AND e.event_time>=:start AND e.event_time<:end
  AND (SELECT pe.status FROM mobile_publication_events pe
       WHERE pe.kind='mcp' AND pe.listing_id=l.id AND pe.version_id=v.id AND pe.recorded_at<=e.event_time
@@ -156,7 +162,13 @@ async def qualified_zero_subset(
                 "AND run.harness=z.harness AND run.session_id=z.session_id "
                 "WHERE z.project_id=:project AND z.user_id=:subject AND z.harness='pi' "
                 "AND z.event_time>=:start AND z.event_time<:end AND pub.status='complete' "
-                "AND pub.source_retained_until>clock_timestamp() "
+                "AND pub.source_retained_until>clock_timestamp() AND pub.source_highest_line IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM mobile_source_line_highwater hw "
+                "WHERE hw.project_id=pub.project_id AND hw.user_id=pub.user_id "
+                "AND hw.harness=pub.harness AND hw.session_id=pub.session_id "
+                "AND hw.max_line>pub.source_highest_line) "
+                "AND EXISTS (SELECT 1 FROM mobile_read_controls policy WHERE policy.project_id=pub.project_id "
+                "AND policy.source_policy_ready AND policy.source_policy_epoch=pub.source_policy_epoch) "
                 "AND pub.source_revision=z.source_revision AND run.root_verified=true "
                 "AND run.run_incarnation=z.root_run_incarnation "
                 "AND EXISTS (SELECT 1 FROM mobile_layer_components map "
@@ -286,7 +298,14 @@ AND CASE WHEN e.run_incarnation=e.root_run_incarnation AND e.session_id=run.sess
     AND bool_or(ancestor.run_incarnation=e.root_run_incarnation AND ancestor.parent_session_id IS NULL)
     AND bool_and(coalesce(
       ancestor.source_status IN ('complete','partial')
-      AND ancestor_pub.status IN ('complete','partial') AND ancestor_pub.source_retained_until>clock_timestamp(),false))
+      AND ancestor_pub.status IN ('complete','partial') AND ancestor_pub.source_retained_until>clock_timestamp()
+      AND ancestor_pub.source_highest_line IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM mobile_source_line_highwater hw
+       WHERE hw.project_id=ancestor_pub.project_id AND hw.user_id=ancestor_pub.user_id
+        AND hw.harness=ancestor_pub.harness AND hw.session_id=ancestor_pub.session_id
+        AND hw.max_line>ancestor_pub.source_highest_line)
+      AND EXISTS (SELECT 1 FROM mobile_read_controls policy WHERE policy.project_id=ancestor_pub.project_id
+       AND policy.source_policy_ready AND policy.source_policy_epoch=ancestor_pub.source_policy_epoch),false))
  ) END
 """
 
@@ -306,7 +325,12 @@ JOIN {pins} map ON map.project_id=e.project_id AND map.user_id=e.user_id
  AND map.harness=e.harness AND map.layer_hash=e.layer_hash AND {pin_identity} AND map.component_id=e.component_id
 JOIN mobile_session_publications pub ON pub.project_id=e.project_id AND pub.user_id=e.user_id
  AND pub.harness=e.harness AND pub.session_id=e.session_id AND pub.status IN ('complete','partial')
- AND pub.source_retained_until>clock_timestamp()
+ AND pub.source_retained_until>clock_timestamp() AND pub.source_highest_line IS NOT NULL
+LEFT JOIN mobile_source_line_highwater hw ON hw.project_id=pub.project_id AND hw.user_id=pub.user_id
+ AND hw.harness=pub.harness AND hw.session_id=pub.session_id
+JOIN mobile_read_controls policy ON policy.project_id=pub.project_id AND policy.source_policy_ready
+ AND policy.source_policy_epoch=pub.source_policy_epoch
+ AND (hw.max_line IS NULL OR hw.max_line<=pub.source_highest_line)
  {revision_join}
  {_LINEAGE_GUARD}
 JOIN {listing} l ON l.id=e.component_id
@@ -390,6 +414,9 @@ async def trace_union(
     # A concentrated original author otherwise provokes one nested lookup per
     # event into run, publication and account tables (10K+ repeated lookups).
     await db.execute(text("SET LOCAL enable_nestloop=off"))
+    # Source-policy/ancestor guards make the complex plan cross PostgreSQL's
+    # JIT cost threshold; multi-second compilation is not part of the proof.
+    await db.execute(text("SET LOCAL jit=off"))
     params = {"project": project, "subject": subject, "start": start, "end": end}
     if actor_ids is not None:
         params["actor_ids"] = list(actor_ids)
@@ -465,6 +492,7 @@ async def trace_pair_batch(
     # publication, run and user tables on a concentrated original author.
     # This is transaction-local (never a global database configuration change).
     await db.execute(text("SET LOCAL enable_nestloop=off"))
+    await db.execute(text("SET LOCAL jit=off"))
     authors: dict[uuid.UUID, dict] = {}
     users: dict[uuid.UUID, dict] = {}
     for row in (await db.execute(text(sql), params)).all():
@@ -537,4 +565,5 @@ async def trace_component_page(
         + " ORDER BY roots DESC,typed.kind,typed.id LIMIT :limit"
     )
     await db.execute(text("SET LOCAL enable_nestloop=off"))
+    await db.execute(text("SET LOCAL jit=off"))
     return [dict(row._mapping) for row in (await db.execute(text(sql), params)).all()]
