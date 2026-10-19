@@ -7,6 +7,7 @@ transaction-scoped exclusive project lock as retention and all phone readers.
 The workflow never sets the live trace qualification or trace_headlines switch.
 """
 
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from fastapi import Depends, HTTPException
@@ -45,6 +46,7 @@ class MobileTestSetup(BaseModel):
     author_viewer_id: UUID
     user_viewer_id: UUID
     acknowledgement: str
+    expires_in_minutes: int | None = None  # Required on setup; open reads the persisted deadline.
 
 
 class MobileTestStatus(BaseModel):
@@ -56,6 +58,7 @@ class MobileTestStatus(BaseModel):
     configured: bool
     trace_headlines: bool
     revocation_pending: bool = False
+    expires_at: datetime | None = None
 
 
 async def _lock(db: AsyncSession) -> None:
@@ -75,17 +78,13 @@ async def _status(db: AsyncSession) -> MobileTestStatus:
     values = await _settings(db)
     row = (
         await db.execute(
-            text("SELECT blocked,generation FROM mobile_read_controls WHERE project_id=:project"),
+            text(
+                "SELECT blocked,generation,revocation_pending,synthetic_expires_at "
+                "FROM mobile_read_controls WHERE project_id=:project"
+            ),
             {"project": str(DEFAULT_PROJECT_ID)},
         )
     ).one_or_none()
-    latest_action = await db.scalar(
-        text(
-            "SELECT action FROM mobile_operator_audit WHERE project_id=:project "
-            "ORDER BY created_at DESC,id DESC LIMIT 1"
-        ),
-        {"project": str(DEFAULT_PROJECT_ID)},
-    )
 
     def ident(key: str) -> UUID | None:
         try:
@@ -103,7 +102,8 @@ async def _status(db: AsyncSession) -> MobileTestStatus:
         and values["mobile.auth_enabled"] == "true"
         and values["mobile.synthetic_test_ack"] == _ACK,
         trace_headlines=values["trace_headlines"] == "true",
-        revocation_pending=latest_action == "revoking",
+        revocation_pending=bool(row.revocation_pending) if row else False,
+        expires_at=row.synthetic_expires_at if row else None,
     )
 
 
@@ -182,6 +182,8 @@ async def mobile_test_setup(
 ):
     if req.acknowledgement != _ACK or req.author_viewer_id == req.user_viewer_id:
         raise HTTPException(422, "Explicit disposable cohort acknowledgement and two distinct viewers required")
+    if req.expires_in_minutes is None or not 1 <= req.expires_in_minutes <= 120:
+        raise HTTPException(422, "A one-to-120-minute disposable test duration is required")
     await _lock(db)
     current = await _status(db)
     if not current.blocked or current.trace_headlines or current.revocation_pending or not current.generation:
@@ -215,6 +217,13 @@ async def mobile_test_setup(
         "trace_headlines": "false",
     }
     await _write(db, changes)
+    await db.execute(
+        text(
+            "UPDATE mobile_read_controls SET synthetic_expires_at=now()+make_interval(mins => CAST(:minutes AS int)) "
+            "WHERE project_id=:project AND blocked=true AND revocation_pending=false"
+        ),
+        {"project": str(DEFAULT_PROJECT_ID), "minutes": req.expires_in_minutes},
+    )
     await _record_transition(
         db,
         actor,
@@ -261,6 +270,10 @@ async def mobile_test_open(
         or status.user_viewer_id != req.user_viewer_id
         or req.author_viewer_id == req.user_viewer_id
         or not await synthetic_principals_valid(db, req.author_viewer_id, req.user_viewer_id)
+        or not await db.scalar(
+            text("SELECT synthetic_expires_at > clock_timestamp() FROM mobile_read_controls WHERE project_id=:project"),
+            {"project": str(DEFAULT_PROJECT_ID)},
+        )
     ):
         raise HTTPException(409, "Closed, matching, disposable, live-disabled test setup required")
     changed = await db.execute(
@@ -287,20 +300,31 @@ async def mobile_test_revoke(
     # still leaves every named phone read behind the closed barrier.
     await _lock(db)
     prior = await _status(db)
-    changed = await db.execute(
-        text(
-            "INSERT INTO mobile_read_controls(project_id,blocked,generation) VALUES (:project,true,1) "
-            "ON CONFLICT (project_id) DO UPDATE SET blocked=true,generation=mobile_read_controls.generation+1,"
-            "updated_at=now() RETURNING generation"
-        ),
-        {"project": str(DEFAULT_PROJECT_ID)},
+    deny_sql = text(
+        "INSERT INTO mobile_read_controls(project_id,blocked,generation,revocation_pending,"
+        "revocation_actor_id,revocation_started_at) VALUES (:project,true,1,true,:actor,now()) "
+        "ON CONFLICT (project_id) DO UPDATE SET blocked=true,revocation_pending=true,"
+        "revocation_actor_id=:actor,revocation_started_at=now(),"
+        "generation=mobile_read_controls.generation+1,updated_at=now() RETURNING generation"
     )
-    # Disallow minting in the same committed transaction as the first deny.
-    # In-flight device redemption/refresh holds the shared project lock, so
-    # all tokens minted earlier are covered by the later Redis marker.
+    params = {"project": str(DEFAULT_PROJECT_ID), "actor": actor.id}
+    changed = await db.execute(deny_sql, params)
+    try:
+        await _record_transition(db, actor, "revoking", prior, changed.scalar_one())
+    except Exception as exc:
+        # An unavailable audit writer must not roll back the deny. The row
+        # itself retains the actor and start time for recovery/investigation.
+        await db.rollback()
+        await _lock(db)
+        await db.execute(deny_sql, params)
+        await db.commit()
+        raise HTTPException(503, "Mobile reads denied; operator audit failed; retry revoke") from exc
+    await db.commit()
+    # Disallow new mobile tokens under the same shared project lock. A later
+    # setting write failure cannot reopen the already committed barrier.
+    await _lock(db)
     disable = {"mobile.auth_enabled": "false", "mobile.synthetic_test_enabled": "false", "trace_headlines": "false"}
     await _write(db, disable)
-    await _record_transition(db, actor, "revoking", prior, changed.scalar_one())
     await db.commit()
     await _refresh(disable)
     await _audit(actor, "denied")
@@ -328,7 +352,8 @@ async def mobile_test_revoke(
     await _write(db, changes)
     final = await db.execute(
         text(
-            "UPDATE mobile_read_controls SET blocked=true,generation=generation+1,updated_at=now() "
+            "UPDATE mobile_read_controls SET blocked=true,revocation_pending=false,synthetic_expires_at=NULL,"
+            "generation=generation+1,updated_at=now() "
             "WHERE project_id=:project RETURNING generation"
         ),
         {"project": str(DEFAULT_PROJECT_ID)},

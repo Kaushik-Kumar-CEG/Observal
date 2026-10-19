@@ -38,6 +38,33 @@ async def test_disposable_principals_rechecked_under_share_locks_after_email_or_
 
 
 @pytest.mark.asyncio
+async def test_expired_synthetic_cohort_denies_read_before_consulting_disposable_people(monkeypatch):
+    from services import mobile_read_control as control
+
+    author, actor = uuid.uuid4(), uuid.uuid4()
+    viewer = SimpleNamespace(id=author, role=UserRole.super_admin)
+    values = {
+        "mobile.synthetic_test_server_id": "candidate-server",
+        "mobile.synthetic_test_ack": "isolated-disposable-synthetic-only-v1",
+        "mobile.synthetic_test_viewer_id": str(author),
+        "mobile.synthetic_test_self_user_viewer_id": str(actor),
+    }
+    monkeypatch.setattr(control, "readable", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        control.ds,
+        "get_bool",
+        AsyncMock(side_effect=lambda key: key in ("mobile.auth_enabled", "mobile.synthetic_test_enabled")),
+    )
+    monkeypatch.setattr(control.ds, "get", AsyncMock(side_effect=lambda key: values.get(key, "")))
+    check_people = AsyncMock(return_value=True)
+    monkeypatch.setattr(control, "synthetic_principals_valid", check_people)
+    db = SimpleNamespace(scalar=AsyncMock(return_value=False))
+    assert await control.active_mobile_cohort(db, viewer, server_id="candidate-server") is None
+    check_people.assert_not_awaited()
+    assert "synthetic_expires_at > clock_timestamp()" in str(db.scalar.call_args.args[0])
+
+
+@pytest.mark.asyncio
 async def test_test_admin_cannot_request_third_subject_or_global_overview(monkeypatch):
     author, actor, outsider = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     viewer = SimpleNamespace(id=author, role=UserRole.super_admin)

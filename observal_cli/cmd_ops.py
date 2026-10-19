@@ -474,6 +474,7 @@ def _mobile_test_print(result: dict, output: OutputMode) -> None:
     rprint(
         f"Mobile test: {state}; generation={result.get('generation', 0)}; "
         f"configured={result.get('configured', False)}; "
+        f"expires_at={result.get('expires_at') or 'none'}; "
         f"revocation_pending={result.get('revocation_pending', False)}"
     )
 
@@ -489,6 +490,7 @@ def admin_mobile_test_setup(
     server_id: str = typer.Option(..., "--server-id"),
     author_viewer_id: str = typer.Option(..., "--author-viewer-id"),
     user_viewer_id: str = typer.Option(..., "--user-viewer-id"),
+    duration_minutes: int = typer.Option(..., "--duration-minutes", help="Disposable read window, 1-120 minutes"),
     output: OutputMode = typer.Option("table", "--output", "-o"),
 ):
     """Configure only two disposable viewers; the read barrier stays CLOSED."""
@@ -500,6 +502,7 @@ def admin_mobile_test_setup(
                 "author_viewer_id": author_viewer_id,
                 "user_viewer_id": user_viewer_id,
                 "acknowledgement": _MOBILE_TEST_ACK,
+                "expires_in_minutes": duration_minutes,
             },
         ),
         output,

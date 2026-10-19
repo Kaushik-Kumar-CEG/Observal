@@ -50,8 +50,20 @@ async def mobile_issue_allowed(db: AsyncSession) -> bool:
         text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
         {"key": _lock_key(str(DEFAULT_PROJECT_ID))},
     )
+    state = (
+        await db.execute(
+            text(
+                "SELECT revocation_pending,synthetic_expires_at > clock_timestamp() AS synthetic_valid "
+                "FROM mobile_read_controls WHERE project_id=:project"
+            ),
+            {"project": str(DEFAULT_PROJECT_ID)},
+        )
+    ).one_or_none()
+    if state is None or state.revocation_pending:
+        return False
     value = await db.scalar(text("SELECT value FROM enterprise_config WHERE key='mobile.auth_enabled'"))
-    return value == "true"
+    synthetic = await db.scalar(text("SELECT value FROM enterprise_config WHERE key='mobile.synthetic_test_enabled'"))
+    return value == "true" and (synthetic != "true" or state.synthetic_valid is True)
 
 
 def _disposable_email(value: str) -> bool:
@@ -111,6 +123,11 @@ async def active_mobile_cohort(db: AsyncSession, viewer: User, *, server_id: str
             author_id = UUID(await ds.get("mobile.synthetic_test_viewer_id"))
             user_id = UUID(await ds.get("mobile.synthetic_test_self_user_viewer_id"))
         except (ValueError, TypeError):
+            return None
+        if not await db.scalar(
+            text("SELECT synthetic_expires_at > clock_timestamp() FROM mobile_read_controls WHERE project_id=:project"),
+            {"project": str(DEFAULT_PROJECT_ID)},
+        ):
             return None
         if viewer.id not in (author_id, user_id) or not await synthetic_principals_valid(db, author_id, user_id):
             return None

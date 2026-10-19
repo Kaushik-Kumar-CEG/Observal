@@ -19,6 +19,7 @@ def _req():
         author_viewer_id=uuid.uuid4(),
         user_viewer_id=uuid.uuid4(),
         acknowledgement="isolated-disposable-synthetic-only-v1",
+        expires_in_minutes=30,
     )
 
 
@@ -113,8 +114,9 @@ async def test_revoke_commits_closed_barrier_before_settings_and_never_reopens(m
     actor = SimpleNamespace(id=uuid.uuid4(), role=UserRole.super_admin)
     await ops.mobile_test_revoke(db, actor)
     assert events == [
-        "clear_settings",
         "durable_audit",
+        "commit",
+        "clear_settings",
         "commit",
         "revoke_grant",
         "revoke_grant",
@@ -122,7 +124,47 @@ async def test_revoke_commits_closed_barrier_before_settings_and_never_reopens(m
         "durable_audit",
         "commit",
     ]
-    assert db.execute.await_count == 2  # each transaction denies before releasing its project lock
+    assert db.execute.await_count == 2  # first durable deny and final closed cleanup
+
+
+@pytest.mark.asyncio
+async def test_revoke_keeps_durable_deny_when_settings_write_fails(monkeypatch):
+    req = _req()
+    events = []
+    db = SimpleNamespace(
+        execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: 7)),
+        commit=AsyncMock(side_effect=lambda: events.append("commit")),
+    )
+    monkeypatch.setattr(ops, "_lock", AsyncMock())
+    monkeypatch.setattr(ops, "_status", AsyncMock(return_value=_status(req)))
+    monkeypatch.setattr(ops, "_record_transition", AsyncMock(side_effect=lambda *_args: events.append("audit")))
+    monkeypatch.setattr(ops, "_write", AsyncMock(side_effect=RuntimeError("settings failed")))
+    monkeypatch.setattr(ops, "revoke_user_tokens", AsyncMock())
+    with pytest.raises(RuntimeError, match="settings failed"):
+        await ops.mobile_test_revoke(db, SimpleNamespace(id=uuid.uuid4(), role=UserRole.super_admin))
+    assert events == ["audit", "commit"]
+    ops.revoke_user_tokens.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_revoke_commits_deny_even_when_audit_insert_fails(monkeypatch):
+    req = _req()
+    db = SimpleNamespace(
+        execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: 7)),
+        commit=AsyncMock(),
+        rollback=AsyncMock(),
+    )
+    monkeypatch.setattr(ops, "_lock", AsyncMock())
+    monkeypatch.setattr(ops, "_status", AsyncMock(return_value=_status(req)))
+    monkeypatch.setattr(ops, "_record_transition", AsyncMock(side_effect=RuntimeError("audit failed")))
+    monkeypatch.setattr(ops, "_write", AsyncMock())
+    with pytest.raises(HTTPException) as denied:
+        await ops.mobile_test_revoke(db, SimpleNamespace(id=uuid.uuid4(), role=UserRole.super_admin))
+    assert denied.value.status_code == 503
+    db.rollback.assert_awaited_once()
+    db.commit.assert_awaited_once()  # fallback barrier-only commit
+    assert db.execute.await_count == 2
+    ops._write.assert_not_awaited()
 
 
 @pytest.mark.asyncio

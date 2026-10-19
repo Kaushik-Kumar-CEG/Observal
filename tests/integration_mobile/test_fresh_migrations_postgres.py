@@ -65,7 +65,7 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
         try:
             async with verify.connect() as conn:
                 assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == (
-                    "063_first_admin_provision_audit"
+                    "065_mobile_synthetic_deadline"
                 )
                 assert (
                     await conn.execute(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'"))

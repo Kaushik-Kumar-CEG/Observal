@@ -75,6 +75,7 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
                     author_viewer_id=author_id,
                     user_viewer_id=user_id,
                     acknowledgement="isolated-disposable-synthetic-only-v1",
+                    expires_in_minutes=30,
                 )
                 monkeypatch.setattr(ops, "_refresh", AsyncMock())
                 monkeypatch.setattr(ops, "_audit", AsyncMock())
@@ -95,6 +96,15 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
                 assert (await ops.mobile_test_status(db, actor)).blocked
                 prepared = await ops.mobile_test_setup(req, db, actor)
                 assert prepared.configured and prepared.blocked and not prepared.trace_headlines
+                assert prepared.expires_at is not None
+                await db.commit()
+                rollback = subprocess.run(
+                    [sys.executable, "-m", "alembic", "downgrade", "064_mobile_revoke_guard"],
+                    env=env,
+                    capture_output=True,
+                    timeout=40,
+                )
+                assert rollback.returncode != 0, "Configured cohort cannot lose its expiry on downgrade"
                 opened = await ops.mobile_test_open(req, db, actor)
                 assert opened.configured and not opened.blocked and opened.generation > prepared.generation
                 assert await synthetic_principals_valid(db, author_id, user_id)
@@ -115,7 +125,55 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
                 await db.execute(text("UPDATE users SET email='user@example.invalid' WHERE id=:id"), {"id": user_id})
                 await db.commit()
                 assert await mobile_issue_allowed(db) is True
+                await db.commit()  # release the issuer's shared lock before the deadline test
+                await db.execute(
+                    text(
+                        "UPDATE mobile_read_controls SET synthetic_expires_at=now()-interval '1 second' "
+                        "WHERE project_id='default'"
+                    )
+                )
+                await db.commit()
+                assert await mobile_issue_allowed(db) is False  # expired issuance is denied across workers
+                await db.commit()
+                await db.execute(
+                    text(
+                        "UPDATE mobile_read_controls SET synthetic_expires_at=clock_timestamp()+interval '0.2 seconds' "
+                        "WHERE project_id='default'"
+                    )
+                )
+                await db.commit()
+                await db.execute(text("SELECT 1"))  # begin a transaction before the expiry
+                await asyncio.sleep(0.35)
+                assert await mobile_issue_allowed(db) is False  # transaction-start now() would wrongly allow it
+                await db.commit()
+                await db.execute(
+                    text(
+                        "UPDATE mobile_read_controls SET synthetic_expires_at=now()+interval '30 minutes' "
+                        "WHERE project_id='default'"
+                    )
+                )
+                await db.commit()
+                assert await mobile_issue_allowed(db) is True
                 await db.commit()  # release the test issuer's shared project lock before revoke
+                real_write = ops._write
+
+                async def fail_disable(session, values):
+                    if values.get("mobile.auth_enabled") == "false":
+                        raise RuntimeError("isolated settings failure")
+                    return await real_write(session, values)
+
+                monkeypatch.setattr(ops, "_write", fail_disable)
+                with pytest.raises(RuntimeError, match="isolated settings failure"):
+                    await ops.mobile_test_revoke(db, actor)
+                await db.rollback()  # failed phase-two transaction must not undo phase-one deny
+                assert await db.scalar(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'"))
+                assert await db.scalar(
+                    text("SELECT revocation_pending FROM mobile_read_controls WHERE project_id='default'")
+                )
+                assert await mobile_issue_allowed(db) is False
+                await db.commit()
+                monkeypatch.setattr(ops, "_write", real_write)
+                await db.refresh(actor)  # a new HTTP request reloads its authenticated principal after rollback
                 closed = await ops.mobile_test_revoke(db, actor)
                 assert await mobile_issue_allowed(db) is False
                 assert closed.blocked and not closed.configured and not closed.trace_headlines
@@ -126,7 +184,7 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
                     .all()
                 )
                 assert entries.count("setup") == 1 and entries.count("open") == 1
-                assert entries.count("revoking") == 1 and entries.count("revoke") == 1
+                assert entries.count("revoking") == 2 and entries.count("revoke") == 1
                 assert (
                     await db.scalar(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'"))
                 ) is True

@@ -51,8 +51,14 @@ def identity(monkeypatch, tmp_path):
     user.created_at = datetime.now(UTC)
     user.auth_provider = "local"
     db = MagicMock()
-    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: user))
-    db.scalar = AsyncMock(return_value="true")  # authoritative mobile issuance flag under shared PG lock
+
+    async def execute(sql, *_args, **_kwargs):
+        if "revocation_pending,synthetic_expires_at" in str(sql):
+            return MagicMock(one_or_none=lambda: SimpleNamespace(revocation_pending=False, synthetic_valid=True))
+        return MagicMock(scalar_one_or_none=lambda: user)
+
+    db.execute = AsyncMock(side_effect=execute)
+    db.scalar = AsyncMock(return_value="true")  # authoritative synthetic auth + cohort flag under PG lock
     return SimpleNamespace(redis=redis, user=user, db=db)
 
 

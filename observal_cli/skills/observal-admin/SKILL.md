@@ -43,7 +43,7 @@ Read the selected reference completely before executing.
 - Export and import destinations must be explicit. Validate an archive before import.
 - Use the project's migration commands. Never replace them with ad hoc SQL.
 - A server command is successful only when the final status confirms the requested service or version state.
-- For mobile testing, use `observal admin mobile-test-status`, `mobile-test-setup --server-id UUID --author-viewer-id UUID --user-viewer-id UUID`, `mobile-test-open` with the same three flags only after closed-gate checks, then `mobile-test-revoke` before deleting source or credentials. Never set `mobile.*` or `trace_headlines` via generic settings or raw SQL; never use real-person accounts for the synthetic cohort.
+- For mobile testing, use `observal admin mobile-test-status`, `mobile-test-setup --server-id UUID --author-viewer-id UUID --user-viewer-id UUID --duration-minutes 60`, `mobile-test-open` with the same three flags only after closed-gate checks, then `mobile-test-revoke` before the recorded expiry and before deleting source or credentials. Expiry denies reads but does not replace audited revoke. Never set `mobile.*` or `trace_headlines` via generic settings or raw SQL; never use real-person accounts for the synthetic cohort.
 
 ## Completion
 
