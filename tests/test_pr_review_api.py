@@ -260,6 +260,25 @@ async def test_agent_create_opens_review_before_commit(api):
 
 
 @pytest.mark.asyncio
+async def test_comment_only_author_is_named_without_exposing_draft_participation(api):
+    client, current, (author, _, _, second), (_, number), _ = api
+    base = f"/api/v1/reviews/{number}"
+    current[0] = second
+    pending = await client.post(base + "/threads", json={"body": "Private note", "as_draft": True})
+    assert pending.status_code == 201, pending.text
+    current[0] = author
+    private_detail = (await client.get(base)).json()
+    assert str(second.id) not in private_detail["reviewer_names"]
+    current[0] = second
+    visible = await client.post(base + "/threads", json={"body": "Visible note"})
+    assert visible.status_code == 201, visible.text
+    current[0] = author
+    public_detail = (await client.get(base)).json()
+    assert public_detail["reviewer_names"][str(second.id)] == second.username
+    assert public_detail["gate"]["approvals"] == 0
+
+
+@pytest.mark.asyncio
 async def test_detail_and_raw_diff_never_leak_to_nonparticipants(api):
     client, current, (author, reviewer, outsider, _), (rid, number), _ = api
     current[0] = outsider
