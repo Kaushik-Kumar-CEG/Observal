@@ -1,8 +1,10 @@
-<!-- SPDX-FileCopyrightText: 2026 Rajat <rajattempest8736@gmail.com> -->
-<!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com> -->
-<!-- SPDX-License-Identifier: Apache-2.0 -->
-
-# Kiro
+---
+# SPDX-FileCopyrightText: 2026 Rajat <rajattempest8736@gmail.com>
+# SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+title: "Kiro"
+---
 
 Kiro is a first-class Observal harness integration. Observal can install Kiro agents,
 configure MCP servers, add hooks, expose skills, and collect Kiro session telemetry.
