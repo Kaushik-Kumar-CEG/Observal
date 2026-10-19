@@ -528,6 +528,8 @@ def drain_outbox(
             acknowledgement = post_batch(item.payload, config)
         except PermanentIngestRejectionError as exc:
             quarantine_path = telemetry_buffer.quarantine(item, str(exc), db_path=db_path)
+            if quarantine_path is None:
+                return False
             if rejections is not None:
                 rejections.append((item.harness, item.session_id, exc.status_code))
             log_error(
@@ -616,6 +618,10 @@ def drain_session_source(
     if telemetry_buffer.is_held(destination, user_id, source.harness, source.session_id, db_path=db_path):
         return False
 
+    # Keep a per-call boundary even when the caller reuses a report list.
+    rejections = rejections if rejections is not None else []
+    rejection_start = len(rejections)
+
     def provenance(payload: dict) -> dict | None:
         from observal_cli.harness import ensure_loaded, get_adapter
 
@@ -624,11 +630,9 @@ def drain_session_source(
         return builder(source, payload) if builder is not None else None
 
     def source_was_rejected() -> bool:
-        return bool(
-            rejections
-            and any(
-                harness == source.harness and session_id == source.session_id for harness, session_id, _ in rejections
-            )
+        return any(
+            harness == source.harness and session_id == source.session_id
+            for harness, session_id, _ in rejections[rejection_start:]
         )
 
     # A transient pre-drain failure never prevents new local records from being spooled.
@@ -721,12 +725,15 @@ def drain_session_source(
                 _repair_attempts=_repair_attempts + 1,
                 identity_scope=identity_scope,
             )
+        delivered = telemetry_buffer.session_delivered(
+            destination, user_id, source.harness, source.session_id, db_path=db_path
+        )
         if bytes_read or (final and delivered and not source_was_rejected()):
             write_cursor(
                 source.checkpoint_key,
                 byte_offset,
                 line_count,
-                finalized=final and delivered,
+                finalized=final and delivered and not source_was_rejected(),
                 home=home,
             )
         return delivered and not source_was_rejected()
@@ -802,7 +809,10 @@ def drain_session_source(
             _repair_attempts=_repair_attempts + 1,
             identity_scope=identity_scope,
         )
-    return delivered and not source_was_rejected()
+    return (
+        telemetry_buffer.session_delivered(destination, user_id, source.harness, source.session_id, db_path=db_path)
+        and not source_was_rejected()
+    )
 
 
 # ---------------------------------------------------------------------------
