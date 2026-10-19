@@ -240,6 +240,39 @@ async def _scope_revision(db: AsyncSession, viewer: User, subject: UUID, scope: 
         )
         or 0
     )
+    # Indexed clock frontier: an ancestor's TTL passing causes the next
+    # deadline to change even without a worker write. Author links are
+    # precomputed on typed fact insert (including retained-data upgrade),
+    # so there is no recursive ancestry scan on live card/page/detail reads.
+    if scope == "user":
+        deadline_sql = text(
+            "SELECT source_retained_until FROM mobile_session_publications "
+            "WHERE project_id=:project AND user_id=:subject AND source_retained_until>clock_timestamp() "
+            "AND status IN ('complete','partial') ORDER BY source_retained_until LIMIT 1"
+        )
+    else:
+        deadline_sql = text(
+            "SELECT MIN(next_source.source_retained_until) FROM mobile_author_actor_links link "
+            "JOIN LATERAL (SELECT source_retained_until FROM mobile_session_publications pub "
+            "WHERE pub.project_id=link.project_id AND pub.user_id=link.actor_id "
+            "AND pub.source_retained_until>clock_timestamp() AND pub.status IN ('complete','partial') "
+            "ORDER BY pub.source_retained_until LIMIT 1) next_source ON true "
+            "WHERE link.project_id=:project AND link.author_id=:subject"
+        )
+    deadline = await db.scalar(deadline_sql, {"project": str(DEFAULT_PROJECT_ID), "subject": subject})
+    return _sign_scope_revision(viewer, subject, scope, anchor, generation, epoch, deadline)
+
+
+def _sign_scope_revision(
+    viewer: User,
+    subject: UUID,
+    scope: Scope,
+    anchor: str,
+    generation: int,
+    epoch: int,
+    deadline: datetime | None,
+    private_key: bytes | None = None,
+) -> str:
     # Revision is opaque to the phone. MAC ALL dimensions with the current
     # server signing key: ECDSA signatures are randomized, so re-signing the
     # same claims on a detail request never equals the paired-card revision.
@@ -247,12 +280,82 @@ async def _scope_revision(db: AsyncSession, viewer: User, subject: UUID, scope: 
     # without the server key. Key rotation correctly invalidates old cursors.
     fingerprint = hashlib.sha256(
         json.dumps(
-            [str(viewer.id), str(subject), scope, str(DEFAULT_PROJECT_ID), anchor, generation, epoch],
+            [
+                str(viewer.id),
+                str(subject),
+                scope,
+                str(DEFAULT_PROJECT_ID),
+                anchor,
+                generation,
+                epoch,
+                deadline.isoformat() if deadline is not None else None,
+            ],
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
+    if private_key is None:
+        private_key = (
+            get_key_manager().get_private_key().private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+        )
+    return "r2_" + hmac.new(private_key, fingerprint.encode(), hashlib.sha256).hexdigest()
+
+
+async def _scope_revisions(db: AsyncSession, viewer: User, subjects: list[tuple[UUID, Scope]], anchor: str) -> dict:
+    """One indexed PostgreSQL snapshot for the bounded 12-person paired viewport."""
+    if not subjects:
+        return {}
+    if len(subjects) > 24:
+        raise ValueError("Too many mobile revision scopes")
+    rows = (
+        (
+            await db.execute(
+                text("""
+            WITH requested AS (
+              SELECT unnest(CAST(:subject_ids AS uuid[])) AS subject_id,
+                     unnest(CAST(:scopes AS text[])) AS scope
+            )
+            SELECT requested.subject_id,requested.scope,coalesce(e.epoch,0) AS epoch,
+              coalesce(g.generation,0) AS generation,
+              CASE WHEN requested.scope='user' THEN user_deadline.floor ELSE author_deadline.floor END AS deadline
+            FROM requested
+            LEFT JOIN mobile_scope_epochs e ON e.project_id=:project
+              AND e.subject_id=requested.subject_id AND e.scope=requested.scope
+            LEFT JOIN mobile_read_controls g ON g.project_id=:project
+            LEFT JOIN LATERAL (
+              SELECT pub.source_retained_until AS floor FROM mobile_session_publications pub
+              WHERE requested.scope='user' AND pub.project_id=:project AND pub.user_id=requested.subject_id
+                AND pub.status IN ('complete','partial') AND pub.source_retained_until>clock_timestamp()
+              ORDER BY pub.source_retained_until LIMIT 1
+            ) user_deadline ON true
+            LEFT JOIN LATERAL (
+              SELECT min(next_source.floor) AS floor FROM mobile_author_actor_links link
+              JOIN LATERAL (
+                SELECT pub.source_retained_until AS floor FROM mobile_session_publications pub
+                WHERE pub.project_id=link.project_id AND pub.user_id=link.actor_id
+                  AND pub.status IN ('complete','partial') AND pub.source_retained_until>clock_timestamp()
+                ORDER BY pub.source_retained_until LIMIT 1
+              ) next_source ON true
+              WHERE requested.scope='author' AND link.project_id=:project
+                AND link.author_id=requested.subject_id
+            ) author_deadline ON true
+        """),
+                {
+                    "project": str(DEFAULT_PROJECT_ID),
+                    "subject_ids": [subject for subject, _ in subjects],
+                    "scopes": [scope for _, scope in subjects],
+                },
+            )
+        )
+        .mappings()
+        .all()
+    )
     private_key = get_key_manager().get_private_key().private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
-    return "r1_" + hmac.new(private_key, fingerprint.encode(), hashlib.sha256).hexdigest()
+    return {
+        (row.subject_id, row.scope): _sign_scope_revision(
+            viewer, row.subject_id, row.scope, anchor, row.generation, row.epoch, row.deadline, private_key
+        )
+        for row in rows
+    }
 
 
 def _can_trace(viewer: User, trace_privacy: bool) -> bool:
@@ -403,6 +506,8 @@ async def _summary(
             summary.component_trace_union = _partial(0, zero["eligible_sessions"])
             summary.mcp_calls = _partial(0, zero["eligible_sessions"])
             summary.active_days_utc = _partial(0, zero["eligible_sessions"])
+    if await _scope_revision(db, viewer, subject_id, scope, token) != summary.revision:
+        raise HTTPException(409, "stale_cursor")
     return summary
 
 
@@ -541,6 +646,12 @@ async def person_summaries(
     # Never look up other people's existence or facts for an unprivileged
     # mixed batch; the neutral status is identical for absent and forbidden IDs.
     permitted_ids = subject_ids if privileged else [viewer.id]
+    scoped_subjects = [
+        (subject_id, scope)
+        for subject_id in permitted_ids
+        for scope in (("author", "user") if privileged else ("user",))
+    ]
+    revisions_before = await _scope_revisions(db, viewer, scoped_subjects, anchor)
     authors, users = await trace_pair_batch(
         db,
         permitted_ids,
@@ -570,10 +681,8 @@ async def person_summaries(
         items.append(
             PairedPerson(
                 subject_id=subject_id,
-                author_revision=await _scope_revision(db, viewer, subject_id, "author", anchor)
-                if privileged
-                else "restricted",
-                user_revision=await _scope_revision(db, viewer, subject_id, "user", anchor),
+                author_revision=revisions_before[subject_id, "author"] if privileged else "restricted",
+                user_revision=revisions_before[subject_id, "user"],
                 author_usage=(_partial(author["roots"], kinds=_observed_kinds(author)) if author else Reading())
                 if privileged
                 else RestrictedScope(),
@@ -582,6 +691,9 @@ async def person_summaries(
                 else Reading(),
             )
         )
+    revisions_after = await _scope_revisions(db, viewer, scoped_subjects, anchor)
+    if revisions_after != revisions_before:
+        raise HTTPException(409, "stale_cursor")
     return PairedBatch(window=window, window_anchor=anchor, items=items)
 
 
@@ -735,6 +847,8 @@ async def components(
         actor_ids=await _synthetic_subjects(db, viewer),
         after=after,
     )
+    if await _scope_revision(db, viewer, subject_id, scope, anchor) != revision:
+        raise HTTPException(409, "stale_cursor")
     if found is None:
         return ComponentPage(subject_id=subject_id, scope=scope, window=window, window_anchor=anchor, revision=revision)
     items = [_component(row) for row in found[:20]]
@@ -796,6 +910,8 @@ async def component_detail(
         kind=kind,
         limit=1,
     )
+    if await _scope_revision(db, viewer, subject_id, scope, anchor) != revision:
+        raise HTTPException(409, "stale_cursor")
     if not found or found[0].get("kind", "mcp") != kind:
         raise HTTPException(404, "Not found")
     return ComponentDetail(

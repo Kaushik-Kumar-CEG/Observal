@@ -30,10 +30,13 @@ LAYER = "v2_" + "b" * 64
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_overlap(monkeypatch):
+async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_overlap(monkeypatch, tmp_path):
     from api.routes import mobile_activity as activity
     from database import async_session
+    from services.crypto import init_key_manager
     from services.mobile_activity_query import trace_component_page, trace_pair_batch, trace_union
+
+    init_key_manager(key_dir=str(tmp_path / "keys"), key_password=None)
 
     # This transaction never commits. Its verified root witness flags are
     # SYNTHETIC acceptance fixtures, not a claim about an eligible live sender.
@@ -148,6 +151,21 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
             await db.execute(text(f"ANALYZE {table}"))
         await db.execute(text("SET LOCAL statement_timeout='15000ms'"))
         print("scale_fixture_ready", flush=True)
+        assert (
+            await db.scalar(
+                text("SELECT count(*) FROM mobile_author_actor_links WHERE author_id=:author"), {"author": AUTHOR}
+            )
+            == 2
+        )
+        # Includes indexed retention-frontier lookup and MAC across 10K
+        # publications; this is a separate synthetic cost, not product p95.
+        for scope, subject in (("author", AUTHOR), ("user", OTHER)):
+            timings = []
+            for _ in range(10):
+                tick = time.perf_counter()
+                await activity._scope_revision(db, SimpleNamespace(id=AUTHOR), subject, scope, "synthetic-window")
+                timings.append((time.perf_counter() - tick) * 1000)
+            print(f"isolated_pg_{scope}_revision_p95_ms=", round(sorted(timings)[8], 1), flush=True)
         start, end = datetime.now(UTC) - timedelta(days=7), datetime.now(UTC)
         tick = time.perf_counter()
         author = await trace_union(db, AUTHOR, "author", "default", start, end)
@@ -259,6 +277,22 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
             "max_ms=",
             round(max(durations), 1),
         )
+        # Estimate complete indexed revision fencing, not just the paired
+        # SQL: 12 people x 2 scopes x before/after + one batch. There is no
+        # HTTPS, auth or deployed-instance tail in this synthetic cost.
+        fenced = []
+        scoped = [(person, scope) for person in representative for scope in ("author", "user")]
+        for _ in range(5):
+            tick = time.perf_counter()
+            before = await activity._scope_revisions(db, SimpleNamespace(id=AUTHOR), scoped, "synthetic-window")
+            await trace_pair_batch(db, representative, AUTHOR, "default", start, end)
+            after = await activity._scope_revisions(db, SimpleNamespace(id=AUTHOR), scoped, "synthetic-window")
+            assert before == after
+            assert before[AUTHOR, "author"] == await activity._scope_revision(
+                db, SimpleNamespace(id=AUTHOR), AUTHOR, "author", "synthetic-window"
+            )
+            fenced.append((time.perf_counter() - tick) * 1000)
+        print("isolated_pg_12_subject_fenced_p95_ms=", round(sorted(fenced)[3], 1), flush=True)
         # A private original-author listing is not a visible Author reading.
         # Its rows are visible in the submitter's own User scope only, not to
         # an administrator/other viewer inspecting that same actor.
@@ -333,7 +367,9 @@ async def test_100_follow_candidates_and_ten_thousand_distinct_actor_runs_with_o
             ),
             {"id": AUTHOR},
         )
-        assert after_epoch == before + 1
+        # The legacy MCP trigger and actor-wide child invalidation can both
+        # bump this opaque epoch; the required property is invalidation.
+        assert after_epoch > before
         changed = await trace_union(db, AUTHOR, "author", "default", start, end)
         assert changed and changed["roots"] == 9999 and changed["calls"] == 11999
         await db.rollback()

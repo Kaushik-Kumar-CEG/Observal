@@ -156,7 +156,7 @@ async def qualified_zero_subset(
                 "AND run.harness=z.harness AND run.session_id=z.session_id "
                 "WHERE z.project_id=:project AND z.user_id=:subject AND z.harness='pi' "
                 "AND z.event_time>=:start AND z.event_time<:end AND pub.status='complete' "
-                "AND pub.source_retained_until>now() "
+                "AND pub.source_retained_until>clock_timestamp() "
                 "AND pub.source_revision=z.source_revision AND run.root_verified=true "
                 "AND run.run_incarnation=z.root_run_incarnation "
                 "AND EXISTS (SELECT 1 FROM mobile_layer_components map "
@@ -286,7 +286,7 @@ AND CASE WHEN e.run_incarnation=e.root_run_incarnation AND e.session_id=run.sess
     AND bool_or(ancestor.run_incarnation=e.root_run_incarnation AND ancestor.parent_session_id IS NULL)
     AND bool_and(coalesce(
       ancestor.source_status IN ('complete','partial')
-      AND ancestor_pub.status IN ('complete','partial') AND ancestor_pub.source_retained_until>now(),false))
+      AND ancestor_pub.status IN ('complete','partial') AND ancestor_pub.source_retained_until>clock_timestamp(),false))
  ) END
 """
 
@@ -306,7 +306,7 @@ JOIN {pins} map ON map.project_id=e.project_id AND map.user_id=e.user_id
  AND map.harness=e.harness AND map.layer_hash=e.layer_hash AND {pin_identity} AND map.component_id=e.component_id
 JOIN mobile_session_publications pub ON pub.project_id=e.project_id AND pub.user_id=e.user_id
  AND pub.harness=e.harness AND pub.session_id=e.session_id AND pub.status IN ('complete','partial')
- AND pub.source_retained_until>now()
+ AND pub.source_retained_until>clock_timestamp()
  {revision_join}
  {_LINEAGE_GUARD}
 JOIN {listing} l ON l.id=e.component_id

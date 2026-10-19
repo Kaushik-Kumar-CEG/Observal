@@ -4,6 +4,7 @@
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -51,6 +52,14 @@ def app(monkeypatch):
         activity, "_paired_window", lambda _viewer, period, _anchor: (activity._window(period), "anchor")
     )
     monkeypatch.setattr(activity, "_scope_revision", AsyncMock(return_value="revision"))
+
+    async def mock_revision_batch(_db, _viewer, subjects, anchor):
+        return {
+            (subject, scope): await activity._scope_revision(_db, _viewer, subject, scope, anchor)
+            for subject, scope in subjects
+        }
+
+    monkeypatch.setattr(activity, "_scope_revisions", mock_revision_batch)
     monkeypatch.setattr(activity, "trace_union", AsyncMock(return_value=None))
     monkeypatch.setattr(activity, "qualified_zero_subset", AsyncMock(return_value=None))
     monkeypatch.setattr(activity, "trace_pair_batch", AsyncMock(return_value=({}, {})))
@@ -66,13 +75,14 @@ async def test_signed_revision_and_component_keyset_fit_wire_bounds_and_bind_sco
     init_key_manager(key_dir=str(tmp_path / "keys"), key_password=None)
     viewer = SimpleNamespace(id=uuid.uuid4())
     subject = uuid.uuid4()
-    db = SimpleNamespace(scalar=AsyncMock(side_effect=[10**20] * 6))
+    deadline = datetime.now(UTC) + timedelta(days=7)
+    db = SimpleNamespace(scalar=AsyncMock(side_effect=[10**20, 10**20, deadline] * 3))
     anchor = "x" * 413
     author = await activity._scope_revision(db, viewer, subject, "author", anchor)
     same_author = await activity._scope_revision(db, viewer, subject, "author", anchor)
     user = await activity._scope_revision(db, viewer, subject, "user", anchor)
     assert author == same_author and author != user
-    other_viewer_db = SimpleNamespace(scalar=AsyncMock(side_effect=[10**20, 10**20]))
+    other_viewer_db = SimpleNamespace(scalar=AsyncMock(side_effect=[10**20, 10**20, deadline]))
     assert author != await activity._scope_revision(
         other_viewer_db, SimpleNamespace(id=uuid.uuid4()), subject, "author", anchor
     )
@@ -494,6 +504,44 @@ async def test_nested_component_wire_and_direct_id_authorization(app, monkeypatc
     assert_wire("ComponentDetail", detail.json())
     assert page.json()["items"][0] == detail.json()["component"]
     assert page.json()["items"][0]["component_traces"]["coverage"]["eligible_sessions"] is None
+
+
+@pytest.mark.asyncio
+async def test_mid_read_epoch_change_rejects_cards_pages_and_details(app, monkeypatch):
+    from api.routes import mobile_activity as activity
+
+    api, viewer, _other, db, _enabled = app
+    viewer.role = UserRole.admin
+    db.scalars.return_value = SimpleNamespace(all=lambda: [viewer.id])
+    base = f"/api/v1/mobile-activity/v1/people/{viewer.id}"
+    component_id = uuid.uuid4()
+    row = {
+        "id": component_id,
+        "name": "Synthetic Skill",
+        "kind": "skill",
+        "roots": 1,
+        "calls": 0,
+        "skill_loads": 1,
+        "hook_runs": 0,
+        "original_author_id": viewer.id,
+        "author_username": "author",
+        "author_name": "Synthetic",
+    }
+    monkeypatch.setattr(activity, "trace_component_page", AsyncMock(return_value=[row]))
+    revision = AsyncMock(side_effect=["old", "new", "old", "new", "old", "new", "old", "old", "new", "old"])
+    monkeypatch.setattr(activity, "_scope_revision", revision)
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
+        summary = await c.get(f"{base}/summary?scope=user&period=1w")
+        page = await c.get(f"{base}/user/components?period=1w&window_anchor=anchor&expected_revision=old")
+        detail = await c.get(
+            f"{base}/user/components/skill/{component_id}?period=1w&window_anchor=anchor&expected_revision=old"
+        )
+        paired = await c.post(
+            "/api/v1/mobile-activity/v1/people/summaries", json={"subject_ids": [str(viewer.id)], "period": "1w"}
+        )
+    for label, response in zip(("summary", "page", "detail", "paired"), (summary, page, detail, paired), strict=True):
+        assert response.status_code == 409 and response.json()["detail"] == "stale_cursor", (label, response.text)
+    assert revision.await_count == 10
 
 
 @pytest.mark.asyncio

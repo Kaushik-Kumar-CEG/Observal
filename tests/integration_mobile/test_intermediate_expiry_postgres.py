@@ -173,5 +173,5 @@ def test_every_typed_kind_uses_same_intermediate_guard():
     for kind in ("mcp", "skill", "hook"):
         sql = _trace_from(kind)
         assert "WITH RECURSIVE chain AS" in sql
-        assert "ancestor_pub.source_retained_until>now()" in sql
+        assert "ancestor_pub.source_retained_until>clock_timestamp()" in sql
         assert "ancestor_pub.status IN ('complete','partial')" in sql

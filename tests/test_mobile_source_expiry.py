@@ -42,7 +42,7 @@ async def test_tool_free_self_user_zero_requires_complete_unexpired_source():
         async def execute(self, statement, _params):
             sql = str(statement)
             assert "pub.status='complete'" in sql
-            assert "pub.source_retained_until>now()" in sql
+            assert "pub.source_retained_until>clock_timestamp()" in sql
             assert "pub.source_revision=z.source_revision" in sql
             return SimpleNamespace(all=lambda: [])
 
@@ -55,10 +55,10 @@ async def test_tool_free_self_user_zero_requires_complete_unexpired_source():
 def test_all_typed_kinds_require_root_or_every_intermediate_source_ttl():
     for kind in ("mcp", "skill", "hook"):
         sql = _trace_from(kind)
-        assert "pub.source_retained_until>now()" in sql
+        assert "pub.source_retained_until>clock_timestamp()" in sql
         assert "e.run_incarnation=e.root_run_incarnation AND e.session_id=run.session_id" in sql
         assert "WITH RECURSIVE chain AS" in sql
-        assert "ancestor_pub.source_retained_until>now()" in sql
+        assert "ancestor_pub.source_retained_until>clock_timestamp()" in sql
         assert "ancestor_pub.status IN ('complete','partial')" in sql
         assert "bool_or(ancestor.run_incarnation=e.root_run_incarnation" in sql
         assert "parent.header_hash=chain.parent_header_hash" in sql
