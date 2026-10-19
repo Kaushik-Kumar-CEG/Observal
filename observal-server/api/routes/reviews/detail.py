@@ -29,7 +29,7 @@ from models.user import User, UserRole
 from schemas.review import ReviewEdit
 from services.registry_fork import provenance_for
 from services.review import check_config, ci
-from services.review.decisions import _own_work, _reviewer_in_scope, _target, gate
+from services.review.decisions import _can_self_publish, _own_work, _reviewer_in_scope, _target, gate
 from services.review.diff import diff_files
 from services.review.policy import policy_for
 from services.teamspace import can_review, review_scope
@@ -78,9 +78,9 @@ async def detail(
     eligible = await _reviewer_in_scope(db, subject, version, user)
     active = review.state.value not in ("published", "closed")
     self_approval_allowed = eligible and policy.self_approval == "counted"
-    # Publication is stricter than recording a counted approval: only a private
-    # teamspace can publish its own work without a super-admin override.
-    can_self_publish = subject.is_private and policy.source == "teamspace" and self_approval_allowed
+    # An eligible owner may record a counted approval without necessarily being
+    # allowed to publish; public releases still require a separate reviewer.
+    can_self_publish = eligible and _can_self_publish(subject, policy)
     if review.subject_type == "agent":
         can_edit = get_effective_agent_permission(subject, user) in ("owner", "edit")
         can_withdraw = user.id in (version.released_by, subject.created_by)
