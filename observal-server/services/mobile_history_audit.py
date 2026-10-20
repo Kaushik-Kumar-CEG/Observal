@@ -29,6 +29,7 @@ from jobs.mobile_evidence import (
 from services.clickhouse.client import _query
 from services.mobile_pi_hook_receipts import extract_hook_receipts
 from services.mobile_pi_skill_loads import extract_skill_loads
+from services.mobile_publication_clock import committed_at
 from services.session_parsers.pi_invocations import PiInvocationExtractor
 
 _KINDS = ("mcp", "skill", "hook")
@@ -84,12 +85,16 @@ async def _registry_at_event(db, kind: str, component: uuid.UUID, version: uuid.
                 "JOIN mobile_listing_provenance p ON p.kind=:kind AND p.listing_id=l.id "
                 "JOIN users author ON author.id=p.original_author_id AND author.auth_provider!='deactivated' "
                 "WHERE l.id=:component AND v.id=:version AND l.is_private=false "
-                "AND p.captured_at<=:when AND v.status IN ('approved','archived') AND EXISTS ("
-                "SELECT 1 FROM mobile_publication_events e WHERE e.kind=:kind AND e.listing_id=l.id "
-                "AND e.version_id=v.id AND e.status='approved' AND e.recorded_at<=:when "
+                "AND p.captured_at<=:when AND v.status IN ('approved','archived') "
+                "AND NOT EXISTS (SELECT 1 FROM mobile_publication_events uncertain "
+                "WHERE uncertain.kind=:kind AND uncertain.listing_id=l.id AND uncertain.version_id=v.id "
+                f"AND {committed_at('uncertain')}='infinity'::timestamptz) "
+                "AND EXISTS (SELECT 1 FROM mobile_publication_events e WHERE e.kind=:kind AND e.listing_id=l.id "
+                f"AND e.version_id=v.id AND e.status='approved' AND {committed_at('e')}<=:when "
                 "AND NOT EXISTS (SELECT 1 FROM mobile_publication_events later "
                 "WHERE later.kind=e.kind AND later.listing_id=e.listing_id AND later.version_id=e.version_id "
-                "AND later.recorded_at<=:when AND (later.recorded_at,later.id)>(e.recorded_at,e.id))) LIMIT 1"
+                f"AND {committed_at('later')}<=:when "
+                "AND (later.recorded_at,later.id)>(e.recorded_at,e.id))) LIMIT 1"
             ),
             {"kind": kind, "component": component, "version": version, "when": when},
         )

@@ -254,7 +254,14 @@ async def test_skill_hook_only_child_revisions_change_on_ancestor_and_clock_expi
                 await db.execute(
                     text("UPDATE mobile_session_publications SET source_policy_epoch=1,source_highest_line=1")
                 )
+                # Pre-069 synthetic timestamps cannot retroactively qualify
+                # evidence after publication timestamp quarantine. This
+                # rollback-only fixture models a *new* post-upgrade source
+                # fact after the approved version's actual transaction commit.
+                for table in ("mobile_skill_evidence_events", "mobile_hook_evidence_events"):
+                    await db.execute(text(f"UPDATE {table} SET event_time=clock_timestamp()+interval '1 second'"))
                 await db.commit()
+                await asyncio.sleep(1.05)
                 assert (
                     await db.scalar(
                         text(
@@ -332,29 +339,25 @@ async def test_skill_hook_only_child_revisions_change_on_ancestor_and_clock_expi
                 # Skill and Hook. Capability cannot infer kinds from 1W.
                 period_savepoint = await db.begin_nested()
                 try:
-                    await db.execute(
-                        text(
-                            "UPDATE mobile_publication_events SET recorded_at=now()-interval '85 days' "
-                            "WHERE version_id IN (:skill,:hook)"
-                        ),
-                        {"skill": skill_version.id, "hook": hook_version.id},
-                    )
-                    await db.execute(
-                        text(
-                            "UPDATE mobile_run_instances SET started_at=now()-interval '60 days' WHERE user_id=:actor"
-                        ),
-                        {"actor": actor.id},
-                    )
+                    # Advance only this synthetic query's logical clock;
+                    # backdating approved rows/evidence before their actual
+                    # PostgreSQL approval commit would be a false positive.
+                    future = datetime.now(UTC) + timedelta(days=60)
                     for table, days in (("mobile_skill_evidence_events", 20), ("mobile_hook_evidence_events", 50)):
                         await db.execute(
-                            text(
-                                f"UPDATE {table} SET event_time=now()-make_interval(days=>:days) WHERE user_id=:actor"
-                            ),
-                            {"actor": actor.id, "days": days},
+                            text(f"UPDATE {table} SET event_time=:when WHERE user_id=:actor"),
+                            {"actor": actor.id, "when": future - timedelta(days=days)},
                         )
                     allowed = {actor.id, author.id}
+
+                    def simulated_window(period, *, platform=False):
+                        end = future.replace(hour=0, minute=0, second=0, microsecond=0) if platform else future
+                        return route.Window(
+                            start=end - timedelta(days=route._DAYS[period]), end=end, as_of=future, period=period
+                        )
+
                     for period, expected_kinds in (("1w", None), ("1m", (1, 0)), ("3m", (1, 1))):
-                        now_window = route._window(period)
+                        now_window = simulated_window(period)
                         observed = await trace_union(
                             db, author.id, "author", "default", now_window.start, now_window.end, actor_ids=allowed
                         )
@@ -362,6 +365,7 @@ async def test_skill_hook_only_child_revisions_change_on_ancestor_and_clock_expi
                             None if observed is None else (observed["skill_loads"], observed["hook_runs"])
                         ) == expected_kinds
                     with monkeypatch.context() as period_patch:
+                        period_patch.setattr(route, "_window", simulated_window)
                         period_patch.setattr(route, "active_mobile_cohort", AsyncMock(return_value="synthetic-author"))
                         period_patch.setattr(route, "_synthetic_subjects", AsyncMock(return_value=allowed))
                         capability = await route.capabilities(db, author_viewer)

@@ -94,6 +94,13 @@ def extract_hook_receipts(rows: list[dict]) -> tuple[list[HookReceipt], bool]:
             or made[0][0] >= offset
             or made[0][1] != generation
             or (event == "tool_result" and (len(linked) != 1 or linked[0][0] <= offset))
+            # A PreToolUse receipt cannot arrive after the tool has already
+            # returned; otherwise a late synthetic receipt claims a hook ran
+            # before a call that is already complete.
+            or (
+                event == "tool_call"
+                and any(result_offset <= offset for result_offset, _, _ in (*linked, *results.get(root_call, [])))
+            )
             or any(error is None for _, error, _ in linked)
             or (outcome == "blocked" and any(error is False for _, error, _ in linked))
             or any(result_generation != generation for _, _, result_generation in linked)

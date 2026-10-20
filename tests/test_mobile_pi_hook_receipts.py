@@ -102,6 +102,26 @@ def test_pasted_or_unlinked_or_contradictory_receipt_never_counts():
     assert not malformed and len(result_receipt) == 1 and result_receipt[0].event == "tool_result"
 
 
+def test_pretooluse_receipt_after_tool_result_never_claims_pretool_execution():
+    result = _row(
+        2,
+        {
+            "type": "message",
+            "timestamp": STAMP,
+            "message": {"role": "toolResult", "toolCallId": "call1", "isError": False},
+        },
+    )
+    facts, malformed = extract_hook_receipts([_call(), result, _receipt(offset=3)])
+    assert not facts and malformed
+    valid, malformed = extract_hook_receipts([_call(), _receipt(), {**result, "line_offset": 3}])
+    assert len(valid) == 1 and not malformed
+    nested = _receipt(offset=3)
+    nested_record = json.loads(nested["raw_line"])
+    nested_record["data"]["tool_call_id"] = "call1/1"
+    facts, malformed = extract_hook_receipts([_call(), result, _row(3, nested_record)])
+    assert not facts and malformed  # nested call cannot bypass completed parent result
+
+
 def test_posttooluse_receipt_must_precede_its_unique_well_formed_result():
     valid_result = _row(
         3,

@@ -165,7 +165,12 @@ async def test_every_kind_requires_original_author_and_latest_recorded_event_tim
             assert "mobile_listing_provenance" in text_sql and "p.original_author_id" in text_sql
             assert "p.captured_at<=:when" in text_sql
             assert "mobile_publication_events e" in text_sql and "later.recorded_at" in text_sql
-            assert "e.status='approved'" in text_sql and "e.recorded_at<=:when" in text_sql
+            assert "e.status='approved'" in text_sql
+            assert "pg_xact_commit_timestamp(e.xmin)" in text_sql
+            assert "pg_xact_commit_timestamp(later.xmin)" in text_sql
+            assert "pg_xact_commit_timestamp(uncertain.xmin)" in text_sql
+            assert "AND NOT EXISTS (SELECT 1 FROM mobile_publication_events uncertain" in text_sql
+            assert "track_commit_timestamp" in text_sql and "'infinity'::timestamptz" in text_sql
             assert "l.is_private=false" in text_sql and params["version"] == VERSION
             return 1
 

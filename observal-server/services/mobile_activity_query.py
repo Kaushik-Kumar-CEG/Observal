@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.clickhouse.client import _query
+from services.mobile_publication_clock import committed_at
 
 MAX_SESSIONS = 20
 MAX_SOURCE_LINES = 40000
@@ -26,7 +27,7 @@ Scope = Literal["user", "author"]
 
 # This predicate is deliberately shared by candidate selection and the final
 # aggregate. No hidden/private listing can affect a count or denominator.
-_VISIBLE = """
+_VISIBLE = f"""
 FROM mobile_evidence_events e
 JOIN mobile_layer_components map ON map.project_id=e.project_id
  AND map.user_id=e.user_id AND map.harness=e.harness AND map.layer_hash=e.layer_hash AND map.alias=e.alias
@@ -41,8 +42,12 @@ JOIN mobile_read_controls policy ON policy.project_id=pub.project_id AND policy.
  AND policy.source_policy_epoch=pub.source_policy_epoch
  AND (hw.max_line IS NULL OR hw.max_line<=pub.source_highest_line)
 WHERE e.project_id=:project AND e.harness='pi' AND e.event_time>=:start AND e.event_time<:end
+ AND NOT EXISTS (SELECT 1 FROM mobile_publication_events uncertain
+      WHERE uncertain.kind='mcp' AND uncertain.listing_id=l.id AND uncertain.version_id=v.id
+      AND {committed_at("uncertain")}='infinity'::timestamptz)
  AND (SELECT pe.status FROM mobile_publication_events pe
-      WHERE pe.kind='mcp' AND pe.listing_id=l.id AND pe.version_id=v.id AND pe.recorded_at<=e.event_time
+      WHERE pe.kind='mcp' AND pe.listing_id=l.id AND pe.version_id=v.id
+      AND {committed_at("pe")}<=e.event_time
       ORDER BY pe.recorded_at DESC,pe.id DESC LIMIT 1)='approved'
 """
 
@@ -177,8 +182,11 @@ async def qualified_zero_subset(
                 "AND v.status IN ('approved','archived') "
                 "WHERE map.project_id=z.project_id AND map.user_id=z.user_id "
                 "AND map.harness=z.harness AND map.layer_hash=z.layer_hash "
+                "AND NOT EXISTS (SELECT 1 FROM mobile_publication_events uncertain "
+                "WHERE uncertain.kind='mcp' AND uncertain.listing_id=l.id AND uncertain.version_id=v.id "
+                f"AND {committed_at('uncertain')}='infinity'::timestamptz) "
                 "AND (SELECT pe.status FROM mobile_publication_events pe WHERE pe.kind='mcp' "
-                "AND pe.listing_id=l.id AND pe.version_id=v.id AND pe.recorded_at<=z.event_time "
+                f"AND pe.listing_id=l.id AND pe.version_id=v.id AND {committed_at('pe')}<=z.event_time "
                 "ORDER BY pe.recorded_at DESC,pe.id DESC LIMIT 1)='approved') "
                 "ORDER BY z.user_id,z.session_id,pub.source_revision,pub.first_source_offset LIMIT 21"
             ),
@@ -339,10 +347,14 @@ JOIN users origin ON origin.id=p.original_author_id AND origin.auth_provider!='d
 JOIN {version} v ON v.id=map.version_id AND v.listing_id=l.id
 JOIN users actor ON actor.id=e.user_id AND actor.auth_provider!='deactivated'
 LEFT JOIN (
-  SELECT pe.listing_id,pe.version_id,pe.status,pe.recorded_at,
-   lead(pe.recorded_at) OVER (PARTITION BY pe.listing_id,pe.version_id
+  SELECT pe.listing_id,pe.version_id,pe.status,{committed_at("pe")} AS recorded_at,
+   lead({committed_at("pe")}) OVER (PARTITION BY pe.listing_id,pe.version_id
                              ORDER BY pe.recorded_at,pe.id) AS next_recorded_at
   FROM mobile_publication_events pe WHERE pe.kind='{kind}'
+   AND NOT EXISTS (SELECT 1 FROM mobile_publication_events uncertain
+    WHERE uncertain.kind=pe.kind AND uncertain.listing_id=pe.listing_id
+     AND uncertain.version_id=pe.version_id
+     AND {committed_at("uncertain")}='infinity'::timestamptz)
 ) approval ON approval.listing_id=l.id AND approval.version_id=v.id
  AND approval.recorded_at<=e.event_time
  AND (approval.next_recorded_at IS NULL OR approval.next_recorded_at>e.event_time)

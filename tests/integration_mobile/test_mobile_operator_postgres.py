@@ -216,7 +216,7 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
                     timeout=60,
                 )
                 assert downgrade.returncode != 0, "Audited closed cohort cannot discard operator receipts"
-                assert b"Cannot restore unsafe pre-068 mobile erasure triggers" in downgrade.stderr
+                assert b"Cannot restore untrusted historic mobile publication timestamps" in downgrade.stderr
                 # The 067 policy transition is independent of revoke: neither
                 # deadline expiry nor a later TTL increase can resurrect a
                 # publication from an older unverified source epoch.
@@ -282,7 +282,7 @@ async def test_operator_lifecycle_is_atomically_audited_and_deny_first(monkeypat
                 )
                 assert (
                     refusal.returncode != 0
-                    and b"Cannot restore unsafe pre-068 mobile erasure triggers" in refusal.stderr
+                    and b"Cannot restore untrusted historic mobile publication timestamps" in refusal.stderr
                 )
         finally:
             await engine.dispose()
