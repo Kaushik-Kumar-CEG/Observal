@@ -65,7 +65,14 @@ def _many(values):
 
 def _db(*results):
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=list(results)) if results else AsyncMock()
+    queued = iter(results)
+
+    async def execute(query, *_args, **_kwargs):
+        if "pg_advisory_xact_lock(" in str(query):
+            return MagicMock()
+        return next(queued)
+
+    db.execute = AsyncMock(side_effect=execute) if results else AsyncMock()
     db.flush = AsyncMock()
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
@@ -148,7 +155,9 @@ def _bind_db(app: FastAPI, db, *, authenticated: bool = True):
 
 
 @pytest.fixture
-def app():
+def app(monkeypatch):
+    monkeypatch.setattr(scim, "get_redis", lambda: object())
+    monkeypatch.setattr(scim, "revoke_user_tokens", AsyncMock())
     route_app = FastAPI()
     route_app.include_router(scim.router)
     return route_app
@@ -1148,3 +1157,45 @@ class TestDiscoveryDocuments:
                 ],
             },
         )
+
+
+@pytest.mark.parametrize("method", ["put", "patch"])
+@pytest.mark.asyncio
+async def test_scim_account_state_transition_requires_terminal_redis_revocation(app, client, monkeypatch, method):
+    from redis.exceptions import ConnectionError
+
+    for initial, target in (("scim", False), ("deactivated", True)):
+        user = _user(auth_provider=initial)
+        db = _db(_one(user))
+        _bind_db(app, db)
+        revoke = AsyncMock()
+        monkeypatch.setattr(scim, "revoke_user_tokens", revoke)
+        if method == "put":
+            response = await client.put(f"/api/v1/scim/Users/{USER_ID}", json={"active": target})
+        else:
+            response = await client.patch(
+                f"/api/v1/scim/Users/{USER_ID}",
+                json={
+                    "schemas": [SCIM_PATCH_SCHEMA],
+                    "Operations": [{"op": "replace", "path": "active", "value": target}],
+                },
+            )
+        assert response.status_code == 200
+        revoke.assert_awaited_once()
+        assert revoke.await_args.args[1] == USER_ID
+        db.commit.assert_awaited_once_with()
+
+    user = _user(auth_provider="scim")
+    db = _db(_one(user))
+    _bind_db(app, db)
+    monkeypatch.setattr(scim, "revoke_user_tokens", AsyncMock(side_effect=ConnectionError("scratch Redis offline")))
+    if method == "put":
+        response = await client.put(f"/api/v1/scim/Users/{USER_ID}", json={"active": False})
+    else:
+        response = await client.patch(
+            f"/api/v1/scim/Users/{USER_ID}",
+            json={"schemas": [SCIM_PATCH_SCHEMA], "Operations": [{"op": "replace", "path": "active", "value": False}]},
+        )
+    assert response.status_code == 503
+    db.rollback.assert_awaited_once_with()
+    db.commit.assert_not_awaited()

@@ -33,6 +33,29 @@ from tests.test_device_auth import FakeRedis
 
 
 class MobileTestRedis(FakeRedis):
+    def __init__(self):
+        super().__init__()
+        self.rotation_lock = asyncio.Lock()
+
+    async def eval(self, script, key_count, *args):
+        if "mobile-refresh-rotation-v1" not in script:
+            return await super().eval(script, key_count, *args)
+        assert key_count == 4
+        previous, successor, user_key, device_key, account, issued, ttl = args
+        async with self.rotation_lock:
+            if self._store.get(previous) != account:
+                return 0
+            marker = self._store.get(user_key)
+            if marker and (int(marker) < 1_000_000_000 or int(issued) < int(marker)):
+                return -1
+            if self._store.get(device_key) or self._store.get(successor):
+                return -1
+            self._store[successor] = account
+            self._ttls[successor] = int(ttl)
+            self._store.pop(previous)
+            self._ttls.pop(previous, None)
+            return 1
+
     async def getdel(self, key):
         value = self._store.pop(key, None)
         self._ttls.pop(key, None)
@@ -297,6 +320,145 @@ async def test_explicit_isolated_loopback_https_origin_never_uses_spoofed_forwar
             request, DeviceAuthRequest(client_id=MOBILE_CLIENT_ID), identity.db
         )
     assert exc.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_disabled_mobile_issuance_never_consumes_saved_refresh(identity, monkeypatch):
+    from services import mobile_read_control
+
+    _access, refresh, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="restart-phone")
+    jti = decode_refresh_token(refresh)["jti"]
+    assert await identity.redis.get(f"refresh_jti:{jti}") == str(identity.user.id)
+    monkeypatch.setattr(mobile_read_control, "mobile_issue_allowed", AsyncMock(return_value=False))
+    with pytest.raises(HTTPException) as denied:
+        await inspect.unwrap(auth.refresh_token)(
+            SimpleNamespace(headers={}), RefreshRequest(refresh_token=refresh), identity.db
+        )
+    assert denied.value.status_code == 503
+    assert await identity.redis.get(f"refresh_jti:{jti}") == str(identity.user.id)
+
+
+@pytest.mark.asyncio
+async def test_initial_mobile_family_and_first_access_are_capped_despite_long_global_settings(identity, monkeypatch):
+    original = auth.ds.get_sync_int
+
+    def long_setting(key, default=30):
+        if key == "jwt.refresh_token_expire_days":
+            return 90
+        if key == "jwt.access_token_expire_minutes":
+            return 60 * 24 * 60
+        return original(key, default)
+
+    monkeypatch.setattr(auth.ds, "get_sync_int", long_setting)
+    access, refresh, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="long-config")
+    deadline = decode_refresh_token(refresh)["exp"]
+    assert deadline - int(datetime.now(UTC).timestamp()) <= 30 * 86400
+    assert decode_access_token(access, allow_mobile=True)["exp"] <= deadline
+    assert identity.redis._ttls[f"refresh_jti:{decode_refresh_token(refresh)['jti']}"] <= 30 * 86400
+    # Desktop remains on its independently configured lifetime.
+    _, desktop_refresh, _ = await auth._issue_tokens(identity.user)
+    assert decode_refresh_token(desktop_refresh)["exp"] - int(datetime.now(UTC).timestamp()) >= 89 * 86400
+
+
+@pytest.mark.asyncio
+async def test_mobile_rotation_keeps_original_family_deadline_and_bounds_access(identity, monkeypatch):
+    _access, first, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="fixed-family")
+    original = decode_refresh_token(first)["exp"]
+    # Lowering or raising a mutable setting after first approval cannot
+    # extend the signed family's expiry or successor Redis TTL.
+    monkeypatch.setattr(
+        auth.ds, "get_sync_int", lambda key, default=30: 90 if key == "jwt.refresh_token_expire_days" else default
+    )
+    for _ in range(3):
+        pair = await inspect.unwrap(auth.refresh_token)(
+            SimpleNamespace(headers={}), RefreshRequest(refresh_token=first), identity.db
+        )
+        rotated = decode_refresh_token(pair.refresh_token)
+        assert rotated["exp"] == original
+        assert decode_access_token(pair.access_token, allow_mobile=True)["exp"] <= original
+        assert (
+            identity.redis._ttls[f"refresh_jti:{rotated['jti']}"] <= original - int(datetime.now(UTC).timestamp()) + 1
+        )
+        first = pair.refresh_token
+
+
+@pytest.mark.asyncio
+async def test_deactivated_actor_or_revoked_device_cannot_consume_unexpired_mobile_refresh(identity):
+    _access, refresh, _ = await auth._issue_tokens(
+        identity.user, client_id=MOBILE_CLIENT_ID, device_id="revoked-device"
+    )
+    jti = decode_refresh_token(refresh)["jti"]
+    identity.user.auth_provider = "deactivated"
+    with pytest.raises(HTTPException) as denied:
+        await inspect.unwrap(auth.refresh_token)(
+            SimpleNamespace(headers={}), RefreshRequest(refresh_token=refresh), identity.db
+        )
+    assert denied.value.status_code == 401
+    assert await identity.redis.get(f"refresh_jti:{jti}") == str(identity.user.id)
+    identity.user.auth_provider = "local"
+    await identity.redis.setex("revoked_mobile_device:revoked-device", 30, "1")
+    with pytest.raises(HTTPException) as device:
+        await inspect.unwrap(auth.refresh_token)(
+            SimpleNamespace(headers={}), RefreshRequest(refresh_token=refresh), identity.db
+        )
+    assert device.value.status_code == 401
+    assert await identity.redis.get(f"refresh_jti:{jti}") == str(identity.user.id)
+
+
+@pytest.mark.asyncio
+async def test_lost_reply_after_atomic_swap_is_not_replayed_or_left_with_second_successor(identity, monkeypatch):
+    from redis.exceptions import ConnectionError
+
+    _access, refresh, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="lost-reply")
+    jti = decode_refresh_token(refresh)["jti"]
+    original_get = identity.redis.get
+    fail_once = True
+
+    async def lose_postcommit_reply(key):
+        nonlocal fail_once
+        if key == f"revoked_user:{identity.user.id}" and fail_once:
+            fail_once = False
+            raise ConnectionError("isolated post-commit Redis read failure")
+        return await original_get(key)
+
+    monkeypatch.setattr(identity.redis, "get", lose_postcommit_reply)
+    with pytest.raises(HTTPException) as ambiguous:
+        await inspect.unwrap(auth.refresh_token)(
+            SimpleNamespace(headers={}), RefreshRequest(refresh_token=refresh), identity.db
+        )
+    assert ambiguous.value.status_code == 503
+    assert await identity.redis.get(f"refresh_jti:{jti}") is None
+    successors = [key for key in identity.redis._store if key.startswith("refresh_jti:")]
+    assert len(successors) == 1  # orphan response is bounded by original expiry
+    with pytest.raises(HTTPException) as replay:
+        await inspect.unwrap(auth.refresh_token)(
+            SimpleNamespace(headers={}), RefreshRequest(refresh_token=refresh), identity.db
+        )
+    assert replay.value.status_code == 401
+    assert len([key for key in identity.redis._store if key.startswith("refresh_jti:")]) == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_mobile_logout_marker_outlives_original_family_when_setting_shortens(identity, monkeypatch):
+    access, first, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="old-family")
+    original = decode_refresh_token(first)["exp"]
+    newer = await inspect.unwrap(auth.refresh_token)(
+        SimpleNamespace(headers={}), RefreshRequest(refresh_token=first), identity.db
+    )
+    # Simulate shortening configured lifetime while the old family's signed
+    # 30-day refresh and a rotated successor both remain valid.
+    monkeypatch.setattr(
+        auth.ds, "get_sync_int", lambda key, default=30: 1 if key == "jwt.refresh_token_expire_days" else default
+    )
+    request = SimpleNamespace(headers={"authorization": f"Bearer {access}"})
+    reply = await inspect.unwrap(auth.mobile_logout)(request, RevokeRequest(refresh_token=first), identity.user)
+    assert reply == {"detail": "Mobile device signed out"}
+    assert identity.redis._ttls["revoked_mobile_device:old-family"] >= original - int(datetime.now(UTC).timestamp()) - 1
+    with pytest.raises(HTTPException) as revoked:
+        await inspect.unwrap(auth.refresh_token)(
+            SimpleNamespace(headers={}), RefreshRequest(refresh_token=newer.refresh_token), identity.db
+        )
+    assert revoked.value.status_code == 401
 
 
 @pytest.mark.asyncio

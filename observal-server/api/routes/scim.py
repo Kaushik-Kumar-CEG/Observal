@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -24,6 +25,7 @@ from api.deps import get_db
 from models.scim_token import ScimToken
 from models.user import User, UserRole
 from services.events import UserCreated, UserDeleted, bus
+from services.redis import get_redis
 from services.scim_service import (
     SCIM_PATCH_SCHEMA,
     SCIM_USER_SCHEMA,
@@ -41,6 +43,7 @@ from services.security_events import (
     Severity,
     emit_security_event,
 )
+from services.token_revocation import revoke_user_tokens
 from services.username_generator import generate_unique_username
 
 logger = logging.getLogger("observal.scim")
@@ -49,6 +52,23 @@ logger = logging.getLogger("observal.scim")
 router = APIRouter(prefix="/api/v1/scim", tags=["scim"])
 
 SCIM_CONTENT_TYPE = "application/scim+json"
+
+
+async def _fence_account_transition(db: AsyncSession, user_id: _uuid.UUID) -> None:
+    """Terminally retire old grants on deactivation AND reactivation.
+
+    Serialize against the mobile refresh shared issuance lock before touching
+    Redis. The second fence prevents a token issued concurrently before the
+    deactivation commit from reviving if SCIM later reactivates the account.
+    No user-status update may commit if revocation storage is unavailable.
+    """
+    with db.no_autoflush:
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+    try:
+        await revoke_user_tokens(get_redis(), user_id)
+    except RedisError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="Account revocation temporarily unavailable") from exc
 
 
 async def _get_scoped_user(user_id: str, db: AsyncSession) -> User | None:
@@ -258,6 +278,7 @@ async def update_user(
     body = await request.json()
     parsed = parse_scim_user(body)
 
+    prior_provider = user.auth_provider
     if parsed["email"] and parsed["email"] != user.email:
         user.email = parsed["email"]
     if parsed["name"]:
@@ -269,6 +290,8 @@ async def update_user(
     elif parsed["active"] and user.auth_provider == "deactivated":
         user.auth_provider = "scim"
 
+    if (prior_provider == "deactivated") != (user.auth_provider == "deactivated"):
+        await _fence_account_transition(db, user.id)
     await db.commit()
 
     base_url = str(request.base_url).rstrip("/") + "/api/v1/scim"
@@ -391,6 +414,7 @@ async def patch_user(
             media_type=SCIM_CONTENT_TYPE,
         )
 
+    prior_provider = user.auth_provider
     for operation in operations:
         op = operation.get("op", "")
         path = operation.get("path")
@@ -403,6 +427,8 @@ async def patch_user(
                 media_type=SCIM_CONTENT_TYPE,
             )
 
+    if (prior_provider == "deactivated") != (user.auth_provider == "deactivated"):
+        await _fence_account_transition(db, user.id)
     await db.commit()
 
     base_url = str(request.base_url).rstrip("/") + "/api/v1/scim"

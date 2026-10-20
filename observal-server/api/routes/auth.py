@@ -13,7 +13,7 @@ import base64
 import json
 import re
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -257,20 +257,28 @@ async def _issue_tokens(
     """Issue JWT access + refresh tokens for a user, storing refresh JTI in Redis.
 
     Returns (access_token, refresh_token, expires_in).
-    Fails open: tokens are still returned if Redis is temporarily unreachable.
+    Fails closed if the refresh JTI cannot be stored in Redis.
     """
     optic.trace("user_id={}, groups={}", user.id, groups)
     try:
         redis = get_redis()
         # Before minting: an upgraded legacy marker means "now", and the new pair must postdate it.
         await upgrade_legacy_revocation(redis, user.id)
+        refresh_days = ds.get_sync_int("jwt.refresh_token_expire_days", 30)
+        if client_id == MOBILE_CLIENT_ID:
+            # A new mobile device family is bounded even if a deployment
+            # raises the browser/CLI refresh setting beyond thirty days.
+            refresh_days = min(refresh_days, 30)
+            if refresh_days < 1:
+                raise HTTPException(status_code=503, detail="Mobile refresh lifetime is not configured")
+        family_expiry = datetime.now(UTC) + timedelta(days=refresh_days) if client_id == MOBILE_CLIENT_ID else None
         access_token, expires_in = create_access_token(
-            user.id, user.role, groups=groups, client_id=client_id, device_id=device_id
+            user.id, user.role, groups=groups, client_id=client_id, device_id=device_id, expires_at=family_expiry
         )
         refresh_token, jti = create_refresh_token(
-            user.id, user.role, groups=groups, client_id=client_id, device_id=device_id
+            user.id, user.role, groups=groups, client_id=client_id, device_id=device_id, expires_at=family_expiry
         )
-        refresh_ttl = ds.get_sync_int("jwt.refresh_token_expire_days", 30) * 86400
+        refresh_ttl = refresh_days * 86400
         await redis.setex(f"refresh_jti:{jti}", refresh_ttl, str(user.id))
     except RedisError as e:
         optic.warning("Redis unavailable when storing refresh JTI: {}", e)
@@ -1741,6 +1749,70 @@ async def refresh_token(request: Request, req: RefreshRequest, db: AsyncSession 
     if not jti or not user_id:
         raise HTTPException(status_code=401, detail="Invalid refresh token claims")
 
+    client_id = payload.get("client_id")
+    if client_id == MOBILE_CLIENT_ID:
+        # The project's shared transaction gate precedes any Redis mutation.
+        # A disabled/expiring cohort must not burn a saved grant or mint a
+        # pair during audited operator revoke. The user must still be active.
+        from services.mobile_read_control import mobile_issue_allowed
+        from services.mobile_refresh import rotate_mobile_refresh
+
+        if not await mobile_issue_allowed(db):
+            raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
+        user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if user is None or user.auth_provider == "deactivated":
+            raise HTTPException(status_code=401, detail="Mobile session revoked")
+        device_id = payload["device_id"]  # Signature, client, scope and audience were validated above.
+        issued_us = token_issued_us(payload)
+        expiry = datetime.fromtimestamp(payload["exp"], tz=UTC)
+        # Old mobile grants issued with a longer deployment-wide setting may
+        # not be silently grandfathered into this new bounded family policy.
+        if expiry - datetime.fromtimestamp(payload["iat"], tz=UTC) > timedelta(days=30, seconds=1):
+            raise HTTPException(status_code=401, detail="Mobile session requires fresh approval")
+        ttl = int((expiry - datetime.now(UTC)).total_seconds())
+        if issued_us is None or ttl < 1:
+            raise HTTPException(status_code=401, detail="Refresh token has expired")
+        groups = payload.get("groups", [])
+        access_token, expires_in = create_access_token(
+            user.id, user.role, groups=groups, client_id=MOBILE_CLIENT_ID, device_id=device_id, expires_at=expiry
+        )
+        successor, successor_jti = create_refresh_token(
+            user.id, user.role, groups=groups, client_id=MOBILE_CLIENT_ID, device_id=device_id, expires_at=expiry
+        )
+        try:
+            redis = get_redis()
+            outcome = await rotate_mobile_refresh(
+                redis,
+                user_id=str(user.id),
+                device_id=device_id,
+                previous_jti=jti,
+                successor_jti=successor_jti,
+                issued_us=issued_us,
+                ttl=ttl,
+            )
+            if outcome != 1:
+                raise HTTPException(status_code=401, detail="Refresh token has been revoked or expired")
+            # If device/account revocation lands after the atomic swap, never
+            # hand back a pair known to be dead; all protected reads separately
+            # check these markers even if revocation lands after this response.
+            marker = await get_revocation_marker(redis, user_id)
+            revoked = is_revoked(marker, issued_us) or bool(await redis.get(f"revoked_mobile_device:{device_id}"))
+            if revoked:
+                await redis.delete(f"refresh_jti:{successor_jti}")
+                raise HTTPException(status_code=401, detail="Mobile session revoked")
+        except RedisError as exc:
+            optic.warning("Redis unavailable during mobile refresh: {}", exc)
+            raise HTTPException(status_code=503, detail="Auth service temporarily unavailable") from exc
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=successor,
+            expires_in=expires_in,
+            client_id=MOBILE_CLIENT_ID,
+            audience=MOBILE_AUDIENCE,
+            scope=MOBILE_SCOPE,
+        )
+
+    # Legacy browser/CLI refresh keeps its existing independent behavior.
     # Consume the refresh grant atomically: GET followed by DELETE allows two
     # concurrent rotations to both mint valid successor tokens.
     try:
@@ -1752,13 +1824,7 @@ async def refresh_token(request: Request, req: RefreshRequest, db: AsyncSession 
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
     stored_user_id = stored.decode() if isinstance(stored, bytes) else stored
-    client_id = payload.get("client_id")
-    device_id = payload.get("device_id") if client_id == MOBILE_CLIENT_ID else None
-    if client_id == MOBILE_CLIENT_ID:
-        from services.mobile_read_control import mobile_issue_allowed
-
-        if not await mobile_issue_allowed(db):
-            raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
+    device_id = None
     if stored_user_id != user_id or is_revoked(marker, token_issued_us(payload)):
         raise HTTPException(status_code=401, detail="Refresh token has been revoked or expired")
 
@@ -1775,6 +1841,8 @@ async def refresh_token(request: Request, req: RefreshRequest, db: AsyncSession 
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=401, detail="User no longer exists")
+    if user.auth_provider == "deactivated":
+        raise HTTPException(status_code=401, detail="Account deactivated")
 
     # Issue new token pair
     groups = payload.get("groups", [])
@@ -1872,7 +1940,16 @@ async def mobile_logout(request: Request, req: RevokeRequest, current_user: User
     try:
         redis = get_redis()
         # The marker also invalidates any concurrently rotated successor.
-        ttl = ds.get_sync_int("jwt.refresh_token_expire_days", 30) * 86400
+        now = int(datetime.now(UTC).timestamp())
+        # The family keeps its original expiry even if the configured refresh
+        # lifetime is shortened later. Cover both that family and every
+        # already-issued access JWT until their actual signed deadlines.
+        ttl = max(
+            1,
+            ds.get_sync_int("jwt.refresh_token_expire_days", 30) * 86400,
+            int(refresh["exp"]) - now,
+            int(access["exp"]) - now,
+        )
         await redis.setex(f"revoked_mobile_device:{access['device_id']}", ttl, "1")
         await redis.delete(f"refresh_jti:{refresh['jti']}")
         await redis.setex(

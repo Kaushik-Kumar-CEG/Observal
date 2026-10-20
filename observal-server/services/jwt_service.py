@@ -32,6 +32,7 @@ def create_access_token(
     groups: list[str] | None = None,
     client_id: str | None = None,
     device_id: str | None = None,
+    expires_at: datetime | None = None,
 ) -> tuple[str, int]:
     """Create a short-lived asymmetrically signed access token.
 
@@ -42,6 +43,10 @@ def create_access_token(
 
     now = datetime.now(UTC)
     expires_delta = timedelta(minutes=expires_in_minutes or ds.get_sync_int("jwt.access_token_expire_minutes", 60))
+    if expires_at is not None:
+        expires_delta = min(expires_delta, expires_at - now)
+        if expires_delta.total_seconds() < 1:
+            raise ValueError("Mobile refresh family has expired")
     expires_in = int(expires_delta.total_seconds())
     payload = {
         "sub": str(user_id),
@@ -70,6 +75,7 @@ def create_refresh_token(
     groups: list[str] | None = None,
     client_id: str | None = None,
     device_id: str | None = None,
+    expires_at: datetime | None = None,
 ) -> tuple[str, str]:
     """Create a long-lived asymmetrically signed refresh token.
 
@@ -80,6 +86,8 @@ def create_refresh_token(
 
     now = datetime.now(UTC)
     jti = str(uuid.uuid4())
+    if client_id == MOBILE_CLIENT_ID and expires_at is None:
+        expires_at = now + timedelta(days=min(ds.get_sync_int("jwt.refresh_token_expire_days", 30), 30))
     payload = {
         "sub": str(user_id),
         "role": role.value,
@@ -88,7 +96,9 @@ def create_refresh_token(
         "jti": jti,
         "iat": now,
         "iat_us": int(now.timestamp()) * 1_000_000 + now.microsecond,
-        "exp": now + timedelta(days=ds.get_sync_int("jwt.refresh_token_expire_days", 30)),
+        "exp": expires_at
+        if expires_at is not None
+        else now + timedelta(days=ds.get_sync_int("jwt.refresh_token_expire_days", 30)),
     }
     if client_id is not None:
         if client_id != MOBILE_CLIENT_ID:
