@@ -7,7 +7,7 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 id="mobiletwo$RANDOM$RANDOM"; net="${id}net"; keys="${id}keys"; image="local/mobile-two-api:$id"
 cleanup() {
-  docker rm -fv "${id}apia" "${id}apib" "${id}pg" "${id}ch" "${id}redis" >/dev/null 2>&1 || true
+  docker rm -fv "${id}apia" "${id}apib" "${id}worker" "${id}pg" "${id}ch" "${id}redis" >/dev/null 2>&1 || true
   docker volume rm "$keys" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
 }
@@ -35,6 +35,8 @@ for suffix in a b; do
   docker run -d --name "${id}api${suffix}" "${common[@]}" "$image" /app/.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1 >/dev/null
   [[ $(docker inspect "${id}api${suffix}" --format '{{.Image}}') == "$digest" ]]
 done
+docker run -d --name "${id}worker" "${common[@]}" "$image" /app/.venv/bin/python -c 'import asyncio; asyncio.set_event_loop(asyncio.new_event_loop()); from arq import run_worker; from worker import WorkerSettings; run_worker(WorkerSettings)' >/dev/null
+[[ $(docker inspect "${id}worker" --format '{{.Image}}') == "$digest" ]]
 echo "PG_HEAD=$(docker exec "${id}pg" psql -X -At -U observal -d observal -c 'SELECT version_num FROM alembic_version')"
 docker run --rm -i -e "MOBILE_API_A=${id}apia" -e "MOBILE_API_B=${id}apib" "${common[@]}" "$image" /app/.venv/bin/python - <<'PY'
 import asyncio, os, time, uuid
@@ -140,3 +142,5 @@ async def main():
         finally: await redis.aclose()
 asyncio.run(main())
 PY
+[[ $(docker inspect "${id}worker" --format '{{.State.Running}}') == true ]]
+echo "SAME_IMAGE_ARQ_WORKER_RUNNING=true"
