@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Focused coverage for deployment-wide admin user management routes."""
@@ -73,6 +74,12 @@ def _db(*results):
     database.delete = AsyncMock()
     database.add = MagicMock()
     return database
+
+
+def _delete_db(target):
+    # The supported erasure route reads the target, takes the project source
+    # gate, then locks the scanner cursor before deleting either user or facts.
+    return _db(_one(target), _one(None), _one(None))
 
 
 def _actor(role: UserRole = UserRole.admin, *, user_id: uuid.UUID = ADMIN_ID):
@@ -980,7 +987,7 @@ async def test_reset_password_event_failure_is_after_password_persistence(monkey
 async def test_delete_user_success_orders_event_before_delete_and_commit(monkeypatch, target_role, admin_count):
     order = []
     target = _target(role=target_role)
-    database = _db(_one(target))
+    database = _delete_db(target)
     if target.role in (UserRole.admin, UserRole.super_admin):
         database.scalar.return_value = admin_count
 
@@ -1001,7 +1008,9 @@ async def test_delete_user_success_orders_event_before_delete_and_commit(monkeyp
 
     assert await users.delete_user(TARGET_ID, database, _actor()) is None
 
-    _assert_statement(database.execute.await_args.args[0], select(User).where(User.id == TARGET_ID))
+    _assert_statement(database.execute.await_args_list[0].args[0], select(User).where(User.id == TARGET_ID))
+    assert "mobile-read:default" in str(database.execute.await_args_list[1].args[0])
+    assert "mobile_backfill_cursor" in str(database.execute.await_args_list[2].args[0])
     assert order == ["event", "delete", "commit"]
     if target.role in (UserRole.admin, UserRole.super_admin):
         expected = select(func.count()).select_from(User).where(User.role.in_([UserRole.admin, UserRole.super_admin]))
@@ -1066,7 +1075,7 @@ async def test_delete_admin_count_failure_is_loud_before_event_or_delete(monkeyp
 @pytest.mark.asyncio
 async def test_delete_event_failure_prevents_database_delete(monkeypatch):
     target = _target()
-    database = _db(_one(target))
+    database = _delete_db(target)
     monkeypatch.setattr(users, "emit_security_event", AsyncMock(side_effect=RuntimeError("event unavailable")))
 
     with pytest.raises(RuntimeError, match="event unavailable"):
@@ -1079,7 +1088,7 @@ async def test_delete_event_failure_prevents_database_delete(monkeypatch):
 @pytest.mark.asyncio
 async def test_delete_team_owner_constraint_failure_occurs_after_success_event(monkeypatch):
     target = _target()
-    database = _db(_one(target))
+    database = _delete_db(target)
     database.commit.side_effect = IntegrityError("delete user", {}, RuntimeError("teams.created_by foreign key"))
     emit = AsyncMock()
     monkeypatch.setattr(users, "emit_security_event", emit)
@@ -1095,7 +1104,7 @@ async def test_delete_team_owner_constraint_failure_occurs_after_success_event(m
 @pytest.mark.asyncio
 async def test_delete_database_delete_failure_occurs_after_success_event(monkeypatch):
     target = _target()
-    database = _db(_one(target))
+    database = _delete_db(target)
     database.delete.side_effect = RuntimeError("delete unavailable")
     emit = AsyncMock()
     monkeypatch.setattr(users, "emit_security_event", emit)
@@ -1110,7 +1119,7 @@ async def test_delete_database_delete_failure_occurs_after_success_event(monkeyp
 @pytest.mark.asyncio
 async def test_delete_http_success_is_an_empty_204(route_app, monkeypatch):
     target = _target()
-    database = _db(_one(target))
+    database = _delete_db(target)
     _override_db(route_app, database)
     route_app.dependency_overrides[get_current_user] = lambda: _actor()
     monkeypatch.setattr(users, "emit_security_event", AsyncMock())

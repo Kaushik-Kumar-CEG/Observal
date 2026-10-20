@@ -989,7 +989,7 @@ async def scan_retained_mobile_sources(ctx: dict) -> dict:
         cursor = (
             await db.execute(
                 text(
-                    "SELECT project_id,user_id,session_id FROM mobile_backfill_cursor "
+                    "SELECT project_id,user_id,session_id,skip_count FROM mobile_backfill_cursor "
                     "WHERE singleton=true FOR UPDATE SKIP LOCKED"
                 )
             )
@@ -1002,12 +1002,13 @@ async def scan_retained_mobile_sources(ctx: dict) -> dict:
             "AND (startsWith(layer_hash,'v2_') OR startsWith(layer_hash,'v3_')) "
             f"{source_floor}"
             "AND (project_id,user_id,session_id)>({project:String},{user:String},{session:String}) "
-            "GROUP BY project_id,user_id,session_id ORDER BY project_id,user_id,session_id LIMIT 51 "
-            "SETTINGS max_execution_time=5 FORMAT JSON",
+            "GROUP BY project_id,user_id,session_id ORDER BY project_id,user_id,session_id "
+            "LIMIT 51 OFFSET {offset:UInt64} SETTINGS max_execution_time=5 FORMAT JSON",
             {
                 "param_project": cursor.project_id,
                 "param_user": cursor.user_id,
                 "param_session": cursor.session_id,
+                "param_offset": cursor.skip_count,
                 "param_days": retention_days,
             },
         )
@@ -1041,14 +1042,35 @@ async def scan_retained_mobile_sources(ctx: dict) -> dict:
                 {"project": candidate["project_id"], "user": owner, "session": candidate["session_id"]},
             )
             queued += 1
+        values = {"project": "", "user": "", "session": "", "skip": 0}
         if len(candidates) > 50:
-            last = candidates[49]
-            values = {"project": last["project_id"], "user": last["user_id"], "session": last["session_id"]}
-        else:
-            values = {"project": "", "user": "", "session": ""}
+            # A retained CH record may outlive an erased PostgreSQL account.
+            # Skip the entire erased prefix without persisting any deleted
+            # subject/session. The next bounded pass resumes after it via a
+            # non-personal offset, even if more than 50 keys were erased.
+            values = {
+                "project": cursor.project_id,
+                "user": cursor.user_id,
+                "session": cursor.session_id,
+                "skip": cursor.skip_count + 50,
+            }
+            for candidate in reversed(candidates[:50]):
+                try:
+                    owner = uuid.UUID(candidate["user_id"])
+                except (ValueError, TypeError, KeyError):
+                    continue
+                if await db.scalar(text("SELECT id FROM users WHERE id=:owner FOR KEY SHARE"), {"owner": owner}):
+                    values = {
+                        "project": candidate["project_id"],
+                        "user": candidate["user_id"],
+                        "session": candidate["session_id"],
+                        "skip": 0,
+                    }
+                    break
         await db.execute(
             text(
-                "UPDATE mobile_backfill_cursor SET project_id=:project,user_id=:user,session_id=:session "
+                "UPDATE mobile_backfill_cursor SET project_id=:project,user_id=:user,session_id=:session,"
+                "skip_count=:skip "
                 "WHERE singleton=true"
             ),
             values,

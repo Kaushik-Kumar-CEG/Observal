@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -101,6 +101,10 @@ async def cleanup_demo_accounts(db: AsyncSession, new_role: UserRole) -> int:
     else:
         stmt = delete(User).where(User.is_demo.is_(True), User.role == new_role)
 
+    # Demo deletion cascades the same Pi facts and receipt rows as admin/SCIM
+    # deletion. Keep one lock order across all supported user erasure paths.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+    await db.execute(text("SELECT singleton FROM mobile_backfill_cursor WHERE singleton=true FOR UPDATE"))
     result = await db.execute(stmt)
     deleted: int = result.rowcount  # type: ignore[assignment]
     if deleted:

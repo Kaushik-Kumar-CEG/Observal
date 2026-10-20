@@ -79,16 +79,72 @@ async def test_existing_publication_gets_null_retained_floor_on_upgrade():
         finally:
             await target_db.dispose()
         subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "067_mobile_short_retention_fence"],
+            env=env,
+            check=True,
+            capture_output=True,
+            timeout=90,
+        )
+        orphan = uuid.uuid4()
+        pre_068 = create_async_engine(target)
+        try:
+            async with pre_068.begin() as db:
+                await db.execute(
+                    text(
+                        "INSERT INTO users(id,email,username,name,role,created_at) "
+                        "VALUES (:id,:email,:username,'Orphan', 'user'::userrole,now())"
+                    ),
+                    {
+                        "id": orphan,
+                        "email": f"orphan-{orphan.hex}@example.invalid",
+                        "username": f"orphan_{orphan.hex[:12]}",
+                    },
+                )
+                await db.execute(
+                    text(
+                        "INSERT INTO mobile_source_line_highwater(project_id,user_id,harness,session_id,max_line) "
+                        "VALUES ('default',:id,'pi','orphan-old-user',3)"
+                    ),
+                    {"id": orphan},
+                )
+                await db.execute(
+                    text(
+                        "INSERT INTO mobile_source_final_receipts"
+                        "(project_id,user_id,harness,session_id,final_line,source_hash) "
+                        "VALUES ('default',:id,'pi','orphan-old-user',3,:hash)"
+                    ),
+                    {"id": orphan, "hash": "a" * 64},
+                )
+                await db.execute(text("DELETE FROM users WHERE id=:id"), {"id": orphan})
+                await db.execute(
+                    text(
+                        "UPDATE mobile_backfill_cursor SET project_id='default',user_id=:orphan,"
+                        "session_id='orphan-old-user' WHERE singleton=true"
+                    ),
+                    {"orphan": str(orphan)},
+                )
+        finally:
+            await pre_068.dispose()
+        subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "head"], env=env, check=True, capture_output=True, timeout=90
         )
         verify = create_async_engine(target)
         try:
             async with verify.connect() as db:
                 assert (
-                    await db.scalar(text("SELECT version_num FROM alembic_version"))
-                    == "067_mobile_short_retention_fence"
+                    await db.scalar(text("SELECT version_num FROM alembic_version")) == "068_mobile_erasure_epoch_guard"
                 )
                 assert await db.scalar(text("SELECT count(*) FROM first_admin_provision_audit")) == 0
+                for table in ("mobile_source_line_highwater", "mobile_source_final_receipts"):
+                    assert await db.scalar(text(f"SELECT count(*) FROM {table} WHERE user_id=:id"), {"id": orphan}) == 0
+                checkpoint = (
+                    await db.execute(
+                        text(
+                            "SELECT project_id,user_id,session_id,skip_count FROM mobile_backfill_cursor WHERE singleton=true"
+                        )
+                    )
+                ).one()
+                assert tuple(checkpoint) == ("", "", "", 0)
                 assert (
                     await db.scalar(
                         text(
@@ -120,7 +176,7 @@ async def test_existing_publication_gets_null_retained_floor_on_upgrade():
             timeout=60,
         )
         assert downgrade.returncode != 0, "An old publication must block pre-verification downgrade to 066"
-        assert b"Cannot discard committed mobile source policy epochs or qualified receipts" in downgrade.stderr
+        assert b"Cannot restore unsafe pre-068 mobile erasure triggers" in downgrade.stderr
     finally:
         if created:
             async with admin.connect() as conn:

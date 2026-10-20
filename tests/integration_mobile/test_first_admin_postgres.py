@@ -84,7 +84,7 @@ async def test_first_super_admin_receipt_and_competing_init_on_fresh_063():
             assert rollback.returncode != 0, "Live first-admin receipt must prevent destructive schema downgrade"
             async with sessionmaker() as check:
                 assert await check.scalar(text("SELECT version_num FROM alembic_version")) == (
-                    "067_mobile_short_retention_fence"
+                    "068_mobile_erasure_epoch_guard"
                 )
                 assert await check.scalar(text("SELECT count(*) FROM first_admin_provision_audit")) == 1
         finally:

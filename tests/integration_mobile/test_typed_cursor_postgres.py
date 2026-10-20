@@ -326,6 +326,50 @@ async def test_skill_hook_only_child_revisions_change_on_ancestor_and_clock_expi
                 initial_rows = await trace_component_page(db, author.id, "author", "default", start, end, limit=10)
                 assert initial_rows and {row["kind"] for row in initial_rows} == {"skill", "hook"}
                 assert sum(row["roots"] for row in initial_rows) == 2  # overlapping rows, one union root
+                # Rollback-only isolated fixture: real PG qualification joins
+                # and approval timing, not a claim that 50-day raw CH survived.
+                # The week has no facts, the month a Skill, the quarter a
+                # Skill and Hook. Capability cannot infer kinds from 1W.
+                period_savepoint = await db.begin_nested()
+                try:
+                    await db.execute(
+                        text(
+                            "UPDATE mobile_publication_events SET recorded_at=now()-interval '85 days' "
+                            "WHERE version_id IN (:skill,:hook)"
+                        ),
+                        {"skill": skill_version.id, "hook": hook_version.id},
+                    )
+                    await db.execute(
+                        text(
+                            "UPDATE mobile_run_instances SET started_at=now()-interval '60 days' WHERE user_id=:actor"
+                        ),
+                        {"actor": actor.id},
+                    )
+                    for table, days in (("mobile_skill_evidence_events", 20), ("mobile_hook_evidence_events", 50)):
+                        await db.execute(
+                            text(
+                                f"UPDATE {table} SET event_time=now()-make_interval(days=>:days) WHERE user_id=:actor"
+                            ),
+                            {"actor": actor.id, "days": days},
+                        )
+                    allowed = {actor.id, author.id}
+                    for period, expected_kinds in (("1w", None), ("1m", (1, 0)), ("3m", (1, 1))):
+                        now_window = route._window(period)
+                        observed = await trace_union(
+                            db, author.id, "author", "default", now_window.start, now_window.end, actor_ids=allowed
+                        )
+                        assert (
+                            None if observed is None else (observed["skill_loads"], observed["hook_runs"])
+                        ) == expected_kinds
+                    with monkeypatch.context() as period_patch:
+                        period_patch.setattr(route, "active_mobile_cohort", AsyncMock(return_value="synthetic-author"))
+                        period_patch.setattr(route, "_synthetic_subjects", AsyncMock(return_value=allowed))
+                        capability = await route.capabilities(db, author_viewer)
+                    assert capability.synthetic_test_cohort is True
+                    assert capability.supported_kinds == ["confirmed_skill_loads", "recorded_hook_runs"]
+                    assert capability.platform_overview is False and capability.trace_headlines is False
+                finally:
+                    await period_savepoint.rollback()
                 for account in (actor.id, author.id):
                     before_status = (await revisions())[1]
                     await db.execute(text("UPDATE users SET auth_provider='deactivated' WHERE id=:id"), {"id": account})

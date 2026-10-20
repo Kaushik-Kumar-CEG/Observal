@@ -528,7 +528,11 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
     test_only = cohort in ("synthetic-author", "synthetic-user")
     kinds: list[str] = []
     if test_only:
-        window = _window("1w")
+        # The capability covers every authorized 1W/1M/3M reading, not just
+        # the current week. Use the longest accepted window with the same
+        # subject, scope and disposable actor allowlist as the data route;
+        # do not advertise a kind from another person's private activity.
+        window = _window("3m")
         observed = await trace_union(
             db,
             viewer.id,
@@ -536,6 +540,7 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
             str(DEFAULT_PROJECT_ID),
             window.start,
             window.end,
+            viewer_self=True,
             actor_ids=await _synthetic_subjects(db, viewer),
         )
         if observed and observed["roots"] > 0:

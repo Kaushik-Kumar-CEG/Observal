@@ -36,14 +36,16 @@ fs.mkdirSync(obsDir, { recursive: true, mode: 0o700 });
 const skillPath = path.join(piDir, "skills", "review", "SKILL.md");
 fs.mkdirSync(path.dirname(skillPath), { recursive: true });
 fs.writeFileSync(skillPath, skillContent, { mode: 0o600 });
-fs.writeFileSync(path.join(piDir, "mcp.json"), JSON.stringify({ mcpServers: { alpha: { command: "synthetic-no-launch" } } }));
+const mcpEntry = { command: "synthetic-no-launch" };
+const mcpConfigSha256 = crypto.createHash("sha256").update(JSON.stringify(mcpEntry)).digest("hex");
+fs.writeFileSync(path.join(piDir, "mcp.json"), JSON.stringify({ mcpServers: { alpha: mcpEntry } }));
 fs.writeFileSync(path.join(piDir, "observal-hooks.json"), JSON.stringify({ schema: "observal-pi-hooks/v1",
   agent: "synthetic", hooks: [{ id: hookId, version: "1.0.0", name: "pre-tool", event: "tool_call",
     type: "command", command: hookCommand, timeout: 5 }] }));
 fs.writeFileSync(path.join(obsDir, "config.json"), JSON.stringify({ server_url: origin, access_token: token }), { mode: 0o600 });
 fs.writeFileSync(path.join(obsDir, "lockfile.json"), JSON.stringify({ registries: { [origin]: { harnesses: {
   pi: { agents: [], standalone: [
-    { type: "mcp", id: mcpId, version: "1.0.0", local_name: "alpha" },
+    { type: "mcp", id: mcpId, version: "1.0.0", local_name: "alpha", config_sha256: mcpConfigSha256 },
     { type: "skill", id: skillId, version: "1.0.0", local_name: "review", scope: "user" },
   ] },
 } } } }), { mode: 0o600 });
@@ -86,4 +88,8 @@ assert.equal(receipts[0].data.outcome, "ran");
 assert(!JSON.stringify(receipts).includes(hookCommand));
 // IDs only; token and source path are not printed by this driver.
 console.log(JSON.stringify({ session: manager.getSessionId(), root: lines[0].id,
-  line_count: lines.length, receipt_count: receipts.length }));
+  line_count: lines.length, receipt_count: receipts.length,
+  session_file_present: Boolean(manager.getSessionFile()),
+  config_present: fs.existsSync(path.join(obsDir, "config.json")),
+  outbox_files: fs.existsSync(path.join(obsDir, "pi_session_outbox"))
+    ? fs.readdirSync(path.join(obsDir, "pi_session_outbox")).length : 0 }));

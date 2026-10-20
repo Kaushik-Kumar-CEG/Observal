@@ -149,6 +149,9 @@ class TestCleanupDemoAccounts:
         deleted = await cleanup_demo_accounts(db, UserRole.super_admin)
 
         assert deleted == 4
+        assert "mobile-read:default" in str(db.execute.await_args_list[0].args[0])
+        assert "mobile_backfill_cursor" in str(db.execute.await_args_list[1].args[0])
+        assert "DELETE FROM users" in str(db.execute.await_args_list[2].args[0])
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio

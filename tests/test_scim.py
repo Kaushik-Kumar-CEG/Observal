@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Focused coverage for the SCIM 2.0 provisioning routes."""
@@ -955,7 +956,7 @@ class TestUserDeletion:
     ):
         order = []
         user = _user()
-        db = _db(_one(user))
+        db = _db(_one(user), _one(None), _one(None))
         db.delete.side_effect = lambda deleted: order.append(("delete", deleted))
         db.commit.side_effect = lambda: order.append(("commit", None))
 
@@ -974,12 +975,14 @@ class TestUserDeletion:
             ("commit", None),
             ("emit", UserDeleted(user_id=str(USER_ID), email="alice@example.test")),
         ]
-        _assert_statement(db.execute.await_args.args[0], select(User).where(User.id == USER_ID))
+        _assert_statement(db.execute.await_args_list[0].args[0], select(User).where(User.id == USER_ID))
+        assert "mobile-read:default" in str(db.execute.await_args_list[1].args[0])
+        assert "mobile_backfill_cursor" in str(db.execute.await_args_list[2].args[0])
 
     @pytest.mark.asyncio
     async def test_delete_failure_before_commit_does_not_emit_deleted_event(self, app, client, monkeypatch):
         user = _user()
-        db = _db(_one(user))
+        db = _db(_one(user), _one(None), _one(None))
         db.delete.side_effect = RuntimeError("delete failed")
         emit = AsyncMock()
         monkeypatch.setattr(scim.bus, "emit", emit)
@@ -994,7 +997,7 @@ class TestUserDeletion:
     @pytest.mark.asyncio
     async def test_delete_commit_failure_does_not_emit_deleted_event(self, app, client, monkeypatch):
         user = _user()
-        db = _db(_one(user))
+        db = _db(_one(user), _one(None), _one(None))
         db.commit.side_effect = RuntimeError("commit failed")
         emit = AsyncMock()
         monkeypatch.setattr(scim.bus, "emit", emit)

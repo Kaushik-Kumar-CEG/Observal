@@ -65,7 +65,7 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
         try:
             async with verify.connect() as conn:
                 assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == (
-                    "067_mobile_short_retention_fence"
+                    "068_mobile_erasure_epoch_guard"
                 )
                 assert (
                     await conn.execute(
@@ -98,21 +98,21 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
                 ).scalar_one() == 0
         finally:
             await verify.dispose()
-        # An unused 067 installation may still downgrade. Both triggers
-        # using the source-epoch function must be removed before that function.
-        for args in (("downgrade", "066_mobile_scope_retention_clock"), ("upgrade", "head")):
-            subprocess.run(
-                [sys.executable, "-m", "alembic", *args],
-                env=env,
-                check=True,
-                capture_output=True,
-                timeout=105,
-            )
+        # An unused 068 database must not reintroduce unsafe 067 user
+        # erasure for subsequently admitted Pi facts. Fix forward only.
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "067_mobile_short_retention_fence"],
+            env=env,
+            capture_output=True,
+            timeout=105,
+        )
+        assert downgrade.returncode != 0
+        assert b"Cannot restore unsafe pre-068 mobile erasure triggers" in downgrade.stderr
         verify = create_async_engine(scratch_url)
         try:
             async with verify.connect() as conn:
                 assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == (
-                    "067_mobile_short_retention_fence"
+                    "068_mobile_erasure_epoch_guard"
                 )
         finally:
             await verify.dispose()

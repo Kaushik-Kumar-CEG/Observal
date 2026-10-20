@@ -46,6 +46,9 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
         db_url.port
     ]
     joint = os.getenv("MOBILE_INTEGRATION_JOINT_HOLD") == "1"
+    assert not (
+        os.getenv("MOBILE_INTEGRATION_ERASURE_FIRST") == "1" and os.getenv("MOBILE_INTEGRATION_V3_HTTPS") == "1"
+    ), "Erasure-first and protected HTTPS viewer modes are separate disposable tests"
     assert not joint or (db_url.port == 15440 and os.getenv("MOBILE_INTEGRATION_V3_HTTPS") == "1")
     https_origin = "https://localhost:18443" if joint else "https://localhost:18444"
     sdk = Path(os.environ["PI_PROBE_SDK_ENTRY"])
@@ -206,7 +209,18 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
             result = json.loads(launched.stdout.strip())
             session = result["session"]
             assert result["receipt_count"] == 1 and result["line_count"] >= 5
-            assert len(await _rows("default", str(actor.id), "pi", session)) == result["line_count"]
+            # The sender persists and retries its outbox independently of the
+            # SDK shutdown callback. CH insert/readback may race that callback;
+            # never assert source absence from a single immediate read.
+            for _ in range(40):
+                retained = await _rows("default", str(actor.id), "pi", session)
+                if len(retained or []) == result["line_count"]:
+                    break
+                await asyncio.sleep(0.25)
+            assert len(retained or []) == result["line_count"], {
+                "retained": len(retained or []),
+                "sdk_status": result,
+            }
         # Ingest queues a durable projection request; the *running* isolated
         # worker must consume it. Do not call project_pi_session in this test.
         for _ in range(60):
@@ -225,7 +239,39 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
             if counts == (1, 1, 1):
                 break
             await asyncio.sleep(1)
-        assert counts == (1, 1, 1), f"running worker failed to project three kinds: {counts}"
+        if counts != (1, 1, 1):
+            from services.session_parsers.pi_invocations import PiInvocationExtractor
+
+            observed = await _rows("default", str(actor.id), "pi", session)
+            extraction = PiInvocationExtractor().extract(observed or [])
+            async with async_session() as db:
+                publication = (
+                    await db.execute(
+                        text(
+                            "SELECT status,source_policy_epoch,source_highest_line FROM mobile_session_publications "
+                            "WHERE user_id=:u AND session_id=:s"
+                        ),
+                        {"u": actor.id, "s": session},
+                    )
+                ).first()
+                aliases = (
+                    (
+                        await db.execute(
+                            text("SELECT alias FROM mobile_layer_components WHERE user_id=:u"), {"u": actor.id}
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            raise AssertionError(
+                {
+                    "facts": counts,
+                    "publication": tuple(publication) if publication else None,
+                    "aliases": aliases,
+                    "invocations": [(call.mcp_server, call.result_state) for call in extraction.invocations],
+                    "malformed": extraction.malformed_source_records,
+                }
+            )
         async with async_session() as db:
             roots = (
                 (
@@ -242,6 +288,20 @@ async def test_pi_sdk_extension_uploads_one_root_three_kinds_to_worker():
                 .all()
             )
             assert len(roots) == 3 and len(set(roots)) == 1
+        if os.getenv("MOBILE_INTEGRATION_ERASURE_FIRST") == "1":
+            # Exercise the supported user-erasure path while all three typed
+            # facts, pins and the original-author link still exist. Older 067
+            # trigger ordering could violate mobile_scope_epochs.subject_id FK.
+            async with async_session() as db:
+                assert await db.scalar(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'"))
+                await db.execute(text("DELETE FROM users WHERE id=:id"), {"id": actor.id})
+                await db.commit()
+                assert (
+                    await db.scalar(
+                        text("SELECT count(*) FROM mobile_evidence_events WHERE user_id=:id"), {"id": actor.id}
+                    )
+                    == 0
+                )
         if os.getenv("MOBILE_INTEGRATION_V3_HTTPS") == "1":
             # On this disposable fresh DB *only*, temporarily open the real
             # PostgreSQL gate and exercise actual scoped mobile credentials.

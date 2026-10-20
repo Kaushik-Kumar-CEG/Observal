@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """SCIM 2.0 provisioning endpoints."""
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 if TYPE_CHECKING:
@@ -293,6 +294,11 @@ async def delete_user(
 
     email = user.email
     user_id_str = str(user.id)
+    # Same lock order as the admin delete route: source project gate, scanner
+    # cursor, then user/receipt cascades. Otherwise SCIM can race Pi ingest or
+    # hold a deleted user while the scanner waits on its FK-presence check.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+    await db.execute(text("SELECT singleton FROM mobile_backfill_cursor WHERE singleton=true FOR UPDATE"))
     await db.delete(user)
     await db.commit()
 

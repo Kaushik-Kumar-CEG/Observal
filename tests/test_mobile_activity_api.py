@@ -142,6 +142,7 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
     server = uuid.uuid4()
     db.scalar.return_value = server
     settings = {
+        "mobile.synthetic_test_enabled": "true",
         "mobile.synthetic_test_ack": "isolated-disposable-synthetic-only-v1",
         "mobile.synthetic_test_server_id": str(server),
         "mobile.synthetic_test_viewer_id": str(viewer.id),
@@ -173,6 +174,38 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
         skill_only = await c.get("/api/v1/mobile-activity/v1/capabilities")
         assert skill_only.json()["synthetic_test_cohort"] is True
         assert skill_only.json()["supported_kinds"] == ["confirmed_skill_loads"]
+
+        # 1W and 1M can have different independently verified kinds. The
+        # capability's set must cover the longest accepted phone window,
+        # using the exact same Author identity and disposable actor filter.
+        async def split_period(_db, subject, scope, _project, start, end, **kwargs):
+            assert subject == viewer.id and scope == "author"
+            assert kwargs["actor_ids"] == {viewer.id, other.id}
+            if (end - start).days <= 7:
+                return {"roots": 1, "calls": 1, "skill_loads": 0, "hook_runs": 0, "days": 1}
+            if (end - start).days <= 31:
+                return {"roots": 2, "calls": 1, "skill_loads": 1, "hook_runs": 0, "days": 2}
+            return {"roots": 3, "calls": 1, "skill_loads": 1, "hook_runs": 1, "days": 3}
+
+        observed.side_effect = split_period
+        different_kinds = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert different_kinds.json()["supported_kinds"] == ["mcp_calls", "confirmed_skill_loads", "recorded_hook_runs"]
+        assert different_kinds.json()["platform_overview"] is False
+        assert_wire("Capabilities", different_kinds.json())
+
+        async def older_only(_db, subject, scope, _project, start, end, **kwargs):
+            assert subject == viewer.id and scope == "author"
+            assert kwargs["actor_ids"] == {viewer.id, other.id}
+            if (end - start).days <= 7:
+                return None
+            return {"roots": 1, "calls": 0, "skill_loads": 1, "hook_runs": 0, "days": 1}
+
+        observed.side_effect = older_only
+        empty_week = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert empty_week.json()["synthetic_test_cohort"] is True
+        assert empty_week.json()["supported_kinds"] == ["confirmed_skill_loads"]
+        assert_wire("Capabilities", empty_week.json())
+        observed.side_effect = None
         observed.return_value = None
         missing_source = await c.get("/api/v1/mobile-activity/v1/capabilities")
         assert missing_source.json()["synthetic_test_cohort"] is False

@@ -32,7 +32,7 @@ class Db:
 
     async def execute(self, sql, params=None):
         self.queries.append((str(sql), params))
-        return SimpleNamespace(first=lambda: SimpleNamespace(project_id="", user_id="", session_id=""))
+        return SimpleNamespace(first=lambda: SimpleNamespace(project_id="", user_id="", session_id="", skip_count=0))
 
     async def scalar(self, sql, params):
         return 1 if self.eligible else None
@@ -69,7 +69,7 @@ async def test_scan_persists_last_key_and_queues_only_first_fifty_live_mapped_se
     queue = [args for sql, args in db.queries if "INSERT INTO mobile_projection_queue" in sql]
     assert len(queue) == 50 and queue[-1]["session"] == "session-049"
     cursor = [args for sql, args in db.queries if "UPDATE mobile_backfill_cursor" in sql]
-    assert cursor == [{"project": "default", "user": USER, "session": "session-049"}]
+    assert cursor == [{"project": "default", "user": USER, "session": "session-049", "skip": 0}]
     assert db.committed == 1
     assert "LIMIT 51" in mock_query.await_args.args[0]
     assert "timestamp>=now()-INTERVAL {days:UInt32} DAY" in mock_query.await_args.args[0]
@@ -94,9 +94,58 @@ async def test_scan_rewinds_only_after_end_and_ignores_deleted_or_unverified_use
     assert result == {"status": "scanned", "candidates": 3, "queued": 0}
     assert not any("INSERT INTO mobile_projection_queue" in sql for sql, _ in db.queries)
     assert [args for sql, args in db.queries if "UPDATE mobile_backfill_cursor" in sql] == [
-        {"project": "", "user": "", "session": ""}
+        {"project": "", "user": "", "session": "", "skip": 0}
     ]
     assert "timestamp>=now()-INTERVAL" not in mobile._query.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_erased_prefix_longer_than_one_page_does_not_starve_later_live_sender(monkeypatch):
+    live = uuid.UUID("22222222-2222-4222-8222-222222222222")
+
+    class ErasedPrefixDb(Db):
+        def __init__(self):
+            super().__init__()
+            self.cursor = {"project_id": "", "user_id": "", "session_id": "", "skip_count": 0}
+
+        async def execute(self, sql, params=None):
+            self.queries.append((str(sql), params))
+            if "FOR UPDATE SKIP LOCKED" in str(sql):
+                return SimpleNamespace(first=lambda: SimpleNamespace(**self.cursor))
+            if "UPDATE mobile_backfill_cursor" in str(sql):
+                self.cursor = {
+                    "project_id": params["project"],
+                    "user_id": params["user"],
+                    "session_id": params["session"],
+                    "skip_count": params["skip"],
+                }
+            return SimpleNamespace()
+
+        async def scalar(self, sql, params):
+            return 1 if params.get("owner", params.get("user")) == live else None
+
+    db = ErasedPrefixDb()
+    dead_before = str(uuid.UUID("11111111-1111-4111-8111-111111111111"))
+    dead_after = str(uuid.UUID("33333333-3333-4333-8333-333333333333"))
+    keys = [candidate(n, user=dead_before if n <= 50 else dead_after) for n in range(101)]
+    keys[51] = candidate(51, user=str(live))
+
+    async def source(_sql, params):
+        return Reply(keys[params["param_offset"] : params["param_offset"] + 51])
+
+    mock_query = AsyncMock(side_effect=source)
+    monkeypatch.setattr(mobile, "async_session", lambda: Context(db))
+    monkeypatch.setattr(mobile, "_query", mock_query)
+    monkeypatch.setattr(mobile.ds, "get_bool", AsyncMock(return_value=False))
+    first = await mobile.scan_retained_mobile_sources({})
+    assert first == {"status": "scanned", "candidates": 51, "queued": 0}
+    assert db.cursor == {"project_id": "", "user_id": "", "session_id": "", "skip_count": 50}
+    second = await mobile.scan_retained_mobile_sources({})
+    assert second == {"status": "scanned", "candidates": 51, "queued": 1}
+    assert db.cursor["user_id"] == str(live) and db.cursor["session_id"] == "session-051"
+    assert db.cursor["skip_count"] == 0
+    assert [entry.args[1]["param_offset"] for entry in mock_query.await_args_list] == [0, 50]
+    assert all(dead_before not in str(item) and dead_after not in str(item) for item in db.cursor.values())
 
 
 @pytest.mark.asyncio

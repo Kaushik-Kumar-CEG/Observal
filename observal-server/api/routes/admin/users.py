@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Admin user management routes."""
@@ -10,7 +11,7 @@ from fastapi import Depends, HTTPException
 from loguru import logger as optic
 from pydantic import BaseModel
 from redis.exceptions import RedisError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -295,6 +296,11 @@ async def delete_user(
         if admin_count is not None and admin_count <= 1:
             raise HTTPException(status_code=400, detail="Cannot delete the last admin")
 
+    # Serialize erasure with Pi source mutation and projection before locking
+    # the user or its receipt rows. The scanner locks its singleton cursor
+    # before consulting users, so acquire that row before deleting a user too.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+    await db.execute(text("SELECT singleton FROM mobile_backfill_cursor WHERE singleton=true FOR UPDATE"))
     optic.warning("Admin {} deleted user {} ({})", current_user.email, user.email, user.id)
     deleted_user_email = user.email
     deleted_user_id = str(user.id)
