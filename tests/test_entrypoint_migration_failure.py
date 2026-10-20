@@ -38,8 +38,7 @@ def test_failed_alembic_upgrade_aborts_before_clickhouse_or_stamp(tmp_path):
     assert "Initialization complete" not in result.stdout
     assert "no revision was stamped" in result.stdout
     invocations = calls.read_text().splitlines()
-    assert len(invocations) == 2
-    assert invocations[1] == "-m"
+    assert invocations == ["-c", "-c", "-m"]  # clock preflight, schema check, then failing migration
     assert not any("stamp" in line or "clickhouse" in line for line in invocations)
 
 
@@ -75,7 +74,7 @@ def test_unversioned_existing_schema_refuses_without_upgrade(tmp_path):
     result = subprocess.run(["bash", str(script)], capture_output=True, text=True, check=False)
     assert result.returncode == 1
     assert "refusing to stamp" in result.stdout
-    assert calls.read_text().splitlines() == ["-c"]
+    assert calls.read_text().splitlines() == ["-c", "-c"]  # clock preflight, then unversioned guard
 
 
 @pytest.mark.asyncio

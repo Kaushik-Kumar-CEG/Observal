@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 amogh-dongre <amoghdongre16@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
@@ -66,7 +67,7 @@ def test_app_workload_image_tags_default_to_chart_app_version():
     helpers_text = (ROOT / "infra/helm/observal/templates/_helpers.tpl").read_text()
 
     assert values["api"]["image"]["tag"] == ""
-    assert values["worker"]["image"]["tag"] == ""
+    assert "image" not in values["worker"]  # worker must use the exact API/init image
     assert values["web"]["image"]["tag"] == ""
     assert '$tag := .image.tag | default (.appVersion | default "latest")' in helpers_text
 
@@ -77,6 +78,12 @@ def test_app_workload_image_tags_default_to_chart_app_version():
         "infra/helm/observal/templates/web-deployment.yaml",
     ):
         assert '"appVersion" .Chart.AppVersion' in (ROOT / template_path).read_text()
+    worker = (ROOT / "infra/helm/observal/templates/worker-deployment.yaml").read_text()
+    assert '.Values.api.image "appVersion"' in worker
+    assert ".Values.worker.image" not in worker
+    init = (ROOT / "infra/helm/observal/templates/init-job.yaml").read_text()
+    assert 'include "observal.initJobName"' in init
+    assert "ttlSecondsAfterFinished" not in init
 
 
 def test_ci_asserts_packaged_chart_uses_app_version_image_tags():
@@ -89,10 +96,9 @@ def test_ci_asserts_packaged_chart_uses_app_version_image_tags():
     assert 'test "$API_IMAGE_COUNT" -ge 3' in workflow_text
     assert 'grep -q "image: ghcr.io/observal/observal-web:${VERSION}"' in workflow_text
     assert "--set api.image.tag=custom-api" in workflow_text
-    assert "--set worker.image.tag=custom-worker" in workflow_text
+    assert "--set worker.image.tag=custom-worker" not in workflow_text
     assert "--set web.image.tag=custom-web" in workflow_text
-    assert 'grep -q "image: ghcr.io/observal/observal-api:custom-api"' in workflow_text
-    assert 'grep -q "image: ghcr.io/observal/observal-api:custom-worker"' in workflow_text
+    assert "grep -c 'image: ghcr.io/observal/observal-api:custom-api'" in workflow_text
     assert 'grep -q "image: ghcr.io/observal/observal-web:custom-web"' in workflow_text
 
 

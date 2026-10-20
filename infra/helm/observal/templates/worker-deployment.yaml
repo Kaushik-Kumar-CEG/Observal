@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Ravi Chopra <shivamchopra1234567890@gmail.com>
 # SPDX-FileCopyrightText: 2026 amogh-dongre <amoghdongre16@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: apps/v1
 kind: Deployment
@@ -28,6 +29,7 @@ spec:
         {{- include "observal.initWaitClickhouse" . | nindent 8 }}
         {{- include "observal.initWaitRedis" . | nindent 8 }}
         {{- include "observal.initWaitInitJob" . | nindent 8 }}
+        {{- include "observal.initVerifySchema" . | nindent 8 }}
         - name: prepare-jwt-keys
           image: busybox:latest
           command: ['sh', '-c', 'mkdir -p /data/keys && cp -f /data/secret-keys/* /data/keys/ 2>/dev/null || true; chown -R 1001:1001 /data/keys && chmod 700 /data/keys']
@@ -38,8 +40,8 @@ spec:
               name: jwt-keys
       containers:
         - name: worker
-          image: {{ include "observal.image" (dict "global" .Values.global "image" .Values.worker.image "appVersion" .Chart.AppVersion) }}
-          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          image: {{ include "observal.image" (dict "global" .Values.global "image" .Values.api.image "appVersion" .Chart.AppVersion) }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
           {{- include "observal.securityContext" . | nindent 10 }}
           command:
             - /app/.venv/bin/python

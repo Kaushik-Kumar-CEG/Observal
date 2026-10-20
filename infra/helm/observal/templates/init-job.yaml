@@ -1,16 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Ravi Chopra <shivamchopra1234567890@gmail.com>
 # SPDX-FileCopyrightText: 2026 amogh-dongre <amoghdongre16@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "observal.fullname" . }}-init
+  name: {{ include "observal.initJobName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "observal.labels" . | nindent 4 }}
     app.kubernetes.io/component: init
 spec:
-  ttlSecondsAfterFinished: 3600
+  # Retain successful exact-image proof so new API/worker pods can restart
+  # after one hour without waiting forever on a deleted Job. A different
+  # immutable image name creates a fresh Job on helm upgrade.
   template:
     metadata:
       labels:

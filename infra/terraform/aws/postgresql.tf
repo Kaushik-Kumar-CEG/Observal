@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Apoorv Garg <apoorvgarg.21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 resource "aws_db_subnet_group" "main" {
@@ -10,6 +11,12 @@ resource "aws_db_subnet_group" "main" {
 resource "aws_db_parameter_group" "pg16" {
   name   = "${local.name}-pg16"
   family = "postgres16"
+
+  parameter {
+    name         = "track_commit_timestamp"
+    value        = "1"
+    apply_method = "pending-reboot"
+  }
 }
 
 # tfsec:ignore:aws-rds-enable-performance-insights-encryption Performance Insights uses the AWS-managed RDS KMS key (encrypted at rest); supply a CMK via performance_insights_kms_key_id for stricter compliance.

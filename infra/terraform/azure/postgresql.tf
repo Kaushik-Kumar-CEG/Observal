@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Tanvi Reddy <reddyplayer22@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 resource "azurerm_postgresql_flexible_server" "main" {
@@ -43,6 +44,14 @@ resource "azurerm_postgresql_flexible_server_database" "observal" {
   server_id = azurerm_postgresql_flexible_server.main.id
   charset   = "UTF8"
   collation = "en_US.utf8"
+}
+
+# Static setting: existing managed servers require an operator-approved restart;
+# preflight must read back 'on' before approving any mobile source.
+resource "azurerm_postgresql_flexible_server_configuration" "mobile_commit_clock" {
+  name      = "track_commit_timestamp"
+  server_id = azurerm_postgresql_flexible_server.main.id
+  value     = "on"
 }
 
 resource "azurerm_postgresql_flexible_server_configuration" "max_connections" {

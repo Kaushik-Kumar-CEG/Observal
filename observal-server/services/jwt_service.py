@@ -43,6 +43,11 @@ def create_access_token(
 
     now = datetime.now(UTC)
     expires_delta = timedelta(minutes=expires_in_minutes or ds.get_sync_int("jwt.access_token_expire_minutes", 60))
+    if client_id == MOBILE_CLIENT_ID:
+        # Android's accepted mobile grant allows at most 24 hours. Do not
+        # inherit an operator's longer desktop/CLI JWT setting or lengthen the
+        # signed original refresh-family deadline. Desktop lifetimes are separate.
+        expires_delta = min(expires_delta, timedelta(hours=24))
     if expires_at is not None:
         expires_delta = min(expires_delta, expires_at - now)
         if expires_delta.total_seconds() < 1:

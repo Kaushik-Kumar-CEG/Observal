@@ -8,6 +8,44 @@
 
 set -euo pipefail
 
+# Commit timestamps must be enabled at PostgreSQL BOOT. Migration 069 cannot
+# reconstruct old approval commits or revive expired ClickHouse source. Stop
+# before either fresh schema creation or any irreversible upgrade when a
+# managed service has a pending parameter change/restart.
+/app/.venv/bin/python -c '
+import asyncio
+from sqlalchemy import text
+from database import engine
+
+async def check():
+    try:
+        async with engine.connect() as conn:
+            row = (await conn.execute(text(
+                "SELECT setting, pending_restart FROM pg_settings WHERE name = :name"
+            ), {"name": "track_commit_timestamp"})).one_or_none()
+            if row is None or row.setting != "on" or row.pending_restart:
+                # Preserve ordinary installations on managed PostgreSQL that
+                # cannot enable this parameter. They remain mobile-ineligible;
+                # refuse init if mobile issuance was already enabled. A fresh
+                # schema defaults mobile.auth_enabled=false and stays closed.
+                has_config = await conn.scalar(text("SELECT to_regclass(:table_name) IS NOT NULL"),
+                                               {"table_name": "enterprise_config"})
+                enabled = (await conn.scalar(text(
+                    "SELECT value FROM enterprise_config WHERE key=:setting_name"
+                ), {"setting_name": "mobile.auth_enabled"})) == "true" if has_config else False
+                if enabled:
+                    raise SystemExit(
+                        "MOBILE_PG_COMMIT_CLOCK_UNAVAILABLE: mobile is enabled but PostgreSQL boot "
+                        "track_commit_timestamp is not effective; restart managed instance then retry init"
+                    )
+                print("MOBILE_PG_COMMIT_CLOCK_UNAVAILABLE: ordinary migration proceeds, mobile evidence "
+                      "stays Not recorded; do not enable mobile until PostgreSQL boot clock is on")
+    finally:
+        await engine.dispose()
+
+asyncio.run(check())
+'
+
 # The v1 Alembic baseline is intentionally empty: new installations use the
 # current models to create the final empty schema. Running *historical* ADD
 # COLUMN migrations against that new schema fails. Crucially, an unversioned

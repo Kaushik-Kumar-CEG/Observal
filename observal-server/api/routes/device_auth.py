@@ -204,7 +204,16 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
             or parsed.path not in ("", "/")
         ):
             raise HTTPException(status_code=503, detail="Mobile verification origin not configured")
-        verification_origins = [f"{parsed.scheme}://{parsed.netloc}"]
+        try:
+            port = parsed.port
+            hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+        except (ValueError, UnicodeError, AttributeError) as exc:
+            raise HTTPException(status_code=503, detail="Mobile verification origin not configured") from exc
+        if ":" in hostname:
+            hostname = f"[{hostname}]"  # Canonical IPv6 authority, not a URL path.
+        suffix = f":{port}" if port and port != {"http": 80, "https": 443}[parsed.scheme] else ""
+        frontend_url = f"{parsed.scheme}://{hostname}{suffix}"
+        verification_origins = [frontend_url]
     device_code = secrets.token_urlsafe(48)
     user_code = _generate_user_code()
     normalized_code = _normalize_user_code(user_code)

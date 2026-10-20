@@ -524,35 +524,34 @@ async def capabilities(db: AsyncSession = Depends(get_db), viewer: User = Depend
     # The exact same barrier-bound cohort decision guards every data route.
     cohort = await active_mobile_cohort(db, viewer, server_id=str(server_id))
     live = cohort == "live"
-    author_viewer = cohort == "synthetic-author"
     test_only = cohort in ("synthetic-author", "synthetic-user")
     kinds: list[str] = []
     if test_only:
-        # The capability covers every authorized 1W/1M/3M reading, not just
-        # the current week. Use the longest accepted window with the same
-        # subject, scope and disposable actor allowlist as the data route;
-        # do not advertise a kind from another person's private activity.
+        # Capabilities cover every subject/scope/period this credential may
+        # request. A maintainer's own Author facts alone cannot describe an
+        # independently owned actor's User skill/hook facts. The 3M window is
+        # a superset of 1W/1M, with the *same* disposable actor restriction as
+        # each data route; no unauthorized private person is queried here.
         window = _window("3m")
-        observed = await trace_union(
-            db,
-            viewer.id,
-            "author" if author_viewer else "user",
-            str(DEFAULT_PROJECT_ID),
-            window.start,
-            window.end,
-            viewer_self=True,
-            actor_ids=await _synthetic_subjects(db, viewer),
-        )
-        if observed and observed["roots"] > 0:
-            kinds = [
-                kind
-                for key, kind in (
-                    ("calls", "mcp_calls"),
-                    ("skill_loads", "confirmed_skill_loads"),
-                    ("hook_runs", "recorded_hook_runs"),
+        subjects = await _synthetic_subjects(db, viewer)
+        seen: set[str] = set()
+        for subject_id in sorted(subjects or (), key=str):
+            for scope in ("author", "user"):
+                if not await _authorize(viewer, subject_id, scope, db):
+                    continue
+                observed = await trace_union(
+                    db,
+                    subject_id,
+                    scope,
+                    str(DEFAULT_PROJECT_ID),
+                    window.start,
+                    window.end,
+                    viewer_self=viewer.id == subject_id,
+                    actor_ids=subjects,
                 )
-                if observed.get(key, 0) > 0
-            ]
+                if observed and observed["roots"] > 0:
+                    seen.update(_observed_kinds(observed))
+        kinds = [kind for kind in ("mcp_calls", "confirmed_skill_loads", "recorded_hook_runs") if kind in seen]
         test_only = bool(kinds)
     return Capabilities(
         server_id=server_id,

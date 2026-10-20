@@ -117,6 +117,7 @@ services:
       -c effective_cache_size=384MB
       -c maintenance_work_mem=64MB
       -c random_page_cost=1.1
+      -c track_commit_timestamp=on
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:

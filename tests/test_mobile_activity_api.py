@@ -179,8 +179,9 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
         # capability's set must cover the longest accepted phone window,
         # using the exact same Author identity and disposable actor filter.
         async def split_period(_db, subject, scope, _project, start, end, **kwargs):
-            assert subject == viewer.id and scope == "author"
             assert kwargs["actor_ids"] == {viewer.id, other.id}
+            if subject != viewer.id or scope != "author":
+                return None
             if (end - start).days <= 7:
                 return {"roots": 1, "calls": 1, "skill_loads": 0, "hook_runs": 0, "days": 1}
             if (end - start).days <= 31:
@@ -194,8 +195,9 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
         assert_wire("Capabilities", different_kinds.json())
 
         async def older_only(_db, subject, scope, _project, start, end, **kwargs):
-            assert subject == viewer.id and scope == "author"
             assert kwargs["actor_ids"] == {viewer.id, other.id}
+            if subject != viewer.id or scope != "author":
+                return None
             if (end - start).days <= 7:
                 return None
             return {"roots": 1, "calls": 0, "skill_loads": 1, "hook_runs": 0, "days": 1}
@@ -250,6 +252,50 @@ async def test_synthetic_capability_requires_exact_server_viewer_ack_and_unblock
 
 
 @pytest.mark.asyncio
+async def test_synthetic_capability_includes_disjoint_authorized_cross_person_user_kinds(app, monkeypatch):
+    from api.routes import mobile_activity as activity
+    from services import mobile_read_control
+
+    api, viewer, other, db, _enabled = app
+    viewer.role = UserRole.super_admin
+    server = uuid.uuid4()
+    db.scalar.return_value = server
+    settings = {
+        "mobile.synthetic_test_enabled": "true",
+        "mobile.synthetic_test_ack": "isolated-disposable-synthetic-only-v1",
+        "mobile.synthetic_test_server_id": str(server),
+        "mobile.synthetic_test_viewer_id": str(viewer.id),
+        "mobile.synthetic_test_self_user_viewer_id": str(other.id),
+    }
+    monkeypatch.setattr(mobile_read_control, "synthetic_principals_valid", AsyncMock(return_value=True))
+    monkeypatch.setattr(activity.ds, "get", AsyncMock(side_effect=lambda key: settings.get(key, "")))
+    monkeypatch.setattr(
+        activity.ds,
+        "get_bool",
+        AsyncMock(side_effect=lambda key: key in ("mobile.auth_enabled", "mobile.synthetic_test_enabled")),
+    )
+    monkeypatch.setattr(mobile_read_control, "readable", AsyncMock(return_value=True))
+    calls = []
+
+    async def split_scopes(_db, subject, scope, _project, start, end, **kwargs):
+        calls.append((subject, scope, start, end))
+        assert kwargs["actor_ids"] == {viewer.id, other.id}
+        if subject == viewer.id and scope == "author":
+            return {"roots": 1, "calls": 1, "skill_loads": 0, "hook_runs": 0, "days": 1}
+        if subject == other.id and scope == "user" and (end - start).days > 7:
+            return {"roots": 1, "calls": 0, "skill_loads": 1, "hook_runs": 1, "days": 1}
+        return None
+
+    monkeypatch.setattr(activity, "trace_union", AsyncMock(side_effect=split_scopes))
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as c:
+        capabilities = await c.get("/api/v1/mobile-activity/v1/capabilities")
+        assert capabilities.status_code == 200
+        assert capabilities.json()["supported_kinds"] == ["mcp_calls", "confirmed_skill_loads", "recorded_hook_runs"]
+        assert capabilities.json()["synthetic_test_cohort"] is True
+    assert (other.id, "user") in {(subject, scope) for subject, scope, *_ in calls}
+
+
+@pytest.mark.asyncio
 async def test_synthetic_self_user_viewer_requires_exact_identity_source_and_denies_other_scopes(app, monkeypatch):
     from api.routes import mobile_activity as activity
     from services import mobile_read_control
@@ -261,6 +307,7 @@ async def test_synthetic_self_user_viewer_requires_exact_identity_source_and_den
     settings = {
         "mobile.synthetic_test_ack": "isolated-disposable-synthetic-only-v1",
         "mobile.synthetic_test_server_id": str(server),
+        "mobile.synthetic_test_enabled": "true",
         "mobile.synthetic_test_viewer_id": str(other.id),
         "mobile.synthetic_test_self_user_viewer_id": str(viewer.id),
     }

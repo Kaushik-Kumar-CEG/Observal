@@ -16,7 +16,7 @@ DOCKER_BUILDKIT=1 docker build -q -f docker/Dockerfile.api -t "$image" . >/dev/n
 digest=$(docker image inspect "$image" --format '{{.Id}}'); echo "LOCAL_IMAGE_ID=$digest"
 docker network create "$net" >/dev/null
 docker volume create "$keys" >/dev/null
-docker run -d --name "${id}pg" --network "$net" -e POSTGRES_USER=observal -e POSTGRES_PASSWORD=mobile-scratch-only -e POSTGRES_DB=observal postgres:18 postgres -c track_commit_timestamp=on >/dev/null
+docker run -d --name "${id}pg" --network "$net" -e POSTGRES_USER=observal -e POSTGRES_PASSWORD=mobile-scratch-only -e POSTGRES_DB=observal postgres:18 >/dev/null
 docker run -d --name "${id}ch" --network "$net" -e CLICKHOUSE_USER=observal -e CLICKHOUSE_PASSWORD=mobile-scratch-only -e CLICKHOUSE_DB=observal clickhouse/clickhouse-server:26.6 >/dev/null
 docker run -d --name "${id}redis" --network "$net" redis:7-alpine >/dev/null
 healthy=0
@@ -30,7 +30,28 @@ common=(--network "$net" --read-only --tmpfs /tmp:rw,nosuid,noexec,size=64m --mo
   -e "CLICKHOUSE_URL=http://observal:mobile-scratch-only@${id}ch:8123/observal" \
   -e "REDIS_URL=redis://${id}redis:6379" -e JWT_KEY_DIR=/data/keys -e MIGRATION_ARTIFACT_ROOT=/data/migration_artifacts \
   -e SEED_DEMO_ACCOUNTS=false -e SKIP_DDL_ON_STARTUP=true -e "SECRET_KEY=mobile-scratch-${id}-only")
+docker run --rm "${common[@]}" "$image" /app/entrypoint.sh > /tmp/mobile-two-api-clock-off.log 2>&1 || { tail -n 20 /tmp/mobile-two-api-clock-off.log; exit 1; }
+grep -q MOBILE_PG_COMMIT_CLOCK_UNAVAILABLE /tmp/mobile-two-api-clock-off.log
+[[ $(docker exec "${id}pg" psql -X -At -U observal -d observal -c 'SELECT version_num FROM alembic_version') == 069_mobile_publication_clock ]]
+echo 'PG_CLOCK_OFF_ORDINARY_INSTALL_SUCCEEDS_MOBILE_UNQUALIFIED=true'
+# Disposable fixture only: prove an existing installation with mobile enabled
+# cannot proceed to migration on a managed PostgreSQL server lacking the flag.
+docker exec "${id}pg" psql -X -q -U observal -d observal -c "INSERT INTO enterprise_config(id,key,value,updated_at) VALUES (gen_random_uuid(),'mobile.auth_enabled','true',clock_timestamp()) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value" >/dev/null
+[[ $(docker exec "${id}pg" psql -X -At -U observal -d observal -c "SELECT value FROM enterprise_config WHERE key='mobile.auth_enabled'") == true ]]
+if docker run --rm "${common[@]}" "$image" /app/entrypoint.sh > /tmp/mobile-two-api-enabled-clock-off.log 2>&1; then
+  echo 'ERROR: init accepted mobile-enabled off-clock database'; exit 1
+fi
+grep -q MOBILE_PG_COMMIT_CLOCK_UNAVAILABLE /tmp/mobile-two-api-enabled-clock-off.log
+echo 'PG_CLOCK_OFF_MOBILE_ENABLED_INIT_DENIED=true'
+docker rm -f "${id}pg" >/dev/null
+docker run -d --name "${id}pg" --network "$net" -e POSTGRES_USER=observal -e POSTGRES_PASSWORD=mobile-scratch-only -e POSTGRES_DB=observal postgres:18 postgres -c track_commit_timestamp=on >/dev/null
+for _ in $(seq 1 50); do docker exec "${id}pg" pg_isready -q -U observal && break; sleep 1; done
+[[ $(docker exec "${id}pg" psql -X -At -U observal -d observal -c 'SHOW track_commit_timestamp') == on ]]
 docker run --rm "${common[@]}" "$image" /app/entrypoint.sh > /tmp/mobile-two-api-init.log 2>&1 || { tail -n 30 /tmp/mobile-two-api-init.log; exit 1; }
+docker run --rm "${common[@]}" "$image" /app/.venv/bin/python -m services.mobile_boot_preflight > /tmp/mobile-two-api-preflight.json 2>&1 || true
+grep -q '"status": "MOBILE_NOT_CONFIGURED"' /tmp/mobile-two-api-preflight.json
+grep -q '"pg_commit_clock": "on"' /tmp/mobile-two-api-preflight.json
+echo 'READ_ONLY_OPERATOR_DIAGNOSTIC_NOT_CONFIGURED=true'
 for suffix in a b; do
   docker run -d --name "${id}api${suffix}" "${common[@]}" "$image" /app/.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1 >/dev/null
   [[ $(docker inspect "${id}api${suffix}" --format '{{.Image}}') == "$digest" ]]
@@ -53,7 +74,7 @@ async def main():
     init_key_manager(key_dir='/data/keys', key_password=None)
     async with AsyncClient(timeout=8, trust_env=False, headers={'user-agent':'observal-mobile-scratch/1'}) as http:
         for site in api:
-            for _ in range(80):
+            for _ in range(160):
                 try:
                     ready=await http.get(site.removesuffix('/api/v1')+'/readyz')
                     if ready.status_code==200 and all(ready.json().get(k)=='ok' for k in ('status','postgres','redis','clickhouse')): break

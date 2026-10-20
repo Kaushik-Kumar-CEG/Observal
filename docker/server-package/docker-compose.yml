@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-FileCopyrightText: 2026 Yash Gadgil <yashgadgil08@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 # Standalone Observal deployment — uses pre-built images from GHCR.
@@ -75,6 +76,7 @@ services:
 
   observal-db:
     image: postgres:18
+    command: ["postgres", "-c", "track_commit_timestamp=on"]
     group_add:
       - "${OBSERVAL_SECRET_GID:-1000}"
     ports:

@@ -259,6 +259,25 @@ async def test_mobile_sso_verification_origin_is_browser_initial_only(identity, 
 
 
 @pytest.mark.asyncio
+async def test_mobile_challenge_canonicalizes_explicit_default_https_port(identity, monkeypatch):
+    monkeypatch.setattr(
+        device_auth.ds,
+        "get",
+        AsyncMock(
+            side_effect=lambda key: "https://browser.example.test:443/" if key == "deployment.frontend_url" else ""
+        ),
+    )
+    challenge = await inspect.unwrap(device_auth.device_authorize)(
+        SimpleNamespace(headers={"host": "api.example.test", "x-forwarded-proto": "https"}),
+        DeviceAuthRequest(client_id=MOBILE_CLIENT_ID),
+        identity.db,
+    )
+    assert challenge.verification_origins == ["https://browser.example.test"]
+    assert challenge.verification_uri_complete.startswith("https://browser.example.test/device?code=")
+    assert "api.example.test" not in challenge.verification_uri_complete
+
+
+@pytest.mark.asyncio
 async def test_mobile_challenge_uses_shared_origin_not_other_workers_stale_sync_cache(identity, monkeypatch):
     monkeypatch.setattr(device_auth.ds, "get_sync", lambda _key, default=None: "http://localhost:3000")
     monkeypatch.setattr(
@@ -350,13 +369,19 @@ async def test_initial_mobile_family_and_first_access_are_capped_despite_long_gl
         return original(key, default)
 
     monkeypatch.setattr(auth.ds, "get_sync_int", long_setting)
-    access, refresh, _ = await auth._issue_tokens(identity.user, client_id=MOBILE_CLIENT_ID, device_id="long-config")
+    access, refresh, issued = await auth._issue_tokens(
+        identity.user, client_id=MOBILE_CLIENT_ID, device_id="long-config"
+    )
+    assert 1 <= issued <= 24 * 3600
+    assert decode_access_token(access, allow_mobile=True)["exp"] - int(datetime.now(UTC).timestamp()) <= 24 * 3600
     deadline = decode_refresh_token(refresh)["exp"]
     assert deadline - int(datetime.now(UTC).timestamp()) <= 30 * 86400
     assert decode_access_token(access, allow_mobile=True)["exp"] <= deadline
     assert identity.redis._ttls[f"refresh_jti:{decode_refresh_token(refresh)['jti']}"] <= 30 * 86400
     # Desktop remains on its independently configured lifetime.
-    _, desktop_refresh, _ = await auth._issue_tokens(identity.user)
+    desktop_access, desktop_refresh, desktop_issued = await auth._issue_tokens(identity.user)
+    assert desktop_issued > 24 * 3600
+    assert decode_access_token(desktop_access)["exp"] - int(datetime.now(UTC).timestamp()) > 24 * 3600
     assert decode_refresh_token(desktop_refresh)["exp"] - int(datetime.now(UTC).timestamp()) >= 89 * 86400
 
 
@@ -374,6 +399,7 @@ async def test_mobile_rotation_keeps_original_family_deadline_and_bounds_access(
             SimpleNamespace(headers={}), RefreshRequest(refresh_token=first), identity.db
         )
         rotated = decode_refresh_token(pair.refresh_token)
+        assert 1 <= pair.expires_in <= 24 * 3600
         assert rotated["exp"] == original
         assert decode_access_token(pair.access_token, allow_mobile=True)["exp"] <= original
         assert (

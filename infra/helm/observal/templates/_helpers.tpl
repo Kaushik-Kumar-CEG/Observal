@@ -1,6 +1,7 @@
 {{/*
 SPDX-FileCopyrightText: 2026 Ravi Chopra <shivamchopra1234567890@gmail.com>
 # SPDX-FileCopyrightText: 2026 amogh-dongre <amoghdongre16@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 SPDX-License-Identifier: Apache-2.0
 */}}
 
@@ -166,8 +167,18 @@ Standard initContainer: wait for Redis readiness.
 {{- end }}
 
 {{/*
-Standard initContainer: wait for init Job completion.
-Polls the Job's succeeded count via the K8s API using the init ServiceAccount.
+A distinct persistent init Job per reviewed API image avoids immutable pod-template
+patches on Helm upgrade and lets replacement pods verify that image's migrations.
+Never reuse mutable image tags; cleanup of obsolete successful Jobs is explicit.
+*/}}
+{{- define "observal.initJobName" -}}
+{{- $image := include "observal.image" (dict "global" .Values.global "image" .Values.api.image "appVersion" .Chart.AppVersion) -}}
+{{- printf "%s-init-%s" (include "observal.fullname" . | trunc 43 | trimSuffix "-") (sha256sum $image | trunc 12) -}}
+{{- end }}
+
+{{/*
+Standard initContainer: wait for exact image init Job completion.
+Polls its retained Job's succeeded count via the K8s API.
 */}}
 {{- define "observal.initWaitInitJob" -}}
 - name: wait-for-init
@@ -177,13 +188,30 @@ Polls the Job's succeeded count via the K8s API using the init ServiceAccount.
     - sh
     - -c
     - |
-      JOB="{{ include "observal.fullname" . }}-init"
+      JOB="{{ include "observal.initJobName" . }}"
       NS="{{ .Release.Namespace }}"
       echo "Waiting for init Job $JOB to complete..."
       until [ "$(kubectl get job $JOB -n $NS -o jsonpath='{.status.succeeded}' 2>/dev/null)" = "1" ]; do
         echo "  init Job not yet succeeded, retrying in 5s..."; sleep 5;
       done
       echo "Init Job completed."
+{{- end }}
+
+{{/*
+An old retained Job status is not proof after a PostgreSQL snapshot restore.
+Each new API/worker pod checks the schema in its own immutable image. For
+mobile-enabled installations, it also checks the effective commit clock.
+*/}}
+{{- define "observal.initVerifySchema" -}}
+- name: verify-mobile-schema
+  image: {{ include "observal.image" (dict "global" .Values.global "image" .Values.api.image "appVersion" .Chart.AppVersion) }}
+  imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+  command: ["/app/.venv/bin/python", "-m", "services.mobile_boot_preflight", "--require-schema"]
+  envFrom:
+    - configMapRef:
+        name: {{ include "observal.configMapName" . }}
+    - secretRef:
+        name: {{ include "observal.secretName" . }}
 {{- end }}
 
 {{/*
