@@ -1,7 +1,9 @@
 <!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Mobile session lifecycle — immutable pre-Flare source handoff; PAUSE
+# Historical pre-069 mobile session lifecycle receipt — PAUSE
+
+**Superseded for RC20 runtime selection:** source `3df29663a902779a812d6171e53e5a780a23693f` lacks 069 publication commit-time and hook ordering safeguards. Its bounded evidence remains historical only; current local candidate runtime `ba7101abd601a5447c31e14683cfeedfcfa7278f`, still pending accountable human approval, is documented in `PRE_FLARE_RC20_070_RECEIPT.md`. Do not deploy the old source or treat either local candidate as Android READY.
 
 **Decision: NOT backend READY; no protected reads, cohort opening, Android READY, PR, merge or deployment is authorized by this receipt.** This receipt supersedes `PRE_FLARE_068_RECEIPT.md` **only as the current source pin for a separately authorized refresh rehearsal**; every 068 privacy, source-qualification, scoped-viewer, trace-first and immutable wire gate remains. The public 062 instance, dev, production and other operators' running containers were not touched. Do not treat a disposable image ID as a registry digest or proof that any Flare instance runs this code.
 

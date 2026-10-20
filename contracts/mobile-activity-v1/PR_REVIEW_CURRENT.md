@@ -1,7 +1,9 @@
 <!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Human-review PR worksheet — DO NOT MERGE, NOT A SUBMITTED PR
+# Historical 068 human-review worksheet — DO NOT MERGE, NOT A SUBMITTED PR
+
+**Superseded for RC20 lifecycle review:** use `HUMAN_REVIEW_070.md` and final runtime `ba7101abd601a5447c31e14683cfeedfcfa7278f` for review; the 068 candidate below lacks scoped-refresh and 069 publication/hook privacy repairs. Human decision remains PENDING; no PR or merge was authorized.
 
 **Current 068 overlay (supersedes the historical 067 numbers/instructions below):** Code runtime `2e91bef22a60200520d4f8436c0af7b59342f441` adds a fix-forward erasure epoch/receipt/cursor fence and resolves Android's observed synthetic 1W versus 1M/3M supported-kind mismatch without changing access or the accepted v1.2 bytes. `PRE_FLARE_068_RECEIPT.md` is the authoritative current test/NO-GO record. The 067 pin `c8ca95a1…` must **not** be deployed for the controlled 068 rehearsal. Accountable human whole-branch privacy/security review, separately invoked legacy server/CLI failures, instance-bound receipt, deployment and Android READY remain open. No PR was created.
 
