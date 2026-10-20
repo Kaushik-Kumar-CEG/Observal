@@ -1,7 +1,9 @@
 <!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# 068 pre-Flare receipt — source only, closed gate, NOT Android READY
+# Historical 068 pre-Flare receipt — source only, closed gate, NOT Android READY
+
+**Superseded for RC20 lifecycle/runtime selection.** This receipt preserves 068 historical local tests, **not** an actionable 068 deployment proposal. Do not deploy `2e91bef22a60200520d4f8436c0af7b59342f441` for persistent Android sessions. Locally tested 069 source `ba7101abd601a5447c31e14683cfeedfcfa7278f` remains BLOCKED on human review and distinct owner decisions; use `PRE_FLARE_RC20_070_RECEIPT.md` for the current gate. The older diagnostic-deployment possibility described below is historical only.
 
 **Decision: NO-GO for cohort, protected Android reads, PR/merge, or product acceptance.** This is a reviewable candidate for **one separately authorized, closed-gate diagnostic deployment**, not authorization to deploy over an existing instance. The accountable human must review the *whole* branch and the known separately invoked test failures before approving even a PR or candidate deploy. Obtain the candidate-only redacted, instance-bound read-only receipt in `FLARE_OPERATOR_RECEIPT.md` first. The public `mobile-rc-062.observal.io` remains an older, unverified candidate; never substitute DNS or `/readyz` for a running-source/store receipt.
 
