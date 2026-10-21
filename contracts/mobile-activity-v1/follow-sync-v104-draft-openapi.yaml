@@ -11,13 +11,24 @@ info:
     the server rejects an increment at the limit, never wraps or rounds. All POST
     bodies are at most 4096 UTF-8 bytes BEFORE parsing. No authenticated redirects.
     DRAFT owner-policy quota: <=1000 distinct subjects per generation, fixed
-    page 100 (<=10 pages). One owner/project/cohort shared snapshot+export image
-    plus one fixed-upper change lease, <=2000 pinned rows and <=1 MiB reserved
-    logical bytes including metadata; reserve atomically before page one OR first
-    429. Equivalent cursorless requests reuse the owner lease across devices
-    and lost first 429. Non-equivalent change readers receive snapshot_required
-    and use the shared full image; unsatisfiable reservation returns recoverable
-    503 before first page, never endless 429 or premature eviction. Fixed 15min
+    page 100 (<=10 pages). Per owner/project/cohort at most TWO snapshot/export
+    images plus TWO fixed-upper change leases, <=4000 pinned rows, <=2 MiB
+    reserved logical pinned bytes and <=16 MiB rolling 90d retained write
+    history. Each approved device holds at most one per purpose; two devices
+    with different R can both progress. Equivalent cursorless requests reuse
+    their image/lease even after lost first 429, with independent device auth.
+    Non-equivalent third change reader uses a fresh snapshot slot or bounded
+    503 until <=15min expiry, never endless stale image->change loop.
+    10000 durably admitted normal 200 OR 409 outcomes/90d + 1000 reserved
+    successful active unfollows cap one-subject churn and conflict-ID floods.
+    Privacy remove/withdraw share <=1000 durably indexed nonce/status receipts
+    per rolling 90d plus ONE current state-only recovery slot per owner. At
+    saturation still fence and erase; state_only 202 may be queried while
+    current, then an overwritten lost 202 needs audited review, not a false
+    completed erasure or unbounded receipt retention.
+    Redacted history_capacity_reached is PRE-ADMISSION: no persisted ID/outcome,
+    no 90d replay guarantee, no automatic retry of the old intent. Remove/withdraw/DSR erasure and revoke still succeed.
+    Unsatisfiable reservation returns 503 before first page or first 429. Fixed 15min
     lease; erasure/withdrawal immediately purges. At most one 429 per page
     (Retry-After <=60s; read_lease_id + retry_cursor even on first 429), then
     <=5s healthy processing. Incomplete pages have exactly 100 rows. Deltas
@@ -60,7 +71,7 @@ paths:
     post:
       operationId: explicitlyOptInAfterDisclosure
       security: [{browserBearer: []}]
-      description: Authenticated same-owner browser/desktop bearer; mobile read bearer CANNOT re-enable consent. Browser UI must display disclosure; a bearer alone cannot cryptographically prove the UI was viewed. Only consent_required state accepts a new consent_id. Already available plus another ID returns 409 consent_already_available, never increments generation or deletes follows. Stale pre-withdrawal retry is rejected; identical same-generation retries are idempotent.
+      description: Authenticated same-owner browser/desktop bearer; mobile read bearer CANNOT re-enable consent. Browser UI must display disclosure; a bearer alone cannot cryptographically prove the UI was viewed. Only consent_required state accepts a new consent_id. Already available plus another ID returns 409 consent_already_available, never increments generation or deletes follows. Stale pre-withdrawal retry is rejected; identical accepted same-generation retries are idempotent. At most 1000 accepted consent IDs/owner/project/cohort over rolling 90d; a new ID at capacity is pre-admission redacted 409 consent_capacity_reached, no grant or stored ID. Withdrawal and erasure are never blocked.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ConsentRequest'}}}}
       responses:
         '200': {description: "Owner-wide consent", content: {application/json: {schema: {$ref: '#/components/schemas/ConsentState'}}}}
@@ -181,8 +192,10 @@ paths:
       security: [{followWrite: []}]
       description: >-
         One subject only. Compare account owner_generation AND person revision
-        transactionally under owner/subject locks. Store op outcome >=90 days;
-        same ID/body in current generation replays identical status and JSON.
+        transactionally under owner/subject locks. Store DURABLY ADMITTED 200/409 outcome >=90 days within the owner history
+        budget; same admitted ID/body in current generation replays status and
+        JSON. Pre-admission history_capacity_reached stores no ID/result and
+        needs a new explicit choice/ID after quota recovers.
         Superseded generations never reapply a prior result after removal. An old
         write JWT is denied 401 before parsing the body; a NEW current write
         grant presenting an old-generation body is rejected 409.
@@ -299,7 +312,7 @@ components:
     Availability:
       type: object
       additionalProperties: false
-      required: [version, state, server_id, project_id, viewer_id, cohort, owner_generation, current_revision, max_page_size, max_distinct_subjects, max_pinned_logical_bytes, read_lease_seconds, offline_horizon_days]
+      required: [version, state, server_id, project_id, viewer_id, cohort, owner_generation, current_revision, max_page_size, max_distinct_subjects, max_read_leases, max_pinned_logical_bytes, max_retained_history_logical_bytes, max_normal_edits_90d, max_protected_unfollows_90d, read_lease_seconds, offline_horizon_days]
       properties:
         version: {type: string, const: '1.0.4'}
         state: {type: string, enum: [available, disabled, consent_required, restricted, withdrawal_pending]}
@@ -311,7 +324,11 @@ components:
         current_revision: {$ref: '#/components/schemas/UnsignedSafeInt'}
         max_page_size: {type: integer, const: 100}
         max_distinct_subjects: {type: integer, const: 1000}
-        max_pinned_logical_bytes: {type: integer, const: 1048576}
+        max_read_leases: {type: integer, const: 4}
+        max_pinned_logical_bytes: {type: integer, const: 2097152}
+        max_retained_history_logical_bytes: {type: integer, const: 16777216}
+        max_normal_edits_90d: {type: integer, const: 10000}
+        max_protected_unfollows_90d: {type: integer, const: 1000}
         read_lease_seconds: {type: integer, const: 900}
         offline_horizon_days: {type: integer, const: 30}
     BrowserConsentState:
@@ -347,11 +364,12 @@ components:
     WithdrawalState:
       type: object
       additionalProperties: false
-      required: [withdrawal_id, owner_generation, state]
+      required: [withdrawal_id, owner_generation, state, recovery_mode]
       properties:
         withdrawal_id: {type: string, format: uuid}
         owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
         state: {type: string, enum: [pending, needs_operator, completed]}
+        recovery_mode: {type: string, enum: [nonce_lookup_90d, state_only]}
     WriteApprovalChallenge:
       type: object
       additionalProperties: false
@@ -479,7 +497,7 @@ components:
       additionalProperties: false
       required: [error, operation_id, owner_generation]
       properties:
-        error: {type: string, enum: [generation_conflict, subject_erased, operation_id_reused, capacity_reached, revision_exhausted]}
+        error: {type: string, enum: [generation_conflict, subject_erased, operation_id_reused, capacity_reached, history_capacity_reached, revision_exhausted]}
         operation_id: {type: string, format: uuid}
         owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
     SupersededOperation:
@@ -549,12 +567,13 @@ components:
     RemovalState:
       type: object
       additionalProperties: false
-      required: [removal_id, state, owner_generation, revision]
+      required: [removal_id, state, owner_generation, revision, recovery_mode]
       properties:
         removal_id: {type: string, format: uuid}
         state: {type: string, enum: [pending, needs_operator, completed]}
         owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
         revision: {$ref: '#/components/schemas/UnsignedSafeInt'}
+        recovery_mode: {type: string, enum: [nonce_lookup_90d, state_only]}
     PageRetry:
       type: object
       additionalProperties: false
@@ -568,14 +587,14 @@ components:
       additionalProperties: false
       required: [error]
       properties:
-        error: {type: string, maxLength: 64, enum: [invalid_request, unauthorized, restricted, stale_snapshot, snapshot_required, generation_conflict, consent_already_available, subject_erased, revision_exhausted, unknown_operation, dedup_expired, unknown_removal, unknown_withdrawal, removal_pending, withdrawal_pending, unsupported_project, unavailable, rate_limited, too_large]}
+        error: {type: string, maxLength: 64, enum: [invalid_request, unauthorized, restricted, stale_snapshot, snapshot_required, generation_conflict, consent_already_available, consent_capacity_reached, subject_erased, revision_exhausted, history_capacity_reached, unknown_operation, dedup_expired, unknown_removal, unknown_withdrawal, removal_pending, withdrawal_pending, unsupported_project, unavailable, rate_limited, too_large]}
   responses:
     Invalid: {description: "Strict malformed/overflow/noncanonical number; no private IDs", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     Unauthorized: {description: "Wrong/expired/revoked audience", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     Restricted: {description: "Wrong owner/cohort/consent or unsupported project ID >256 chars; no echo", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     Conflict: {description: "Generation/snapshot/consent state conflict; no private ID", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     TooLarge: {description: "Body >4096 UTF-8 bytes before parsing", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
-    RateLimited: {description: "Fair account/device rate on non-paged routes", headers: {Retry-After: {schema: {type: integer, minimum: 1, maximum: 60}}}, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
-    LeasedRateLimited: {description: "First request reserves durable lease BEFORE 429 and returns retry_cursor for SAME pinned lease. Later 429 returns same cursor; at most one 429 per keyset; no renewal of fixed 15-minute lease.", headers: {Retry-After: {schema: {type: integer, minimum: 1, maximum: 60}}}, content: {application/json: {schema: {$ref: '#/components/schemas/PageRetry'}}}}
+    RateLimited: {description: "Fair account/device rate on non-paged routes", headers: {Retry-After: {required: true, schema: {type: integer, minimum: 1, maximum: 60}}}, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    LeasedRateLimited: {description: "First request reserves durable lease BEFORE 429 and returns retry_cursor for SAME pinned lease. Later 429 returns same cursor; at most one 429 per keyset; no renewal of fixed 15-minute lease.", headers: {Retry-After: {required: true, schema: {type: integer, minimum: 1, maximum: 60}}}, content: {application/json: {schema: {$ref: '#/components/schemas/PageRetry'}}}}
     Unavailable: {description: "Stale min_revision image, temporary reservation shortage, barrier, Redis, offline or pending erasure. Retry-After is a bounded hint, NOT authority; retry may fail closed again. Stale shared image expires in <=15 minutes, not indefinite 429.", headers: {Retry-After: {required: true, schema: {type: integer, minimum: 1, maximum: 60}}}, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     Unknown: {description: "Unknown owned ID only", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}

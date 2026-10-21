@@ -171,7 +171,16 @@ def test_bounded_owner_wide_lease_reuse_and_historical_ack_draft():
         == 10000
     )
     assert by["phone_b_concurrent_export_reuses_phone_a_image"]["owner_pinned_images"] == 1
-    assert by["non_equivalent_phone_b_changes_use_shared_snapshot_fallback"]["body"]["error"] == "snapshot_required"
+    assert (
+        by["phone_b_cursorless_after_phone_a_lost_first_429_reuses_exact_image"]["body"]["read_lease_id"]
+        == snap["body"]["read_lease_id"]
+    )
+    assert by["capacity_page_at_899_seconds_remains_valid"]["status"] == 200
+    assert by["capacity_lease_at_900_seconds_never_promotes_partial"]["status"] == 409
+    assert (
+        by["third_device_after_two_distinct_change_slots_uses_snapshot_fallback"]["body"]["error"]
+        == "snapshot_required"
+    )
     assert by["fresh_lease_budget_exhausted_before_first_429"]["status"] == 503
     assert by["owner_budget_released_at_15min_next_first_request_recovers"]["status"] == 200
     assert by["capacity_snapshot_page_10_after_one_retry"]["elapsed_seconds"] == 10 * (60 + 5) < 900
@@ -180,12 +189,65 @@ def test_bounded_owner_wide_lease_reuse_and_historical_ack_draft():
     assert by["capacity_changes_first_page_pins_fixed_upper"]["oldest_delta_age_days_at_admission"] == 89
     assert by["delta_older_than_89_days_falls_back_before_admission"]["status"] == 409
     assert by["availability_current_revision_after_phone_b_unfollow"]["body"]["current_revision"] == 2
-    assert by["stale_shared_image_rev1_rejected_for_phone_b_min_rev2"]["status"] == 503
+    assert by["both_snapshot_slots_full_old_min_rev2_waits_bounded"]["status"] == 503
+    assert by["phone_b_min_rev2_uses_second_free_snapshot_slot_immediately"]["status"] == 200
+    assert (
+        by["two_checkpoint_phone_a_changes_pins_upper_1000"]["body"]["read_lease_id"]
+        != by["two_checkpoint_phone_b_changes_pins_newer_upper_1001"]["body"]["read_lease_id"]
+    )
+    assert by["two_checkpoint_phone_a_completes_without_b_starvation"]["body"]["revision"] == 1000
+    assert by["two_checkpoint_phone_b_completes_at_newer_upper"]["body"]["revision"] == 1001
     fresh = by["stale_lease_expired_new_image_proves_rev2_unfollow"]
     assert fresh["status"] == 200 and fresh["body"]["revision"] == 2 and fresh["body"]["complete"] is True
     assert by["history_a_lost_200_lookup_historical_not_synced"]["body"]["effective"] is True
     assert "NOT_following" in by["history_a_complete_delta_reconciles_after_lost_200"]["client_result"]
     assert by["history_a_full_snapshot_rev2_confirms_not_following"]["body"]["complete"] is True
+    assert by["same_subject_two_phones_10000_edits_retention_cap"]["body"]["error"] == "history_capacity_reached"
+    assert by["one_subject_9999_distinct_conflict_ids_consume_budget"]["body"]["error"] == "person_conflict"
+    assert (
+        by["one_subject_10001st_new_conflict_id_pre_admission_redacted"]["body"]["error"] == "history_capacity_reached"
+    )
+    assert by["one_subject_pre_admission_refusal_has_no_stored_status"]["status"] == 404
+    flood = by["100000_unique_stale_base_ids_one_subject_rejected_beyond_10000_retained"]
+    assert (
+        flood["distinct_operation_ids_submitted"],
+        flood["admitted_outcomes"],
+        flood["pre_admission_refusals"],
+        flood["distinct_subjects"],
+    ) == (100_000, 10_000, 90_000, 1)
+    assert flood["body"]["error"] == "history_capacity_reached"
+    assert (
+        by["1001st_reconsent_id_pre_admission_denied_privacy_actions_still_allowed"]["body"]["error"]
+        == "consent_capacity_reached"
+    )
+    assert by["history_budget_90day_expiry_recovery_new_explicit_ID"]["status"] == 200
+    assert by["history_saturated_protected_unfollow_succeeds"]["status"] == 200
+    assert by["history_saturated_remove_all_not_blocked"]["status"] == 202
+    assert by["history_saturated_withdrawal_not_blocked"]["status"] == 202
+    assert by["removal_receipts_full_1001st_erasure_uses_current_slot"]["body"]["recovery_mode"] == "state_only"
+    assert by["current_slot_202_lost_lookup_while_pending"]["body"]["state"] == "pending"
+    assert by["state_only_removal_superseded_lost_202_lookup_unknown"]["status"] == 404
+    assert by["withdrawal_receipts_full_still_revokes_and_erases"]["body"]["recovery_mode"] == "state_only"
+    local = by["local_1001_follow_entries_never_trimmed"]
+    assert (local["local_encrypted_count"], local["explicitly_selected_import_count"], local["local_only_count"]) == (
+        1001,
+        1000,
+        1,
+    )
+    assert by["local_1001st_import_is_denied_without_deleting_local"]["body"]["error"] == "capacity_reached"
+    assert by["partial_snapshot_after_24h_must_restart_without_implicit_write"]["status"] == 409
+    assert by["offline_day_30_old_mobile_proof_denied"]["status"] == 401
+    assert by["owner_erasure_invalidates_all_two_phone_pinned_images"]["status"] == 403
+    availability = SPEC["components"]["schemas"]["Availability"]["properties"]
+    for name in ("RemovalState", "WithdrawalState"):
+        schema = SPEC["components"]["schemas"][name]
+        assert "recovery_mode" in schema["required"]
+        assert set(schema["properties"]["recovery_mode"]["enum"]) == {"nonce_lookup_90d", "state_only"}
+    assert availability["max_read_leases"]["const"] == 4
+    assert availability["max_pinned_logical_bytes"]["const"] == 2 * 1024 * 1024
+    assert availability["max_normal_edits_90d"]["const"] == 10_000
+    assert availability["max_protected_unfollows_90d"]["const"] == 1000
+    assert availability["max_retained_history_logical_bytes"]["const"] > 11_000 * 2 * 512
     for error in ("subject_erased", "generation_conflict"):
         assert by[f"{error}_409_redacted_no_person_fields"]["body"]["error"] == error
         for key in ("revision", "person_revision", "current_following"):
@@ -203,6 +265,10 @@ def test_yaml_parsed_shape_has_no_phantom_null_description_keys():
                 visit(child)
 
     visit(SPEC)
+    for name, definition in SPEC["components"]["schemas"].items():
+        jsonschema.Draft202012Validator.check_schema(definition)
+        if definition.get("type") == "object" and name not in {"OperationConflict"}:
+            assert definition.get("additionalProperties") is False, name
     assert set(SPEC["components"]["parameters"]["PageLimit"]) == {"name", "in", "required", "schema", "description"}
     assert set(SPEC["components"]["parameters"]["Cursor"]) == {"name", "in", "required", "schema", "description"}
     for name in ("SnapshotPage", "ChangesPage"):
@@ -216,6 +282,17 @@ def test_yaml_parsed_shape_has_no_phantom_null_description_keys():
     for item in SPEC["components"]["responses"].values():
         assert set(item) <= {"description", "content", "headers"}
         assert isinstance(item["description"], str)
+    assert set(SPEC["components"]["schemas"]["RedactedOperationConflict"]["properties"]) == {
+        "error",
+        "operation_id",
+        "owner_generation",
+    }
+    for branch in ("PersonConflict", "RedactedOperationConflict"):
+        assert SPEC["components"]["schemas"][branch]["additionalProperties"] is False
+    for key in ("LeasedRateLimited", "RateLimited"):
+        rate = SPEC["components"]["responses"][key]
+        assert rate["headers"]["Retry-After"]["required"] is True
+        assert rate["headers"]["Retry-After"]["schema"] == {"type": "integer", "minimum": 1, "maximum": 60}
     unavailable = SPEC["components"]["responses"]["Unavailable"]
     assert unavailable["headers"]["Retry-After"]["required"] is True
     assert unavailable["headers"]["Retry-After"]["schema"] == {"type": "integer", "minimum": 1, "maximum": 60}
@@ -231,6 +308,40 @@ def test_yaml_parsed_shape_has_no_phantom_null_description_keys():
             }, (path, method)
             for response in operation["responses"].values():
                 assert set(response) <= {"description", "content", "headers", "$ref"}
+
+
+def test_pagination_and_redacted_outcome_schemas_reject_contradictory_responses():
+    by = {case["name"]: case for case in VECTORS["cases"]}
+    for name, kind, field in (
+        ("capacity_snapshot_page_1_not_authoritative", "SnapshotPage", "items"),
+        ("capacity_changes_first_page_pins_fixed_upper", "ChangesPage", "changes"),
+    ):
+        original = by[name]["body"]
+        validator = jsonschema.Draft202012Validator(
+            {"$ref": SPEC_URI + "#/components/schemas/" + kind},
+            registry=REGISTRY,
+            format_checker=jsonschema.FormatChecker(),
+        )
+        assert validator.is_valid(original)
+        one_row_incomplete = json.loads(json.dumps(original))
+        one_row_incomplete[field] = one_row_incomplete[field][:1]
+        assert not validator.is_valid(one_row_incomplete)
+        inconsistent_complete = json.loads(json.dumps(original))
+        inconsistent_complete["complete"] = True  # Must not also return a cursor.
+        assert not validator.is_valid(inconsistent_complete)
+        extra_key = json.loads(json.dumps(original))
+        extra_key["unexpected_private_key"] = None
+        assert not validator.is_valid(extra_key)
+    conflict = jsonschema.Draft202012Validator(
+        {"$ref": SPEC_URI + "#/components/schemas/OperationConflict"},
+        registry=REGISTRY,
+        format_checker=jsonschema.FormatChecker(),
+    )
+    redacted = by["subject_erased_409_redacted_no_person_fields"]["body"]
+    assert conflict.is_valid(redacted)
+    for private_field in ("subject_id", "revision", "person_revision", "current_following"):
+        bad = {**redacted, private_field: None}
+        assert not conflict.is_valid(bad), private_field
 
 
 def _android_accepts_outcome(body: dict, requested_operation_id: str) -> bool:
@@ -319,7 +430,7 @@ def test_proposal_vectors_match_strict_request_and_response_schemas(case):
         return
     if "$ref" in response:
         response = SPEC["components"]["responses"][response["$ref"].split("/")[-1]]
-    if case["status"] == 503:
+    if case["status"] in (429, 503):
         assert response["headers"]["Retry-After"]["required"] is True
         assert 1 <= int(case["headers"]["Retry-After"]) <= 60
     for body, schema in (
