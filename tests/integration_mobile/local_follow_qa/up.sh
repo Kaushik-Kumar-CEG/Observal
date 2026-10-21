@@ -39,30 +39,49 @@ printf '%s\n' 'subjectAltName=DNS:localhost' 'extendedKeyUsage=serverAuth' 'keyU
 openssl x509 -req -in "$run/leaf.csr" -CA "$run/ca.crt" -CAkey "$run/ca.key" -CAcreateserial \
     -out "$run/leaf.crt" -days 2 -sha256 -extfile "$run/leaf.ext" >/dev/null 2>&1
 # Random loopback-published ports, no named volumes. docker rm -v destroys all disposable data.
-docker run -d --name "${id}pg" -p 127.0.0.1::5432 -e POSTGRES_USER=followqa \
+docker run -d --name "${id}pg" --label "observal.followqa.owner=$id" -p 127.0.0.1::5432 -e POSTGRES_USER=followqa \
     -e POSTGRES_PASSWORD=disposable-follow-qa -e POSTGRES_DB=followqa postgres:18 \
     postgres -c track_commit_timestamp=on >/dev/null
-docker run -d --name "${id}redis" -p 127.0.0.1::6379 redis:7-alpine >/dev/null
+docker run -d --name "${id}redis" --label "observal.followqa.owner=$id" -p 127.0.0.1::6379 redis:7-alpine >/dev/null
+docker run -d --name "${id}ch" --label "observal.followqa.owner=$id" -p 127.0.0.1::8123 \
+    -e CLICKHOUSE_USER=followqa -e CLICKHOUSE_PASSWORD=disposable-follow-qa \
+    -e CLICKHOUSE_DB=followqa clickhouse/clickhouse-server:26.6 >/dev/null
 pgport=$(docker port "${id}pg" 5432/tcp | awk -F: '{print $NF}')
 redisport=$(docker port "${id}redis" 6379/tcp | awk -F: '{print $NF}')
-for _ in {1..60}; do docker exec "${id}pg" pg_isready -q -U followqa && docker exec "${id}redis" redis-cli ping 2>/dev/null | grep -q PONG && break; sleep 1; done
+chport=$(docker port "${id}ch" 8123/tcp | awk -F: '{print $NF}')
+for _ in {1..60}; do
+    if docker exec "${id}pg" pg_isready -q -U followqa && \
+        docker exec "${id}redis" redis-cli ping 2>/dev/null | grep -q PONG && \
+        docker exec "${id}ch" clickhouse-client --user followqa --password disposable-follow-qa \
+            --query 'SELECT 1' >/dev/null 2>&1; then break; fi
+    sleep 1
+done
 docker exec "${id}pg" pg_isready -q -U followqa
 docker exec "${id}redis" redis-cli ping | grep -q PONG
+docker exec "${id}ch" clickhouse-client --user followqa --password disposable-follow-qa --query 'SELECT 1' >/dev/null
 export DATABASE_URL="postgresql+asyncpg://followqa:disposable-follow-qa@127.0.0.1:$pgport/followqa"
 export REDIS_URL="redis://127.0.0.1:$redisport/0"
-export SECRET_KEY="$(openssl rand -hex 32)" JWT_KEY_DIR="$run/jwt" SEED_DEMO_ACCOUNTS=false SKIP_DDL_ON_STARTUP=true
+export CLICKHOUSE_URL="http://followqa:disposable-follow-qa@127.0.0.1:$chport/followqa"
+SECRET_KEY=$(openssl rand -hex 32)
+export SECRET_KEY JWT_KEY_DIR="$run/jwt" SEED_DEMO_ACCOUNTS=false SKIP_DDL_ON_STARTUP=true
 # Neither the parent shell nor a server .env may inject production service URLs or tokens.
 isolated() {
     env -i PATH="$PATH" HOME="$HOME" LANG="${LANG:-C.UTF-8}" PYTHONPATH="$PWD" DATABASE_URL="$DATABASE_URL" \
-        REDIS_URL="$REDIS_URL" CLICKHOUSE_URL=http://127.0.0.1:9/unused \
+        REDIS_URL="$REDIS_URL" CLICKHOUSE_URL="$CLICKHOUSE_URL" \
         SECRET_KEY="$SECRET_KEY" JWT_KEY_DIR="$JWT_KEY_DIR" QA_PASSWORD="${QA_PASSWORD:-}" \
-        MOBILE_FOLLOW_LOCAL_QA=1 SEED_DEMO_ACCOUNTS=false SKIP_DDL_ON_STARTUP=true "$@"
+        MOBILE_FOLLOW_LOCAL_QA=1 MOBILE_FOLLOW_QA_OWNER="$id" SEED_DEMO_ACCOUNTS=false SKIP_DDL_ON_STARTUP=true "$@"
 }
 cd "$repo/observal-server"
 isolated .venv/bin/python "$qa/seed.py" schema > "$run/seed.log" 2>&1
 isolated .venv/bin/alembic stamp 044_review_orphan_authors > "$run/migration.log" 2>&1
 isolated .venv/bin/alembic upgrade head >> "$run/migration.log" 2>&1
 [[ $(docker exec "${id}pg" psql -X -At -U followqa -d followqa -c 'SELECT version_num FROM alembic_version') == 070_mobile_follow_sync_state ]]
+# The exact production migration and runtime initialization paths apply and read back
+# both source TTLs before the disposable fixture can open synthetic reads.
+isolated .venv/bin/python -m services.clickhouse.migrations > "$run/clickhouse.log" 2>&1
+isolated .venv/bin/python -c 'import asyncio; from services.clickhouse.schema import init_clickhouse; asyncio.run(init_clickhouse())' >> "$run/clickhouse.log" 2>&1
+[[ $(docker exec "${id}pg" psql -X -At -U followqa -d followqa -c \
+    "SELECT source_policy_ready AND source_policy_since IS NOT NULL FROM mobile_read_controls WHERE project_id='default'") == t ]] || { echo 'ClickHouse source policy not verified' >&2; exit 1; }
 QA_PASSWORD=$(openssl rand -hex 16)
 export QA_PASSWORD
 isolated .venv/bin/python "$qa/seed.py" fixture >> "$run/seed.log" 2>&1
@@ -76,6 +95,8 @@ for suffix in a b; do
 done
 isolated .venv/bin/python "$qa/privacy_worker.py" > "$run/privacy-worker.log" 2>&1 &
 printf '%s\n' "$!" > "$state/pid-worker"
+isolated .venv/bin/python "$qa/projection_worker.py" > "$run/projection-worker.log" 2>&1 &
+printf '%s\n' "$!" > "$state/pid-projection"
 python3 - "$qa/nginx.conf.template" "$run/nginx.conf" "$(<"$state/port-a")" "$(<"$state/port-b")" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text().replace('__API_A__', sys.argv[3]).replace('__API_B__', sys.argv[4])
@@ -89,7 +110,7 @@ for suffix in a b; do
     done
     [[ $ready == 1 ]] || { echo "API $suffix failed; see $run/api-$suffix.log" >&2; exit 1; }
 done
-docker run -d --name "${id}nginx" --network host --read-only --tmpfs /var/cache/nginx --tmpfs /var/run \
+docker run -d --name "${id}nginx" --label "observal.followqa.owner=$id" --network host --read-only --tmpfs /var/cache/nginx --tmpfs /var/run \
     -v "$run/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$run/leaf.crt:/qa/leaf.crt:ro" \
     -v "$run/leaf.key:/qa/leaf.key:ro" -v "$repo/web/dist:/web:ro" nginx:alpine >/dev/null
 if ! curl -fsS --retry 15 --retry-connrefused --retry-delay 1 --noproxy '*' --cacert "$run/ca.crt" https://localhost:18443/readyz >/dev/null; then

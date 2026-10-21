@@ -7,10 +7,25 @@ state="$qa/.runtime"
 [[ -d "$state" && ! -L "$state" ]] || { echo 'No owned QA state'; exit 0; }
 id=$(<"$state/id")
 [[ "$id" =~ ^followqa[0-9a-f]{10}$ ]] || { echo 'Invalid QA state; refusing destructive cleanup' >&2; exit 1; }
+docker info >/dev/null || { echo 'Docker unavailable; preserving QA state' >&2; exit 1; }
+owned_process() {
+    local pid=$1
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" && -r "/proc/$pid/environ" ]] && \
+        tr '\0' '\n' < "/proc/$pid/environ" | grep -Fxq "MOBILE_FOLLOW_QA_OWNER=$id"
+}
+# Never remove a resource with the same name unless its ownership label matches.
+# Check all existing names before killing anything or deleting state.
+for suffix in nginx ch redis pg; do
+    if docker inspect "${id}${suffix}" >/dev/null 2>&1; then
+        [[ $(docker inspect --format '{{index .Config.Labels "observal.followqa.owner"}}' "${id}${suffix}") == "$id" ]] || {
+            echo "Unowned QA container name ${id}${suffix}; refusing cleanup" >&2; exit 1;
+        }
+    fi
+done
 for suffix in a b; do
     if [[ -f "$state/pid-$suffix" && -f "$state/port-$suffix" ]]; then
         pid=$(<"$state/pid-$suffix"); port=$(<"$state/port-$suffix")
-        if [[ "$pid" =~ ^[0-9]+$ && "$port" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] && \
+        if [[ "$port" =~ ^[0-9]+$ ]] && owned_process "$pid" && \
            tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "uvicorn app:app --app-dir $qa --host 127.0.0.1 --port $port"; then
             kill "$pid" || true
         fi
@@ -18,12 +33,23 @@ for suffix in a b; do
 done
 if [[ -f "$state/pid-worker" ]]; then
     pid=$(<"$state/pid-worker")
-    if [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] && \
+    if owned_process "$pid" && \
        tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "python $qa/privacy_worker.py"; then
         kill "$pid" || true
     fi
 fi
-for suffix in nginx redis pg; do docker rm -fv "${id}${suffix}" >/dev/null 2>&1 || true; done
+if [[ -f "$state/pid-projection" ]]; then
+    pid=$(<"$state/pid-projection")
+    if owned_process "$pid" && \
+       tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "python $qa/projection_worker.py"; then
+        kill "$pid" || true
+    fi
+fi
+for suffix in nginx ch redis pg; do
+    if docker inspect "${id}${suffix}" >/dev/null 2>&1; then
+        docker rm -fv "${id}${suffix}" >/dev/null
+    fi
+done
 if [[ -f "$state/run" ]]; then
     run=$(<"$state/run")
     if [[ "$run" == /tmp/observal-follow-qa.* && -d "$run" && ! -L "$run" ]]; then
