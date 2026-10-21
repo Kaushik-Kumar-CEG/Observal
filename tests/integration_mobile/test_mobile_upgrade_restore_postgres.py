@@ -26,6 +26,9 @@ pytestmark = pytest.mark.skipif(os.getenv("MOBILE_MIGRATION_SCRATCH") != "1", re
 async def test_populated_068_backup_restores_and_quarantines_older_approvals():
     base = make_url(os.environ["DATABASE_URL"])
     assert (base.host, base.port, base.database) == ("127.0.0.1", 15440, "observal")
+    # Deliberately bounded synthetic sizes, never an implicit live-instance probe.
+    row_count = int(os.getenv("MOBILE_MIGRATION_ROWS", "1000"))
+    assert 1_000 <= row_count <= 100_000, "scratch-only synthetic row range"
     admin = create_async_engine(base, isolation_level="AUTOCOMMIT")
     name = "mobile_backup_" + uuid.uuid4().hex[:10]
     restored_name = "mobile_restore_" + uuid.uuid4().hex[:10]
@@ -49,10 +52,11 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
                 text(
                     "INSERT INTO mobile_publication_events(kind,listing_id,version_id,status,recorded_at) "
                     "SELECT 'mcp', gen_random_uuid(), gen_random_uuid(), 'approved', "
-                    "TIMESTAMPTZ '2020-01-01 00:00:00+00' FROM generate_series(1,1000)"
-                )
+                    "TIMESTAMPTZ '2020-01-01 00:00:00+00' FROM generate_series(1,:row_count)"
+                ),
+                {"row_count": row_count},
             )
-            assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == 1000
+            assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == row_count
         # The physical dump is created before irreversible migration and then
         # restored into a new database. Never use mock backup APIs as proof.
         client = ["docker", "run", "--rm", "--network=host", "-e", "PGPASSWORD=mobile070-scratch", "postgres:18"]
@@ -90,7 +94,8 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
             assert (
                 await conn.scalar(text("SELECT version_num FROM alembic_version")) == "068_mobile_erasure_epoch_guard"
             )
-            assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == 1000
+            assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == row_count
+            before_size = await conn.scalar(text("SELECT pg_total_relation_size('mobile_publication_events')"))
         restore_env = {**env, "DATABASE_URL": base.set(database=restored_name).render_as_string(hide_password=False)}
         before = subprocess.run(
             [sys.executable, "-m", "services.mobile_boot_preflight", "--require-schema"],
@@ -111,12 +116,13 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         async with restored.connect() as conn:
             assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "069_mobile_publication_clock"
             assert await conn.scalar(text("SELECT current_setting('track_commit_timestamp')")) == "on"
-            assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == 1000
+            assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == row_count
+            after_size = await conn.scalar(text("SELECT pg_total_relation_size('mobile_publication_events')"))
             assert (
                 await conn.scalar(
                     text("SELECT count(*) FROM mobile_publication_events WHERE recorded_at > TIMESTAMPTZ '2020-01-01'")
                 )
-                == 1000
+                == row_count
             )
         after = subprocess.run(
             [sys.executable, "-m", "services.mobile_boot_preflight", "--require-schema"],
@@ -125,7 +131,10 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
             timeout=30,
         )
         assert after.returncode == 0, after.stdout[-400:] + after.stderr[-400:]
-        print(f"RESTORED_POPULATED_068_TO_069_ROWS=1000 MIGRATION_SECONDS={elapsed:.3f}")
+        print(
+            f"RESTORED_POPULATED_068_TO_069_ROWS={row_count} MIGRATION_SECONDS={elapsed:.3f} "
+            f"PUBLICATION_RELATION_BYTES_BEFORE={before_size} AFTER={after_size}"
+        )
     finally:
         await source.dispose()
         await restored.dispose()
