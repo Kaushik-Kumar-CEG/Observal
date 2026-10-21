@@ -87,7 +87,11 @@ async def main():
         assert capabilities.status_code == 200, ("v1.2 mobile capabilities", capabilities.status_code)
         assert capabilities.json()["viewer_id"] and capabilities.json()["server_id"]
         assert (await client.get("/api/v1/mobile-activity/v1/capabilities")).status_code == 401
-        print("ACCEPTED_V12_SIGNED_IN_CAPABILITIES=200; ANONYMOUS=401")
+        print(
+            "ACCEPTED_V12_SIGNED_IN_CAPABILITIES=200; ANONYMOUS=401; "
+            f"SYNTHETIC_TEST_COHORT={capabilities.json()['synthetic_test_cohort']}; "
+            f"SUPPORTED_KINDS={len(capabilities.json()['supported_kinds'])}"
+        )
         if "--routes-only" in sys.argv:
             # Authorization challenge creates only short-lived OAuth state. Do
             # not change owner consent, follow grants or removals on Android's
