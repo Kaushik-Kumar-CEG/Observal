@@ -341,6 +341,7 @@ async def test_consent_requires_browser_even_with_true_boolean(monkeypatch):
 @pytest.mark.asyncio
 async def test_browser_consent_rejects_missing_origin_before_account_access(monkeypatch):
     monkeypatch.setattr(routes.settings, "get_sync", lambda name: "https://issuer.test")
+    monkeypatch.setattr(routes, "decode_access_token", lambda token, **kwargs: {"client_id": None})
 
     async def forbidden(*args, **kwargs):
         raise AssertionError("account reached before same-issuer browser proof")
@@ -349,6 +350,15 @@ async def test_browser_consent_rejects_missing_origin_before_account_access(monk
     with pytest.raises(HTTPException) as err:
         await routes._browser(FakeRequest("consent", "POST"), "Bearer ordinary", DB(), consent=True)
     assert err.value.detail == {"error": "restricted"}
+
+
+@pytest.mark.asyncio
+async def test_phone_read_cannot_approve_consent_even_without_browser_origin(monkeypatch):
+    monkeypatch.setattr(routes, "decode_access_token", lambda token, **kwargs: {"client_id": "observal-mobile"})
+    monkeypatch.setattr(routes.auth, "_account", lambda *args, **kwargs: pytest.fail("phone reached browser account"))
+    with pytest.raises(HTTPException) as err:
+        await routes._browser(FakeRequest("consent", "POST"), "Bearer mobile-read", DB(), consent=True)
+    assert err.value.detail == {"error": "unauthorized"}
 
 
 def test_exact_eight_unregistered_routes():
