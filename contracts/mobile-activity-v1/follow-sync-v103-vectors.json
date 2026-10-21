@@ -1,0 +1,5704 @@
+{
+  "version": "1.0.3-proposal",
+  "notes": "Separate illustrative fixtures unless linked by fixture/scenario; max-capacity pages stand for the deterministic 1000-page stream, not 100000 executed HTTP requests. No backend or Android acceptance.",
+  "identities": {
+    "server": "11111111-1111-4111-8111-111111111111",
+    "project": "default",
+    "owner": "33333333-3333-4333-8333-333333333333",
+    "subject_a": "55555555-5555-4555-8555-555555555555",
+    "unseen_subject": "66666666-6666-4666-8666-666666666666",
+    "op_a": "77777777-7777-4777-8777-777777777777",
+    "removal": "88888888-8888-4888-8888-888888888888",
+    "withdrawal": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  },
+  "cases": [
+    {
+      "name": "availability_fresh_same_issuer_v12_proof",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "mobile:read",
+      "status": 200,
+      "body": {
+        "version": "1.0.3",
+        "state": "consent_required",
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 1,
+        "max_page_size": 100,
+        "offline_horizon_days": 30
+      }
+    },
+    {
+      "name": "dotted_v12_project_id_compatible",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "mobile:read",
+      "status": 200,
+      "body": {
+        "version": "1.0.3",
+        "state": "available",
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "team.alpha",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 7,
+        "max_page_size": 100,
+        "offline_horizon_days": 30
+      }
+    },
+    {
+      "name": "project_id_over_256_never_echoed",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "mobile:read",
+      "status": 403,
+      "body": {
+        "error": "unsupported_project"
+      },
+      "client_result": "v12_activity_only_no_sync"
+    },
+    {
+      "name": "old_server_non_json_404_after_fresh_same_issuer_proof",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "fresh_v12_mobile_read",
+      "status": 404,
+      "raw_body": "older-server missing route",
+      "client_result": "local_follows_only_sync_unavailable;never_empty_snapshot"
+    },
+    {
+      "name": "old_server_non_json_405_after_fresh_same_issuer_proof",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "fresh_v12_mobile_read",
+      "status": 405,
+      "raw_body": "Method Not Allowed",
+      "client_result": "local_follows_only_sync_unavailable;never_empty_snapshot"
+    },
+    {
+      "name": "availability_404_without_fresh_v12_proof_not_fallback",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "stale_or_foreign_v12_proof",
+      "status": 404,
+      "raw_body": "Not Found",
+      "client_result": "deny_lock_do_not_call_it_optional_or_empty"
+    },
+    {
+      "name": "denial_401_not_fallback",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "expired_mobile_read",
+      "status": 401,
+      "body": {
+        "error": "unauthorized"
+      },
+      "client_result": "lock_not_empty"
+    },
+    {
+      "name": "denial_403_not_fallback",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "other_owner",
+      "status": 403,
+      "body": {
+        "error": "restricted"
+      },
+      "client_result": "lock_not_empty"
+    },
+    {
+      "name": "offline_503_not_fallback",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "mobile:read",
+      "status": 503,
+      "body": {
+        "error": "unavailable"
+      },
+      "client_result": "not_empty"
+    },
+    {
+      "name": "redirect_to_foreign_login_not_fallback",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "mobile:read",
+      "status": 302,
+      "headers": {
+        "Location": "https://foreign.example.test/login"
+      },
+      "client_result": "never_follow_redirect_with_bearer;lock"
+    },
+    {
+      "name": "unknown_200_version_not_fallback",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "mobile:read",
+      "status": 200,
+      "body": {
+        "version": "1.0.4",
+        "state": "available",
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 7,
+        "max_page_size": 100,
+        "offline_horizon_days": 30
+      },
+      "client_result": "strict_parse_reject_unknown_version_not_empty"
+    },
+    {
+      "name": "new_server_old_app_no_sync_calls",
+      "method": "none",
+      "path": "none",
+      "credential": "accepted_v12_only",
+      "status": 0,
+      "client_result": "v12_unchanged"
+    },
+    {
+      "name": "phone_a_browser_sees_consent_state_before_initial_disclosure",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/consent/state",
+      "credential": "browserBearer_same_owner",
+      "status": 200,
+      "body": {
+        "state": "consent_required",
+        "owner_generation": 6
+      }
+    },
+    {
+      "name": "opt_in_after_disclosure_generation_7",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/consent",
+      "credential": "browserBearer_same_owner_after_disclosure",
+      "request": {
+        "consent": true,
+        "owner_generation": 6,
+        "consent_id": "12121212-1212-4121-8121-121212121212"
+      },
+      "status": 200,
+      "body": {
+        "state": "available",
+        "owner_generation": 7
+      }
+    },
+    {
+      "name": "second_phone_cannot_mint_write_before_browser_approval",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/write-grant",
+      "credential": "mobile:read_phone_b",
+      "status": 403,
+      "body": {
+        "error": "restricted"
+      }
+    },
+    {
+      "name": "phone_b_bound_browser_challenge",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/write-authorization",
+      "credential": "mobile:read_phone_b",
+      "status": 200,
+      "body": {
+        "user_code": "TEST-123",
+        "verification_uri": "https://browser.example.test/device?code=TEST-123",
+        "verification_origins": [
+          "https://browser.example.test"
+        ],
+        "expires_in": 600,
+        "owner_generation": 7
+      }
+    },
+    {
+      "name": "browser_approves_only_phone_b",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/write-approval",
+      "credential": "browserBearer_same_owner",
+      "request": {
+        "user_code": "TEST-123",
+        "approve": true
+      },
+      "status": 200,
+      "body": {
+        "state": "approved"
+      }
+    },
+    {
+      "name": "mobile_read_cannot_self_approve",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/write-approval",
+      "credential": "mobile:read",
+      "request": {
+        "user_code": "TEST-123",
+        "approve": true
+      },
+      "status": 401,
+      "body": {
+        "error": "unauthorized"
+      }
+    },
+    {
+      "name": "phone_b_write_grant_binds_generation",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/write-grant",
+      "credential": "mobile:read_phone_b",
+      "status": 200,
+      "body": {
+        "token_type": "bearer",
+        "access_token": "synthetic-not-a-real-jwt-aaaaaaaaaaaaaaaaaaa",
+        "expires_in": 300,
+        "client_id": "observal-mobile",
+        "audience": "observal-mobile-follow-sync-v1",
+        "scope": "mobile:follow-write",
+        "owner_generation": 7
+      }
+    },
+    {
+      "name": "phone_a_queues_unseen_base0_at_generation_7",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "mobile:follow-write_phone_a_gen7_offline",
+      "request": {
+        "operation_id": "77777777-7777-4777-8777-777777777777",
+        "subject_id": "66666666-6666-4666-8666-666666666666",
+        "owner_generation": 7,
+        "base_person_revision": 0,
+        "action": "follow"
+      },
+      "status": 0,
+      "client_result": "encrypted_intent_only_NOT_SENT_before_phone_b_removal"
+    },
+    {
+      "name": "phone_b_prepares_remove_all_gen7",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/removals/prepare",
+      "credential": "mobile:follow-write_phone_b_gen7",
+      "status": 200,
+      "body": {
+        "nonce": "synthetic-one-use-nonce-long-enough",
+        "expires_in": 120,
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 7
+      }
+    },
+    {
+      "name": "phone_b_remove_all_atomically_advances_to_8",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/removals",
+      "credential": "mobile:follow-write_phone_b_gen7",
+      "request": {
+        "nonce": "synthetic-one-use-nonce-long-enough",
+        "confirm": true,
+        "owner_generation": 7
+      },
+      "status": 202,
+      "body": {
+        "removal_id": "88888888-8888-4888-8888-888888888888",
+        "state": "pending",
+        "owner_generation": 8,
+        "revision": 0
+      }
+    },
+    {
+      "name": "phone_b_lost_202_old_write_grant_cannot_replay",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/removals",
+      "credential": "mobile:follow-write_phone_b_gen7",
+      "request": {
+        "nonce": "synthetic-one-use-nonce-long-enough",
+        "confirm": true,
+        "owner_generation": 7
+      },
+      "status": 401,
+      "body": {
+        "error": "unauthorized"
+      },
+      "client_result": "use_read_grant_nonce_lookup;never_bypass_revocation"
+    },
+    {
+      "name": "phone_b_lost_202_read_authenticated_nonce_lookup",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/removals/lookup",
+      "credential": "mobile:read_phone_b_same_device",
+      "request": {
+        "nonce": "synthetic-one-use-nonce-long-enough",
+        "original_owner_generation": 7
+      },
+      "status": 200,
+      "body": {
+        "removal_id": "88888888-8888-4888-8888-888888888888",
+        "state": "pending",
+        "owner_generation": 8,
+        "revision": 0
+      },
+      "client_result": "pending_not_deleted_success"
+    },
+    {
+      "name": "phone_b_removal_completed",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/removals/88888888-8888-4888-8888-888888888888",
+      "credential": "mobile:read",
+      "status": 200,
+      "body": {
+        "removal_id": "88888888-8888-4888-8888-888888888888",
+        "state": "completed",
+        "owner_generation": 8,
+        "revision": 0
+      }
+    },
+    {
+      "name": "phone_a_late_unseen_base0_replay_cannot_resurrect",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "new_browser_approved_write_grant_gen8_with_old_request_body",
+      "request": {
+        "operation_id": "77777777-7777-4777-8777-777777777777",
+        "subject_id": "66666666-6666-4666-8666-666666666666",
+        "owner_generation": 7,
+        "base_person_revision": 0,
+        "action": "follow"
+      },
+      "status": 409,
+      "body": {
+        "error": "generation_conflict",
+        "operation_id": "77777777-7777-4777-8777-777777777777",
+        "owner_generation": 8
+      },
+      "client_result": "explicit_human_rebase_new_op_id_new_browser_approval_only"
+    },
+    {
+      "name": "phone_a_alternate_history_lost_200_from_pre_removal_status_redacted",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/13131313-1313-4131-8131-131313131313",
+      "credential": "mobile:read_phone_a",
+      "status": 200,
+      "body": {
+        "operation_id": "13131313-1313-4131-8131-131313131313",
+        "original_http_status": 200,
+        "effective": false,
+        "owner_generation": 8,
+        "result": {
+          "status": "superseded",
+          "reason": "owner_reset",
+          "original_owner_generation": 7,
+          "owner_generation": 8
+        }
+      },
+      "client_result": "NEVER_mark_synced_or_redisclose_subject"
+    },
+    {
+      "name": "phone_a_new_human_choice_new_op_after_gen8_snapshot",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "new_browser_approved_follow_write_gen8",
+      "request": {
+        "operation_id": "99999999-9999-4999-8999-999999999999",
+        "subject_id": "66666666-6666-4666-8666-666666666666",
+        "owner_generation": 8,
+        "base_person_revision": 0,
+        "action": "follow"
+      },
+      "status": 200,
+      "body": {
+        "operation_id": "99999999-9999-4999-8999-999999999999",
+        "subject_id": "66666666-6666-4666-8666-666666666666",
+        "owner_generation": 8,
+        "revision": 1,
+        "person_revision": 1,
+        "status": "applied"
+      }
+    },
+    {
+      "name": "phone_b_reads_same_account_snapshot_gen8",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100",
+      "credential": "mobile:read_phone_b",
+      "status": 200,
+      "body": {
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 8,
+        "revision": 1,
+        "items": [
+          {
+            "subject_id": "66666666-6666-4666-8666-666666666666",
+            "person_revision": 1
+          }
+        ],
+        "next_cursor": null,
+        "complete": true,
+        "read_lease_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "erasure_floor": 0
+      }
+    },
+    {
+      "name": "old_snapshot_cursor_after_generation_advance_conflicts",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?cursor=signed-gen7-cursor",
+      "credential": "mobile:read",
+      "status": 409,
+      "body": {
+        "error": "generation_conflict"
+      }
+    },
+    {
+      "name": "old_change_checkpoint_after_generation_advance_conflicts",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=7&after_revision=1&limit=100",
+      "credential": "mobile:read",
+      "status": 409,
+      "body": {
+        "error": "generation_conflict"
+      }
+    },
+    {
+      "name": "independent_101_change_fixture_first_100",
+      "fixture": "Separate gen8 history: subjects 555 and 666 followed rev1/2, then 100 single-subject changes at rev3..102 (one unfollow 555 plus 99 new follows), followed by unfollow 666 at rev103. Snapshot checkpoint gen8/rev2; page limit fixed 100.",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=8&after_revision=2&limit=100",
+      "credential": "mobile:read",
+      "status": 200,
+      "body": {
+        "owner_generation": 8,
+        "revision": 103,
+        "changes": [
+          {
+            "subject_id": "55555555-5555-4555-8555-555555555555",
+            "action": "unfollow",
+            "person_revision": 2,
+            "revision": 3,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000001",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 4,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000002",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 5,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000003",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 6,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000004",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 7,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000005",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 8,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000006",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 9,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000007",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 10,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000008",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 11,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000009",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 12,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 13,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 14,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 15,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 16,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 17,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 18,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000010",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 19,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000011",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 20,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000012",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 21,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000013",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 22,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000014",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 23,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000015",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 24,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000016",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 25,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000017",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 26,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000018",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 27,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000019",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 28,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 29,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 30,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 31,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 32,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 33,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 34,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000020",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 35,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000021",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 36,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000022",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 37,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000023",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 38,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000024",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 39,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000025",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 40,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000026",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 41,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000027",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 42,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000028",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 43,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000029",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 44,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 45,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 46,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 47,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 48,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 49,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 50,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000030",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 51,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000031",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 52,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000032",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 53,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000033",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 54,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000034",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 55,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000035",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 56,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000036",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 57,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000037",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 58,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000038",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 59,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000039",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 60,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 61,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 62,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 63,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 64,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 65,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 66,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000040",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 67,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000041",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 68,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000042",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 69,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000043",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 70,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000044",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 71,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000045",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 72,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000046",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 73,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000047",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 74,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000048",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 75,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000049",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 76,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 77,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 78,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 79,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 80,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 81,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 82,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000050",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 83,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000051",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 84,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000052",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 85,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000053",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 86,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000054",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 87,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000055",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 88,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000056",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 89,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000057",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 90,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000058",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 91,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000059",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 92,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 93,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 94,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 95,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 96,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 97,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 98,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000060",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000061",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 100,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000062",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 101,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000063",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 102,
+            "change_ordinal": 0
+          }
+        ],
+        "next_cursor": "signed-safe-cursor",
+        "complete": false,
+        "read_lease_id": "cccccccc-1111-4111-8111-111111111111",
+        "erasure_floor": 0
+      },
+      "client_result": "persist_gen8_original_rev2_and_cursor_not_rev4"
+    },
+    {
+      "name": "independent_101_change_fixture_last_1",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=8&after_revision=2&limit=100&cursor=signed-safe-cursor",
+      "credential": "mobile:read",
+      "status": 200,
+      "body": {
+        "owner_generation": 8,
+        "revision": 103,
+        "changes": [
+          {
+            "subject_id": "66666666-6666-4666-8666-666666666666",
+            "action": "unfollow",
+            "person_revision": 2,
+            "revision": 103,
+            "change_ordinal": 0
+          }
+        ],
+        "next_cursor": null,
+        "complete": true,
+        "read_lease_id": "cccccccc-1111-4111-8111-111111111111",
+        "erasure_floor": 0
+      }
+    },
+    {
+      "name": "phone_a_requests_explicit_consent_withdrawal",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/consent/withdraw",
+      "credential": "current_browser_approved_follow_write_phone_a_gen8",
+      "request": {
+        "withdrawal_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "owner_generation": 8,
+        "confirm": true
+      },
+      "status": 202,
+      "body": {
+        "withdrawal_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "state": "pending",
+        "owner_generation": 9
+      }
+    },
+    {
+      "name": "phone_a_lost_withdraw_202_idempotent_status",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/consent/withdrawals/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "credential": "mobile:read_phone_a",
+      "status": 200,
+      "body": {
+        "withdrawal_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "state": "pending",
+        "owner_generation": 9
+      }
+    },
+    {
+      "name": "phone_b_offline_pending_edit_after_withdrawal_revoked",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "old_phone_b_write_grant_gen8",
+      "request": {
+        "operation_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "subject_id": "55555555-5555-4555-8555-555555555555",
+        "owner_generation": 8,
+        "base_person_revision": 0,
+        "action": "follow"
+      },
+      "status": 401,
+      "body": {
+        "error": "unauthorized"
+      },
+      "client_result": "retain_only_encrypted_local_intent_no_auto_rebase"
+    },
+    {
+      "name": "phone_b_cannot_mint_new_grant_during_opt_out",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/write-grant",
+      "credential": "mobile:read_phone_b",
+      "status": 403,
+      "body": {
+        "error": "restricted"
+      }
+    },
+    {
+      "name": "withdrawal_needs_operator_keeps_fence",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/consent/withdrawals/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "credential": "mobile:read_phone_a",
+      "status": 200,
+      "body": {
+        "withdrawal_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "state": "needs_operator",
+        "owner_generation": 9
+      }
+    },
+    {
+      "name": "withdrawal_completed_no_follows_or_consent",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/consent/withdrawals/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "credential": "mobile:read_phone_a",
+      "status": 200,
+      "body": {
+        "withdrawal_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "state": "completed",
+        "owner_generation": 9
+      }
+    },
+    {
+      "name": "availability_after_withdrawal_requires_new_disclosure",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "mobile:read_phone_b",
+      "status": 200,
+      "body": {
+        "version": "1.0.3",
+        "state": "consent_required",
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 9,
+        "max_page_size": 100,
+        "offline_horizon_days": 30
+      }
+    },
+    {
+      "name": "phone_b_mobile_read_cannot_restore_opt_in_after_withdrawal",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/consent",
+      "credential": "mobile:read_phone_b",
+      "request": {
+        "consent": true,
+        "owner_generation": 9,
+        "consent_id": "18181818-1818-4181-8181-181818181818"
+      },
+      "status": 401,
+      "body": {
+        "error": "unauthorized"
+      }
+    },
+    {
+      "name": "phone_b_browser_sees_new_generation_before_reconsent",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/consent/state",
+      "credential": "browserBearer_same_owner",
+      "status": 200,
+      "body": {
+        "state": "consent_required",
+        "owner_generation": 9
+      }
+    },
+    {
+      "name": "phone_b_browser_withdraws_after_last_phone_unlinked",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/consent/withdraw",
+      "credential": "browserBearer_same_owner_no_mobile_devices",
+      "request": {
+        "withdrawal_id": "19191919-1919-4191-8191-191919191919",
+        "owner_generation": 8,
+        "confirm": true
+      },
+      "status": 202,
+      "body": {
+        "withdrawal_id": "19191919-1919-4191-8191-191919191919",
+        "state": "pending",
+        "owner_generation": 9
+      }
+    },
+    {
+      "name": "phone_b_browser_checks_erasure_after_last_phone_lost",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/consent/withdrawals/19191919-1919-4191-8191-191919191919",
+      "credential": "browserBearer_same_owner_no_mobile_devices",
+      "status": 200,
+      "body": {
+        "withdrawal_id": "19191919-1919-4191-8191-191919191919",
+        "state": "completed",
+        "owner_generation": 9
+      }
+    },
+    {
+      "name": "phone_b_fresh_reconsent_advances_to_10",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/consent",
+      "credential": "browserBearer_same_owner_after_new_disclosure",
+      "request": {
+        "consent": true,
+        "owner_generation": 9,
+        "consent_id": "14141414-1414-4141-8141-141414141414"
+      },
+      "status": 200,
+      "body": {
+        "state": "available",
+        "owner_generation": 10
+      },
+      "client_result": "new_browser_approval_and_full_snapshot_on_every_phone"
+    },
+    {
+      "name": "old_phone_a_gen8_grant_cannot_readd_after_reconsent",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "old_phone_a_write_gen8",
+      "request": {
+        "operation_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "subject_id": "66666666-6666-4666-8666-666666666666",
+        "owner_generation": 8,
+        "base_person_revision": 0,
+        "action": "follow"
+      },
+      "status": 401,
+      "body": {
+        "error": "unauthorized"
+      }
+    },
+    {
+      "name": "owner_only_uuid_export_after_reconsent",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/export?limit=100",
+      "credential": "mobile:read",
+      "status": 200,
+      "body": {
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 10,
+        "revision": 0,
+        "items": [],
+        "next_cursor": null,
+        "complete": true,
+        "read_lease_id": "bbbbbbbb-1111-4111-8111-111111111111",
+        "erasure_floor": 0
+      }
+    },
+    {
+      "name": "conflict_same_person_in_new_generation",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "mobile:follow-write_gen10",
+      "request": {
+        "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "subject_id": "55555555-5555-4555-8555-555555555555",
+        "owner_generation": 10,
+        "base_person_revision": 0,
+        "action": "unfollow"
+      },
+      "status": 409,
+      "body": {
+        "error": "person_conflict",
+        "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "owner_generation": 10,
+        "revision": 1,
+        "person_revision": 1,
+        "current_following": true
+      }
+    },
+    {
+      "name": "erased_subject_cannot_recreate_in_any_generation",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "mobile:follow-write_gen10",
+      "request": {
+        "operation_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "subject_id": "55555555-5555-4555-8555-555555555555",
+        "owner_generation": 10,
+        "base_person_revision": 0,
+        "action": "follow"
+      },
+      "status": 403,
+      "body": {
+        "error": "restricted"
+      }
+    },
+    {
+      "name": "proposed_100000_per_generation_cap_not_lifetime",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "mobile:follow-write_gen10",
+      "request": {
+        "operation_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "subject_id": "55555555-5555-4555-8555-555555555555",
+        "owner_generation": 10,
+        "base_person_revision": 0,
+        "action": "follow"
+      },
+      "status": 409,
+      "body": {
+        "error": "capacity_reached",
+        "operation_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "owner_generation": 10
+      },
+      "client_result": "owner_policy_pending;after_remove_all_new_generation_quota_reusable"
+    },
+    {
+      "name": "max_safe_json_revision_accepted",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "mobile:follow-write_gen10",
+      "request": {
+        "operation_id": "11111111-1111-4111-8111-111111111112",
+        "subject_id": "66666666-6666-4666-8666-666666666666",
+        "owner_generation": 10,
+        "base_person_revision": 9007199254740990,
+        "action": "unfollow"
+      },
+      "status": 409,
+      "body": {
+        "error": "person_conflict",
+        "operation_id": "11111111-1111-4111-8111-111111111112",
+        "owner_generation": 10,
+        "revision": 9007199254740991,
+        "person_revision": 9007199254740991,
+        "current_following": false
+      }
+    },
+    {
+      "name": "over_js_safe_base_revision_rejected_before_number_rounding",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "mobile:follow-write_gen10",
+      "request": {
+        "operation_id": "11111111-1111-4111-8111-111111111113",
+        "subject_id": "66666666-6666-4666-8666-666666666666",
+        "owner_generation": 10,
+        "base_person_revision": 9007199254740992,
+        "action": "follow"
+      },
+      "status": 400,
+      "body": {
+        "error": "invalid_request"
+      },
+      "client_result": "must_not_coerce_to_max_safe_or_compare"
+    },
+    {
+      "name": "over_js_safe_after_revision_query_rejected",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=10&after_revision=9007199254740992",
+      "credential": "mobile:read",
+      "status": 400,
+      "body": {
+        "error": "invalid_request"
+      }
+    },
+    {
+      "name": "revision_increment_at_safe_limit_fails_closed",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "mobile:follow-write_gen10",
+      "request": {
+        "operation_id": "11111111-1111-4111-8111-111111111114",
+        "subject_id": "66666666-6666-4666-8666-666666666666",
+        "owner_generation": 10,
+        "base_person_revision": 9007199254740991,
+        "action": "follow"
+      },
+      "status": 409,
+      "body": {
+        "error": "revision_exhausted",
+        "operation_id": "11111111-1111-4111-8111-111111111114",
+        "owner_generation": 10
+      }
+    },
+    {
+      "name": "withdrawal_denies_snapshot_not_empty",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100",
+      "credential": "mobile:read",
+      "status": 503,
+      "body": {
+        "error": "withdrawal_pending"
+      }
+    },
+    {
+      "name": "read_only_mobile_cannot_write",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "mobile:read",
+      "request": {
+        "operation_id": "11111111-1111-4111-8111-111111111115",
+        "subject_id": "66666666-6666-4666-8666-666666666666",
+        "owner_generation": 10,
+        "base_person_revision": 0,
+        "action": "follow"
+      },
+      "status": 401,
+      "body": {
+        "error": "unauthorized"
+      }
+    },
+    {
+      "name": "write_grant_cannot_use_v12_activity",
+      "method": "GET",
+      "path": "/mobile-activity/v1/capabilities",
+      "credential": "mobile:follow-write",
+      "status": 401,
+      "body": {
+        "error": "unauthorized"
+      }
+    },
+    {
+      "name": "other_owner_cannot_view_follows",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100",
+      "credential": "other_owner",
+      "status": 403,
+      "body": {
+        "error": "restricted"
+      }
+    },
+    {
+      "name": "unknown_operation_not_proof_of_no_commit",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/22222222-2222-4222-8222-222222222222",
+      "credential": "mobile:read",
+      "status": 404,
+      "body": {
+        "error": "unknown_operation"
+      }
+    },
+    {
+      "name": "phone_a_already_available_new_consent_id_cannot_invalidate_follows",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/consent",
+      "credential": "browserBearer_same_owner",
+      "request": {
+        "consent": true,
+        "owner_generation": 7,
+        "consent_id": "20202020-2020-4202-8202-202020202020"
+      },
+      "status": 409,
+      "body": {
+        "error": "consent_already_available"
+      },
+      "client_result": "gen7_follows_unchanged"
+    },
+    {
+      "name": "phone_a_same_generation_subject_erasure_denies_original_post_replay",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "current_browser_approved_write_gen10",
+      "request": {
+        "operation_id": "17171717-1717-4171-8171-171717171717",
+        "subject_id": "55555555-5555-4555-8555-555555555555",
+        "owner_generation": 10,
+        "base_person_revision": 0,
+        "action": "follow"
+      },
+      "status": 409,
+      "body": {
+        "error": "subject_erased",
+        "operation_id": "17171717-1717-4171-8171-171717171717",
+        "owner_generation": 10
+      },
+      "client_result": "never_redisclose_erased_uuid_or_mark_synced"
+    },
+    {
+      "name": "phone_b_stale_prewithdrawal_opt_in_after_phone_a_completion",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/consent",
+      "credential": "browserBearer_phone_b_old_decision",
+      "request": {
+        "consent": true,
+        "owner_generation": 8,
+        "consent_id": "15151515-1515-4151-8151-151515151515"
+      },
+      "status": 409,
+      "body": {
+        "error": "generation_conflict"
+      },
+      "client_result": "old_disclosure_cannot_restore_account_consent"
+    },
+    {
+      "name": "phone_b_stale_opt_in_during_withdrawal_fenced",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/consent",
+      "credential": "browserBearer_phone_b_old_decision",
+      "request": {
+        "consent": true,
+        "owner_generation": 8,
+        "consent_id": "15151515-1515-4151-8151-151515151515"
+      },
+      "status": 409,
+      "body": {
+        "error": "generation_conflict"
+      }
+    },
+    {
+      "name": "phone_b_approval_code_from_old_generation_revoked",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/write-approval",
+      "credential": "browserBearer_same_owner",
+      "request": {
+        "user_code": "TEST-123",
+        "approve": true
+      },
+      "status": 409,
+      "body": {
+        "error": "generation_conflict"
+      }
+    },
+    {
+      "name": "phone_a_withdraw_without_write_grant_denied",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/consent/withdraw",
+      "credential": "mobile:read_phone_a",
+      "request": {
+        "withdrawal_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "owner_generation": 8,
+        "confirm": true
+      },
+      "status": 401,
+      "body": {
+        "error": "unauthorized"
+      }
+    },
+    {
+      "name": "phone_b_valid_gen10_grant_stale_gen8_intent_conflicts",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "new_browser_approved_write_gen10",
+      "request": {
+        "operation_id": "16161616-1616-4161-8161-161616161616",
+        "subject_id": "66666666-6666-4666-8666-666666666666",
+        "owner_generation": 8,
+        "base_person_revision": 0,
+        "action": "follow"
+      },
+      "status": 409,
+      "body": {
+        "error": "generation_conflict",
+        "operation_id": "16161616-1616-4161-8161-161616161616",
+        "owner_generation": 10
+      }
+    },
+    {
+      "name": "subject_erasure_redacts_same_generation_operation_status",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/17171717-1717-4171-8171-171717171717",
+      "credential": "mobile:read_same_owner",
+      "status": 200,
+      "body": {
+        "operation_id": "17171717-1717-4171-8171-171717171717",
+        "original_http_status": 200,
+        "effective": false,
+        "owner_generation": 10,
+        "result": {
+          "status": "superseded",
+          "reason": "subject_erased",
+          "original_owner_generation": 10,
+          "owner_generation": 10
+        }
+      },
+      "client_result": "no_erased_subject_uuid_even_if_generation_same"
+    },
+    {
+      "name": "phone_b_old_server_405_under_independent_fresh_v12_proof",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/availability",
+      "credential": "fresh_v12_mobile_read_phone_b",
+      "status": 405,
+      "raw_body": "Not Allowed",
+      "client_result": "local_follows_only_sync_unavailable;never_empty_snapshot"
+    },
+    {
+      "name": "phone_b_exact_max_safe_change_ordinal",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=10&after_revision=9007199254740990&limit=100",
+      "credential": "mobile:read_phone_b",
+      "status": 200,
+      "body": {
+        "owner_generation": 10,
+        "revision": 9007199254740991,
+        "changes": [
+          {
+            "subject_id": "66666666-6666-4666-8666-666666666666",
+            "action": "unfollow",
+            "person_revision": 9007199254740991,
+            "revision": 9007199254740991,
+            "change_ordinal": 9007199254740991
+          }
+        ],
+        "next_cursor": null,
+        "complete": true,
+        "read_lease_id": "cccccccc-1111-4111-8111-111111111111",
+        "erasure_floor": 0
+      }
+    },
+    {
+      "name": "withdrawal_denies_changes_not_empty",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=9&after_revision=0",
+      "credential": "mobile:read_phone_b",
+      "status": 503,
+      "body": {
+        "error": "withdrawal_pending"
+      }
+    },
+    {
+      "name": "withdrawal_denies_export_not_empty",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/export?limit=100",
+      "credential": "mobile:read_phone_b",
+      "status": 503,
+      "body": {
+        "error": "withdrawal_pending"
+      }
+    },
+    {
+      "name": "rate_limit_bounded_retry_after",
+      "method": "POST",
+      "path": "/mobile-follow-sync/v1/operations",
+      "credential": "mobile:follow-write_gen10",
+      "status": 429,
+      "headers": {
+        "Retry-After": "12"
+      },
+      "body": {
+        "error": "rate_limited"
+      }
+    },
+    {
+      "name": "capacity_snapshot_page_1_not_authoritative",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100&cursor=signed-capacity-initial-lease",
+      "credential": "mobile:read_phone_a",
+      "status": 200,
+      "body": {
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 12,
+        "revision": 100000,
+        "read_lease_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "erasure_floor": 0,
+        "items": [
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000001",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000002",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000003",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000004",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000005",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000006",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000007",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000008",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000009",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000010",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000011",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000012",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000013",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000014",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000015",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000016",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000017",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000018",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000019",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000020",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000021",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000022",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000023",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000024",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000025",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000026",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000027",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000028",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000029",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000030",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000031",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000032",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000033",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000034",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000035",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000036",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000037",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000038",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000039",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000040",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000041",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000042",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000043",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000044",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000045",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000046",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000047",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000048",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000049",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000050",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000051",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000052",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000053",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000054",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000055",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000056",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000057",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000058",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000059",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000060",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000061",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000062",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000063",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000064",
+            "person_revision": 1
+          }
+        ],
+        "next_cursor": "signed-capacity-lease-position-100",
+        "complete": false
+      },
+      "fixture": "Exactly 100000 distinct followed UUIDs at gen12/rev100000; pages 1..1000 enumerate ascending UUID keys, 100/page; page excerpts do not imply missing intermediate pages. Concurrent writes after rev100000 must not alter pinned result.",
+      "capacity": 100000,
+      "page_size": 100,
+      "expected_pages": 1000,
+      "page_number": 1,
+      "client_result": "stage_only;checkpoint_remains_pre_snapshot",
+      "lease_expires_after_admission_seconds": 2592000
+    },
+    {
+      "name": "capacity_snapshot_page_500_after_restart",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100&cursor=signed-capacity-lease-position-49900",
+      "credential": "mobile:read_phone_a",
+      "status": 200,
+      "body": {
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 12,
+        "revision": 100000,
+        "read_lease_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "erasure_floor": 0,
+        "items": [
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2ed",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2ee",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2ef",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2f0",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2f1",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2f2",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2f3",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2f4",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2f5",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2f6",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2f7",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2f8",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2f9",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2fa",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2fb",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2fc",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2fd",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2fe",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c2ff",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c300",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c301",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c302",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c303",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c304",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c305",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c306",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c307",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c308",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c309",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c30a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c30b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c30c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c30d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c30e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c30f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c310",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c311",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c312",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c313",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c314",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c315",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c316",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c317",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c318",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c319",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c31a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c31b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c31c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c31d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c31e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c31f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c320",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c321",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c322",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c323",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c324",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c325",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c326",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c327",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c328",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c329",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c32a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c32b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c32c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c32d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c32e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c32f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c330",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c331",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c332",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c333",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c334",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c335",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c336",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c337",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c338",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c339",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c33a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c33b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c33c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c33d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c33e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c33f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c340",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c341",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c342",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c343",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c344",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c345",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c346",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c347",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c348",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c349",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c34a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c34b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c34c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c34d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c34e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c34f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000c350",
+            "person_revision": 1
+          }
+        ],
+        "next_cursor": "signed-capacity-lease-position-50000",
+        "complete": false
+      },
+      "page_number": 500,
+      "elapsed_seconds": 32435,
+      "client_result": "restore_encrypted_stage_and_last_durable_cursor;still_not_authoritative"
+    },
+    {
+      "name": "capacity_snapshot_page_1000_rate_limited_once",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100&cursor=signed-capacity-lease-position-99900",
+      "credential": "mobile:read_phone_a",
+      "status": 429,
+      "headers": {
+        "Retry-After": "60"
+      },
+      "body": {
+        "error": "rate_limited",
+        "read_lease_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "retry_cursor": "signed-capacity-lease-position-99900"
+      },
+      "page_number": 1000,
+      "client_result": "lease_fixed_from_admission_not_renewed;keep_cursor_and_staged_rows;no_checkpoint"
+    },
+    {
+      "name": "capacity_snapshot_page_1000_after_one_retry",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100&cursor=signed-capacity-lease-position-99900",
+      "credential": "mobile:read_phone_a",
+      "status": 200,
+      "body": {
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 12,
+        "revision": 100000,
+        "read_lease_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "erasure_floor": 0,
+        "items": [
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001863d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001863e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001863f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018640",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018641",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018642",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018643",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018644",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018645",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018646",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018647",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018648",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018649",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018650",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018651",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018652",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018653",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018654",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018655",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018656",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018657",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018658",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018659",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018660",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018661",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018662",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018663",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018664",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018665",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018666",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018667",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018668",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018669",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018670",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018671",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018672",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018673",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018674",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018675",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018676",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018677",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018678",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018679",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018680",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018681",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018682",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018683",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018684",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018685",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018686",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018687",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018688",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018689",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018690",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018691",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018692",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018693",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018694",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018695",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018696",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018697",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018698",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018699",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-0000000186a0",
+            "person_revision": 1
+          }
+        ],
+        "next_cursor": null,
+        "complete": true
+      },
+      "page_number": 1000,
+      "elapsed_seconds": 65000,
+      "client_result": "only_now_atomically_promote_all_100000_at_gen12_rev100000"
+    },
+    {
+      "name": "capacity_export_page_1_is_not_full_export",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/export?limit=100",
+      "credential": "mobile:read_phone_a",
+      "status": 200,
+      "body": {
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 12,
+        "revision": 100000,
+        "read_lease_id": "bbbbbbbb-1111-4111-8111-111111111111",
+        "erasure_floor": 0,
+        "items": [
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000001",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000002",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000003",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000004",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000005",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000006",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000007",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000008",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000009",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000010",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000011",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000012",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000013",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000014",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000015",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000016",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000017",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000018",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000019",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000020",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000021",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000022",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000023",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000024",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000025",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000026",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000027",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000028",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000029",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000030",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000031",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000032",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000033",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000034",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000035",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000036",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000037",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000038",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000039",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000040",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000041",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000042",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000043",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000044",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000045",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000046",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000047",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000048",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000049",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000050",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000051",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000052",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000053",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000054",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000055",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000056",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000057",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000058",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000059",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000060",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000061",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000062",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000063",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000064",
+            "person_revision": 1
+          }
+        ],
+        "next_cursor": "signed-export-capacity-position-100",
+        "complete": false
+      },
+      "fixture": "Exactly 100000 distinct followed UUIDs at gen12/rev100000; pages 1..1000 enumerate ascending UUID keys, 100/page; page excerpts do not imply missing intermediate pages. Concurrent writes after rev100000 must not alter pinned result.",
+      "capacity": 100000,
+      "page_size": 100,
+      "expected_pages": 1000,
+      "page_number": 1,
+      "client_result": "partial_export_never_disclose_as_complete",
+      "lease_expires_after_admission_seconds": 2592000
+    },
+    {
+      "name": "capacity_export_page_1000_after_restart_and_429",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/export?limit=100&cursor=signed-export-capacity-position-99900",
+      "credential": "mobile:read_phone_a",
+      "status": 200,
+      "body": {
+        "server_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "default",
+        "viewer_id": "33333333-3333-4333-8333-333333333333",
+        "cohort": "live",
+        "owner_generation": 12,
+        "revision": 100000,
+        "read_lease_id": "bbbbbbbb-1111-4111-8111-111111111111",
+        "erasure_floor": 0,
+        "items": [
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001863d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001863e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001863f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018640",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018641",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018642",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018643",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018644",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018645",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018646",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018647",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018648",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018649",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018650",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018651",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018652",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018653",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018654",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018655",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018656",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018657",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018658",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018659",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018660",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018661",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018662",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018663",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018664",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018665",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018666",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018667",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018668",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018669",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018670",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018671",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018672",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018673",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018674",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018675",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018676",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018677",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018678",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018679",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018680",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018681",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018682",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018683",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018684",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018685",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018686",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018687",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018688",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018689",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018690",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018691",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018692",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018693",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018694",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018695",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018696",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018697",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018698",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018699",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869a",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869b",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869c",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869d",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869e",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869f",
+            "person_revision": 1
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-0000000186a0",
+            "person_revision": 1
+          }
+        ],
+        "next_cursor": null,
+        "complete": true
+      },
+      "page_number": 1000,
+      "elapsed_seconds": 65000,
+      "client_result": "only_complete_pinned_owner_export_is_authoritative"
+    },
+    {
+      "name": "capacity_changes_first_page_pins_fixed_upper",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=12&after_revision=0&limit=100",
+      "credential": "mobile:read_phone_b",
+      "status": 200,
+      "body": {
+        "owner_generation": 12,
+        "revision": 100000,
+        "read_lease_id": "cccccccc-1111-4111-8111-111111111111",
+        "erasure_floor": 0,
+        "changes": [
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000001",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 1,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000002",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 2,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000003",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 3,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000004",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 4,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000005",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 5,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000006",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 6,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000007",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 7,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000008",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 8,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000009",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 9,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 10,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 11,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 12,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 13,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 14,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000000f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 15,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000010",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 16,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000011",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 17,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000012",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 18,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000013",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 19,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000014",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 20,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000015",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 21,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000016",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 22,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000017",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 23,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000018",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 24,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000019",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 25,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 26,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 27,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 28,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 29,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 30,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000001f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 31,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000020",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 32,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000021",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 33,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000022",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 34,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000023",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 35,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000024",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 36,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000025",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 37,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000026",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 38,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000027",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 39,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000028",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 40,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000029",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 41,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 42,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 43,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 44,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 45,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 46,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000002f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 47,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000030",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 48,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000031",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 49,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000032",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 50,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000033",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 51,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000034",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 52,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000035",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 53,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000036",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 54,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000037",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 55,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000038",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 56,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000039",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 57,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 58,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 59,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 60,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 61,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 62,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000003f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 63,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000040",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 64,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000041",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 65,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000042",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 66,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000043",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 67,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000044",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 68,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000045",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 69,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000046",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 70,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000047",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 71,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000048",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 72,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000049",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 73,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 74,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 75,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 76,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 77,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 78,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000004f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 79,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000050",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 80,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000051",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 81,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000052",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 82,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000053",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 83,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000054",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 84,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000055",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 85,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000056",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 86,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000057",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 87,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000058",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 88,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000059",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 89,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 90,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 91,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 92,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 93,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 94,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000000005f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 95,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000060",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 96,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000061",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 97,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000062",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 98,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000063",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000000064",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 100,
+            "change_ordinal": 0
+          }
+        ],
+        "next_cursor": "signed-change-upper-100000-position-100",
+        "complete": false
+      },
+      "fixture": "100000 eligible single-subject changes rev1..100000; after_revision=0. Concurrent rev100001..200000 append after first page; fixed upper remains 100000, no starvation.",
+      "eligible_changes": 100000,
+      "page_size": 100,
+      "expected_pages": 1000,
+      "page_number": 1,
+      "client_result": "keep_original_checkpoint_gen12_rev0;stage_not_authoritative",
+      "lease_expires_after_admission_seconds": 2592000,
+      "oldest_delta_age_days_at_admission": 60
+    },
+    {
+      "name": "capacity_changes_page_1000_fixed_upper_after_restart_and_new_writes",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=12&after_revision=0&limit=100&cursor=signed-change-upper-100000-position-99900",
+      "credential": "mobile:read_phone_b",
+      "status": 200,
+      "body": {
+        "owner_generation": 12,
+        "revision": 100000,
+        "read_lease_id": "cccccccc-1111-4111-8111-111111111111",
+        "erasure_floor": 0,
+        "changes": [
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001863d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99901,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001863e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99902,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001863f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99903,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018640",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99904,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018641",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99905,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018642",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99906,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018643",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99907,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018644",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99908,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018645",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99909,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018646",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99910,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018647",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99911,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018648",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99912,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018649",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99913,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99914,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99915,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99916,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99917,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99918,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001864f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99919,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018650",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99920,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018651",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99921,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018652",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99922,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018653",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99923,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018654",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99924,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018655",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99925,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018656",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99926,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018657",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99927,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018658",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99928,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018659",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99929,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99930,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99931,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99932,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99933,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99934,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001865f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99935,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018660",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99936,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018661",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99937,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018662",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99938,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018663",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99939,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018664",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99940,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018665",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99941,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018666",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99942,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018667",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99943,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018668",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99944,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018669",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99945,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99946,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99947,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99948,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99949,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99950,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001866f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99951,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018670",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99952,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018671",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99953,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018672",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99954,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018673",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99955,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018674",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99956,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018675",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99957,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018676",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99958,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018677",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99959,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018678",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99960,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018679",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99961,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99962,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99963,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99964,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99965,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99966,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001867f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99967,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018680",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99968,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018681",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99969,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018682",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99970,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018683",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99971,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018684",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99972,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018685",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99973,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018686",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99974,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018687",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99975,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018688",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99976,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018689",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99977,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99978,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99979,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99980,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99981,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99982,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001868f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99983,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018690",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99984,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018691",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99985,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018692",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99986,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018693",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99987,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018694",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99988,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018695",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99989,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018696",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99990,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018697",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99991,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018698",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99992,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-000000018699",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99993,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869a",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99994,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869b",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99995,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869c",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99996,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869d",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99997,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869e",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99998,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-00000001869f",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 99999,
+            "change_ordinal": 0
+          },
+          {
+            "subject_id": "00000000-0000-4000-8000-0000000186a0",
+            "action": "follow",
+            "person_revision": 1,
+            "revision": 100000,
+            "change_ordinal": 0
+          }
+        ],
+        "next_cursor": null,
+        "complete": true
+      },
+      "page_number": 1000,
+      "elapsed_seconds": 65000,
+      "concurrent_writes_after_upper_revision": 100000,
+      "client_result": "atomically_commit_gen12_rev100000_only_when_complete;request_next_delta_after_100000"
+    },
+    {
+      "name": "over_100000_change_window_falls_back_before_first_page",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=12&after_revision=0&limit=100",
+      "credential": "mobile:read_phone_b",
+      "status": 409,
+      "body": {
+        "error": "snapshot_required"
+      },
+      "eligible_changes": 100001,
+      "client_result": "no_partial_delta_or_checkpoint;new_full_snapshot_required"
+    },
+    {
+      "name": "capacity_lease_older_than_30_days_never_promotes_partial",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100&cursor=signed-expired-capacity-lease",
+      "credential": "mobile:read_phone_a",
+      "status": 409,
+      "body": {
+        "error": "snapshot_required"
+      },
+      "client_result": "discard_partial_stage;new_full_snapshot;never_empty_or_committed",
+      "lease_age_days": 30
+    },
+    {
+      "name": "capacity_lease_subject_erasure_revokes_all_versions",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100&cursor=signed-erased-lease",
+      "credential": "mobile:read_phone_a",
+      "status": 409,
+      "body": {
+        "error": "snapshot_required"
+      },
+      "client_result": "no_old_uuid_from_pinned_version;discard_partial_stage"
+    },
+    {
+      "name": "capacity_same_page_second_429_is_contract_violation",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100&cursor=signed-capacity-lease-position-99900",
+      "credential": "mobile:read_phone_a",
+      "status": 429,
+      "headers": {
+        "Retry-After": "60"
+      },
+      "body": {
+        "error": "rate_limited",
+        "read_lease_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "retry_cursor": "signed-capacity-lease-position-99900"
+      },
+      "invalid_server_sequence": true,
+      "client_result": "second_429_for_same_admitted_page_violates_progress_guarantee;reject_and_report_not_authoritative"
+    },
+    {
+      "name": "lost_200_lookup_effective_applied_exact",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/99999999-9999-4999-8999-999999999999",
+      "credential": "mobile:read_same_owner",
+      "status": 200,
+      "body": {
+        "operation_id": "99999999-9999-4999-8999-999999999999",
+        "original_http_status": 200,
+        "effective": true,
+        "owner_generation": 8,
+        "result": {
+          "operation_id": "99999999-9999-4999-8999-999999999999",
+          "subject_id": "66666666-6666-4666-8666-666666666666",
+          "owner_generation": 8,
+          "revision": 1,
+          "person_revision": 1,
+          "status": "applied"
+        }
+      },
+      "client_result": "only_if_same_generation_consent_active_and_not_erased_mark_synced"
+    },
+    {
+      "name": "lost_409_lookup_effective_conflict_exact",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "credential": "mobile:read_same_owner",
+      "status": 200,
+      "body": {
+        "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "original_http_status": 409,
+        "effective": true,
+        "owner_generation": 10,
+        "result": {
+          "error": "person_conflict",
+          "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "owner_generation": 10,
+          "revision": 1,
+          "person_revision": 1,
+          "current_following": true
+        }
+      },
+      "client_result": "conflict_never_synced_even_if_current_following_true"
+    },
+    {
+      "name": "lost_200_contradictory_applied_with_original_409_rejected",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/99999999-9999-4999-8999-999999999999",
+      "credential": "mobile:read_same_owner",
+      "status": 200,
+      "body": {
+        "operation_id": "99999999-9999-4999-8999-999999999999",
+        "original_http_status": 409,
+        "effective": true,
+        "owner_generation": 8,
+        "result": {
+          "operation_id": "99999999-9999-4999-8999-999999999999",
+          "subject_id": "66666666-6666-4666-8666-666666666666",
+          "owner_generation": 8,
+          "revision": 1,
+          "person_revision": 1,
+          "status": "applied"
+        }
+      },
+      "invalid_response_schema": true,
+      "client_result": "strict_android_reject_no_synced"
+    },
+    {
+      "name": "lost_409_contradictory_conflict_with_original_200_rejected",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "credential": "mobile:read_same_owner",
+      "status": 200,
+      "body": {
+        "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "original_http_status": 200,
+        "effective": true,
+        "owner_generation": 10,
+        "result": {
+          "error": "person_conflict",
+          "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "owner_generation": 10,
+          "revision": 1,
+          "person_revision": 1,
+          "current_following": true
+        }
+      },
+      "invalid_response_schema": true,
+      "client_result": "strict_android_reject_no_synced"
+    },
+    {
+      "name": "lost_409_after_owner_reset_redacted",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "credential": "mobile:read_same_owner",
+      "status": 200,
+      "body": {
+        "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "original_http_status": 409,
+        "effective": false,
+        "owner_generation": 11,
+        "result": {
+          "status": "superseded",
+          "reason": "owner_reset",
+          "original_owner_generation": 10,
+          "owner_generation": 11
+        }
+      },
+      "client_result": "never_conflict_current_or_synced;no_subject_uuid"
+    },
+    {
+      "name": "lost_200_after_erasure_false_with_applied_payload_rejected",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/99999999-9999-4999-8999-999999999999",
+      "credential": "mobile:read_same_owner",
+      "status": 200,
+      "body": {
+        "operation_id": "99999999-9999-4999-8999-999999999999",
+        "original_http_status": 200,
+        "effective": false,
+        "owner_generation": 8,
+        "result": {
+          "operation_id": "99999999-9999-4999-8999-999999999999",
+          "subject_id": "66666666-6666-4666-8666-666666666666",
+          "owner_generation": 8,
+          "revision": 1,
+          "person_revision": 1,
+          "status": "applied"
+        }
+      },
+      "invalid_response_schema": true,
+      "client_result": "strict_android_reject_redisclosed_subject"
+    },
+    {
+      "name": "lost_409_effective_wrong_generation_rejected",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "credential": "mobile:read_same_owner",
+      "status": 200,
+      "body": {
+        "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "original_http_status": 409,
+        "effective": true,
+        "owner_generation": 11,
+        "result": {
+          "error": "person_conflict",
+          "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "owner_generation": 10,
+          "revision": 1,
+          "person_revision": 1,
+          "current_following": true
+        }
+      },
+      "client_result": "strict_android_cross_field_reject_even_if_schema_valid"
+    },
+    {
+      "name": "capacity_first_page_429_reserves_lease_before_reply",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=100",
+      "credential": "mobile:read_phone_a",
+      "status": 429,
+      "headers": {
+        "Retry-After": "60"
+      },
+      "body": {
+        "error": "rate_limited",
+        "read_lease_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "retry_cursor": "signed-capacity-initial-lease"
+      },
+      "fixture": "Admitted generation12/revision100000 owner snapshot; durable fixed 30-day lease reserved before first 429",
+      "client_result": "persist_signed_retry_cursor_no_authoritative_page;retry_same_pinned_lease_once"
+    },
+    {
+      "name": "delta_older_than_60_days_falls_back_before_admission",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=12&after_revision=0&limit=100",
+      "credential": "mobile:read_phone_b",
+      "status": 409,
+      "body": {
+        "error": "snapshot_required"
+      },
+      "oldest_delta_age_days_at_admission": 61,
+      "client_result": "no_lease_no_page;new_full_snapshot"
+    },
+    {
+      "name": "snapshot_limit_1_denied_before_lease",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/snapshot?limit=1",
+      "credential": "mobile:read_phone_a",
+      "status": 400,
+      "body": {
+        "error": "invalid_request"
+      },
+      "client_result": "fixed_page100_required"
+    },
+    {
+      "name": "export_limit_50_denied_before_lease",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/export?limit=50",
+      "credential": "mobile:read_phone_a",
+      "status": 400,
+      "body": {
+        "error": "invalid_request"
+      },
+      "client_result": "fixed_page100_required"
+    },
+    {
+      "name": "changes_limit_1_denied_before_lease",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/changes?owner_generation=12&after_revision=0&limit=1",
+      "credential": "mobile:read_phone_b",
+      "status": 400,
+      "body": {
+        "error": "invalid_request"
+      },
+      "client_result": "fixed_page100_required"
+    },
+    {
+      "name": "lost_200_lookup_effective_applied_wrong_path_id_rejected",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/22222222-2222-4222-8222-222222222222",
+      "credential": "mobile:read_same_owner",
+      "status": 200,
+      "body": {
+        "operation_id": "99999999-9999-4999-8999-999999999999",
+        "original_http_status": 200,
+        "effective": true,
+        "owner_generation": 8,
+        "result": {
+          "operation_id": "99999999-9999-4999-8999-999999999999",
+          "subject_id": "66666666-6666-4666-8666-666666666666",
+          "owner_generation": 8,
+          "revision": 1,
+          "person_revision": 1,
+          "status": "applied"
+        }
+      },
+      "client_result": "strict_android_reject_body_ids_even_if_equal_to_each_other_but_not_path",
+      "invalid_client_cross_field": true
+    },
+    {
+      "name": "lost_409_lookup_effective_conflict_wrong_path_id_rejected",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/operations/22222222-2222-4222-8222-222222222222",
+      "credential": "mobile:read_same_owner",
+      "status": 200,
+      "body": {
+        "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "original_http_status": 409,
+        "effective": true,
+        "owner_generation": 10,
+        "result": {
+          "error": "person_conflict",
+          "operation_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          "owner_generation": 10,
+          "revision": 1,
+          "person_revision": 1,
+          "current_following": true
+        }
+      },
+      "client_result": "strict_android_reject_body_ids_even_if_equal_to_each_other_but_not_path",
+      "invalid_client_cross_field": true
+    }
+  ]
+}
