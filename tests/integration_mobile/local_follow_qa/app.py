@@ -8,7 +8,16 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from api.ratelimit import limiter
-from api.routes import auth, config, device_auth, mobile_follow_browser, mobile_follow_read, mobile_follow_write
+from api.routes import (
+    auth,
+    config,
+    device_auth,
+    mobile_activity,
+    mobile_evidence,
+    mobile_follow_browser,
+    mobile_follow_read,
+    mobile_follow_write,
+)
 from config import settings
 from database import async_session, engine
 from services import dynamic_settings as ds
@@ -32,6 +41,8 @@ for router in (
     auth.router,
     device_auth.router,
     config.router,
+    mobile_activity.router,
+    mobile_evidence.router,
     mobile_follow_read.router,
     mobile_follow_write.router,
     mobile_follow_browser.router,
@@ -47,5 +58,6 @@ async def ready():
     return {"status": "ok"}
 
 
-# The 17 follow endpoints are registered here only; production app_factory/routes remain untouched.
+# This local fixture mirrors normal v1.2 mobile auth/capabilities alongside 17 follow routes;
+# never mistake its unguarded synthetic follow registration for product enablement.
 assert len([r for r in app.routes if r.path.startswith("/api/v1/mobile-follow-sync/v1/")]) == 17

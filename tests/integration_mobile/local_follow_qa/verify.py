@@ -5,6 +5,7 @@
 import asyncio
 import re
 import ssl
+import sys
 import uuid
 from pathlib import Path
 
@@ -79,8 +80,19 @@ async def main():
         )
         assert https_redeem.status_code == 200, ("HTTPS device redeem", https_redeem.status_code)
         phone = {"Authorization": "Bearer " + https_redeem.json()["access_token"]}
-        assert (await client.get("/api/v1/auth/mobile/credential", headers=phone)).status_code == 200
+        credential = await client.get("/api/v1/auth/mobile/credential", headers=phone)
+        assert credential.status_code == 200, ("mobile credential", credential.status_code)
         print("REAL_PASSWORD_LOGIN_DEVICE_AUTHORIZE_CONFIRM_REDEEM_PROOF=200")
+        capabilities = await client.get("/api/v1/mobile-activity/v1/capabilities", headers=phone)
+        assert capabilities.status_code == 200, ("v1.2 mobile capabilities", capabilities.status_code)
+        assert capabilities.json()["viewer_id"] and capabilities.json()["server_id"]
+        assert (await client.get("/api/v1/mobile-activity/v1/capabilities")).status_code == 401
+        print("ACCEPTED_V12_SIGNED_IN_CAPABILITIES=200; ANONYMOUS=401")
+        if "--routes-only" in sys.argv:
+            # Authorization challenge creates only short-lived OAuth state. Do
+            # not change owner consent, follow grants or removals on Android's
+            # final shared session.
+            return
         available = await client.get(path + "/availability", headers=phone)
         assert available.status_code == 200, ("availability", available.status_code, available.text[:200])
         generation = available.json()["owner_generation"]
