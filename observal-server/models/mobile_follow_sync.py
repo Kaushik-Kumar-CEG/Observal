@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -96,7 +97,7 @@ class MobileFollowOperation(PartitionKey, Base):
     )
     body_digest: Mapped[bytes | None] = mapped_column(LargeBinary)
     original_http_status: Mapped[int] = mapped_column(SmallInteger)
-    outcome: Mapped[dict | None] = mapped_column(JSONB)
+    outcome: Mapped[dict | None] = mapped_column(JSONB().with_variant(JSON(), "sqlite"))
     effective: Mapped[bool] = mapped_column(Boolean, server_default="true")
     lane: Mapped[str] = mapped_column(String(8))
     logical_bytes: Mapped[int] = mapped_column(Integer)
