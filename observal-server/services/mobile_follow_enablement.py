@@ -21,6 +21,7 @@ from api.deps import get_db
 ROUTE_INSTALL_ENV = "OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL"
 ACK_KEY = "mobile.follow_sync_v105_owner_decisions_ack"
 ENABLE_KEY = "mobile.follow_sync_v105_operator_enabled"
+WORKER_KEY = "mobile.follow_sync_v105_worker_heartbeat"
 ACK_VALUE = "owner-approved-v105-quota-consent-storage-recovery"
 
 
@@ -33,8 +34,11 @@ async def require_operator_approval(db: AsyncSession = Depends(get_db)) -> None:
         entries = dict(
             (
                 await db.execute(
-                    text("SELECT key,value FROM enterprise_config WHERE key IN (:ack,:enabled)"),
-                    {"ack": ACK_KEY, "enabled": ENABLE_KEY},
+                    text("""SELECT key,value FROM enterprise_config
+                    WHERE key IN (:ack,:enabled,:worker)
+                      AND (key <> :worker OR updated_at >= clock_timestamp() - interval '90 seconds')
+                    ORDER BY key FOR SHARE"""),
+                    {"ack": ACK_KEY, "enabled": ENABLE_KEY, "worker": WORKER_KEY},
                 )
             ).all()
         )
@@ -42,5 +46,5 @@ async def require_operator_approval(db: AsyncSession = Depends(get_db)) -> None:
         # Fail closed on DB loss; never let a stale in-memory/Redis setting
         # authorize an already admitted approval or operation.
         raise HTTPException(503, "follow sync approval store unavailable", headers={"Retry-After": "1"}) from exc
-    if entries.get(ACK_KEY) != ACK_VALUE or entries.get(ENABLE_KEY) != "true":
+    if entries.get(ACK_KEY) != ACK_VALUE or entries.get(ENABLE_KEY) != "true" or entries.get(WORKER_KEY) != "running":
         raise HTTPException(404, "follow sync not enabled")

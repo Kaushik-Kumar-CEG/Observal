@@ -11,6 +11,7 @@ from test_follow_privacy_postgres import _consent, _partition
 from test_follow_privacy_postgres import scratch as _scratch_fixture
 
 from jobs import mobile_follow_privacy as job
+from services.mobile_follow_enablement import WORKER_KEY
 from services.mobile_follow_privacy import admit_privacy_action, withdrawal_body_digest
 
 pytestmark = pytest.mark.skipif(os.getenv("MOBILE_MIGRATION_SCRATCH") != "1", reason="loopback scratch PG only")
@@ -67,6 +68,16 @@ async def test_restart_and_owner_fairness_are_bounded(scratch, monkeypatch):
     assert await job.run_mobile_follow_privacy(ctx) == 1
     assert await job.run_mobile_follow_privacy(ctx) == 1
     async with scratch() as db:
+        assert (
+            await db.scalar(
+                text(
+                    "SELECT value='running' AND updated_at>clock_timestamp()-interval '90 seconds' "
+                    "FROM enterprise_config WHERE key=:key"
+                ),
+                {"key": WORKER_KEY},
+            )
+            is True
+        )
         for key in (first, second):
             assert (
                 await db.scalar(

@@ -19,7 +19,8 @@ class Database:
 
     async def execute(self, statement, params):
         assert "enterprise_config" in str(statement)
-        assert params == {"ack": gate.ACK_KEY, "enabled": gate.ENABLE_KEY}
+        assert params == {"ack": gate.ACK_KEY, "enabled": gate.ENABLE_KEY, "worker": gate.WORKER_KEY}
+        assert "FOR SHARE" in str(statement) and "90 seconds" in str(statement)
         self.queries += 1
         if self.broken:
             raise ConnectionError("do not leak DB diagnostics")
@@ -57,7 +58,15 @@ def test_explicit_install_registers_exactly_seventeen_as_one_gated_set(monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entries", ({}, {gate.ENABLE_KEY: "true"}, {gate.ACK_KEY: gate.ACK_VALUE}))
+@pytest.mark.parametrize(
+    "entries",
+    (
+        {},
+        {gate.ENABLE_KEY: "true"},
+        {gate.ACK_KEY: gate.ACK_VALUE},
+        {gate.ACK_KEY: gate.ACK_VALUE, gate.ENABLE_KEY: "true"},
+    ),
+)
 async def test_missing_approval_or_missing_operator_switch_stays_closed(entries):
     db = Database(entries)
     with pytest.raises(HTTPException) as denied:
@@ -78,7 +87,7 @@ async def test_fresh_db_loss_fails_closed_without_disclosing_dsn():
 
 @pytest.mark.asyncio
 async def test_only_both_exact_owner_and_operator_decisions_allow_request():
-    db = Database({gate.ACK_KEY: gate.ACK_VALUE, gate.ENABLE_KEY: "true"})
+    db = Database({gate.ACK_KEY: gate.ACK_VALUE, gate.ENABLE_KEY: "true", gate.WORKER_KEY: "running"})
     await gate.require_operator_approval(db)
     await gate.require_operator_approval(db)
     assert db.queries == 2  # No process-local/Redis cached permission after operator revocation.

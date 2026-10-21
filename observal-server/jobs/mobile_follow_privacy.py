@@ -7,10 +7,13 @@ across active partitions even when an owner has many rows or needs operator
 attention. Progress is the committed rows, not this process-local scan cursor.
 """
 
+import uuid
+
 from loguru import logger as optic
 from sqlalchemy import text
 
 from database import async_session
+from services.mobile_follow_enablement import WORKER_KEY
 from services.mobile_follow_privacy import erase_batch
 from services.mobile_follow_store import Partition
 
@@ -101,6 +104,16 @@ async def run_mobile_follow_privacy(ctx: dict) -> int:
     needs_operator is observed but never automatically resumed. A restart loses
     only the fairness cursor: each committed erase_batch step remains durable.
     """
+    # Liveness proof uses the installed worker's durable PostgreSQL clock, not
+    # Redis or the API process's cached settings. A stopped worker closes new
+    # routes within 90 seconds; already accepted erasures remain fenced.
+    async with async_session.begin() as db:
+        await db.execute(
+            text("""INSERT INTO enterprise_config (id,key,value,updated_at)
+                VALUES (:id,:key,'running',clock_timestamp())
+                ON CONFLICT (key) DO UPDATE SET value='running',updated_at=clock_timestamp()"""),
+            {"id": uuid.uuid4(), "key": WORKER_KEY},
+        )
     cursor = ctx.get("mobile_follow_privacy_cursor")
     rows = await _candidates(cursor)
     progressed = 0

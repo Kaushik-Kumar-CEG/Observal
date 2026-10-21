@@ -276,6 +276,7 @@ async def test_production_route_install_stays_closed_until_fresh_owner_and_opera
                     for key, value in (
                         (mobile_follow_enablement.ACK_KEY, mobile_follow_enablement.ACK_VALUE),
                         (mobile_follow_enablement.ENABLE_KEY, "true"),
+                        (mobile_follow_enablement.WORKER_KEY, "running"),
                     ):
                         await db.execute(
                             text(
@@ -289,9 +290,34 @@ async def test_production_route_install_stays_closed_until_fresh_owner_and_opera
                     assert result.status_code == 200, (result.status_code, result.text[:200])
                 async with engine.begin() as db:
                     await db.execute(
-                        text("UPDATE enterprise_config SET value='false' WHERE key=:key"),
-                        {"key": mobile_follow_enablement.ENABLE_KEY},
+                        text(
+                            "UPDATE enterprise_config SET updated_at=clock_timestamp()-interval '91 seconds' "
+                            "WHERE key=:key"
+                        ),
+                        {"key": mobile_follow_enablement.WORKER_KEY},
                     )
+                assert (await first.get(ROOT + "/availability", headers=bearer(phone))).status_code == 404
+                async with engine.begin() as db:
+                    await db.execute(
+                        text("UPDATE enterprise_config SET updated_at=clock_timestamp() WHERE key=:key"),
+                        {"key": mobile_follow_enablement.WORKER_KEY},
+                    )
+                assert (await second.get(ROOT + "/availability", headers=bearer(phone))).status_code == 200
+                async with engine.connect() as admitted:
+                    await mobile_follow_enablement.require_operator_approval(admitted)
+
+                    async def disable_after_admitted_transaction():
+                        async with engine.begin() as editor:
+                            await editor.execute(
+                                text("UPDATE enterprise_config SET value='false' WHERE key=:key"),
+                                {"key": mobile_follow_enablement.ENABLE_KEY},
+                            )
+
+                    disable = asyncio.create_task(disable_after_admitted_transaction())
+                    await asyncio.sleep(0.15)
+                    assert not disable.done(), "operator revocation must wait for admitted transaction commit"
+                    await admitted.commit()  # A protected write also commits with this same session.
+                    await asyncio.wait_for(disable, 5)
                 for client in (first, second):
                     assert (await client.get(ROOT + "/availability", headers=bearer(phone))).status_code == 404
                     assert (await client.post(ROOT + "/write-authorization", headers=bearer(phone))).status_code == 503
