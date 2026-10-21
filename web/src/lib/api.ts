@@ -115,6 +115,8 @@ import type {
 	InboxCounts,
 	InboxFilters,
 	InboxState,
+	FollowWriteApprovalRequest,
+	FollowWriteApprovalResponse,
 } from "./types";
 import { sessionExpiredLoginUrl } from "./safe-next";
 
@@ -451,6 +453,11 @@ export const auth = {
 		get<E2eStatusResult>(
 			`/auth/sso/diagnostics/${encodeURIComponent(corrId)}`,
 		),
+};
+
+export const mobileFollow = {
+	approveWrite: (body: FollowWriteApprovalRequest) =>
+		post<FollowWriteApprovalResponse>("/mobile-follow-sync/v1/write-approval", body),
 };
 
 // ── Registry (all 8 types) ─────────────────────────────────────────

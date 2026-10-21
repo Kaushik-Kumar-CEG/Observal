@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
+// SPDX-License-Identifier: Apache-2.0
+
 /* eslint-disable */
 
 // @ts-nocheck
@@ -42,6 +45,7 @@ import { Route as AuthedAdminReviewPolicyRouteImport } from './routes/_authed/_a
 import { Route as AuthedAdminDiagnosticsRouteImport } from './routes/_authed/_admin/diagnostics'
 import { Route as AuthedAdminDashboardRouteImport } from './routes/_authed/_admin/dashboard'
 import { Route as AuthedAdminAuditLogRouteImport } from './routes/_authed/_admin/audit-log'
+import { Route as authFollowApproveRouteImport } from './routes/(auth)/follow/approve'
 import { Route as AuthedUserTracesIndexRouteImport } from './routes/_authed/_user/traces/index'
 import { Route as AuthedAgentsNamespaceSlugRouteImport } from './routes/_authed/agents/$namespace.$slug'
 import { Route as AuthedUserTracesTraceIdRouteImport } from './routes/_authed/_user/traces/$traceId'
@@ -213,6 +217,11 @@ const AuthedAdminAuditLogRoute = AuthedAdminAuditLogRouteImport.update({
   path: '/audit-log',
   getParentRoute: () => AuthedAdminRoute,
 } as any)
+const authFollowApproveRoute = authFollowApproveRouteImport.update({
+  id: '/(auth)/follow/approve',
+  path: '/follow/approve',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AuthedUserTracesIndexRoute = AuthedUserTracesIndexRouteImport.update({
   id: '/traces/',
   path: '/traces/',
@@ -257,6 +266,7 @@ export interface FileRoutesByFullPath {
   '/leaderboard': typeof AuthedLeaderboardRoute
   '/review': typeof AuthedReviewRoute
   '/teamspaces': typeof AuthedTeamspacesRouteWithChildren
+  '/follow/approve': typeof authFollowApproveRoute
   '/audit-log': typeof AuthedAdminAuditLogRoute
   '/dashboard': typeof AuthedAdminDashboardRoute
   '/diagnostics': typeof AuthedAdminDiagnosticsRoute
@@ -295,6 +305,7 @@ export interface FileRoutesByTo {
   '/leaderboard': typeof AuthedLeaderboardRoute
   '/review': typeof AuthedReviewRoute
   '/teamspaces': typeof AuthedTeamspacesRouteWithChildren
+  '/follow/approve': typeof authFollowApproveRoute
   '/audit-log': typeof AuthedAdminAuditLogRoute
   '/dashboard': typeof AuthedAdminDashboardRoute
   '/diagnostics': typeof AuthedAdminDiagnosticsRoute
@@ -337,6 +348,7 @@ export interface FileRoutesById {
   '/_authed/review': typeof AuthedReviewRoute
   '/_authed/teamspaces': typeof AuthedTeamspacesRouteWithChildren
   '/_authed/': typeof AuthedIndexRoute
+  '/(auth)/follow/approve': typeof authFollowApproveRoute
   '/_authed/_admin/audit-log': typeof AuthedAdminAuditLogRoute
   '/_authed/_admin/dashboard': typeof AuthedAdminDashboardRoute
   '/_authed/_admin/diagnostics': typeof AuthedAdminDiagnosticsRoute
@@ -377,6 +389,7 @@ export interface FileRouteTypes {
     | '/leaderboard'
     | '/review'
     | '/teamspaces'
+    | '/follow/approve'
     | '/audit-log'
     | '/dashboard'
     | '/diagnostics'
@@ -415,6 +428,7 @@ export interface FileRouteTypes {
     | '/leaderboard'
     | '/review'
     | '/teamspaces'
+    | '/follow/approve'
     | '/audit-log'
     | '/dashboard'
     | '/diagnostics'
@@ -456,6 +470,7 @@ export interface FileRouteTypes {
     | '/_authed/review'
     | '/_authed/teamspaces'
     | '/_authed/'
+    | '/(auth)/follow/approve'
     | '/_authed/_admin/audit-log'
     | '/_authed/_admin/dashboard'
     | '/_authed/_admin/diagnostics'
@@ -491,6 +506,7 @@ export interface RootRouteChildren {
   authDeviceRoute: typeof authDeviceRoute
   authLoginRoute: typeof authLoginRoute
   authRegisterRoute: typeof authRegisterRoute
+  authFollowApproveRoute: typeof authFollowApproveRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -726,6 +742,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedAdminAuditLogRouteImport
       parentRoute: typeof AuthedAdminRoute
     }
+    '/(auth)/follow/approve': {
+      id: '/(auth)/follow/approve'
+      path: '/follow/approve'
+      fullPath: '/follow/approve'
+      preLoaderRoute: typeof authFollowApproveRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_authed/_user/traces/': {
       id: '/_authed/_user/traces/'
       path: '/traces'
@@ -895,6 +918,7 @@ const rootRouteChildren: RootRouteChildren = {
   authDeviceRoute: authDeviceRoute,
   authLoginRoute: authLoginRoute,
   authRegisterRoute: authRegisterRoute,
+  authFollowApproveRoute: authFollowApproveRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

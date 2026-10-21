@@ -14,3 +14,4 @@ export * from "./types/admin";
 export * from "./types/team";
 export * from "./types/inbox";
 export * from "./types/review";
+export * from "./types/mobile-follow";
