@@ -18,6 +18,11 @@ cd web && pnpm install --frozen-lockfile && pnpm build && cd ..
 QA_DIR=$(<tests/integration_mobile/local_follow_qa/.runtime/run)
 observal-server/.venv/bin/python tests/integration_mobile/local_follow_qa/verify.py
 curl --noproxy '*' --cacert "$QA_DIR/ca.crt" -fsS https://localhost:18443/readyz
+# verify.py consumes a grant and removes the scratch owner's state: reset before Android.
+./tests/integration_mobile/local_follow_qa/down.sh
+./tests/integration_mobile/local_follow_qa/up.sh
+QA_DIR=$(<tests/integration_mobile/local_follow_qa/.runtime/run)
+# Trust ONLY this new session's public $QA_DIR/ca.crt on the QA emulator.
 # Only on an attached Android emulator on this host; check `adb devices` first:
 adb reverse tcp:18443 tcp:18443
 # After tests: adb reverse --remove tcp:18443
