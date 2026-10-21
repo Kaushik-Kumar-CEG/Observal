@@ -16,6 +16,13 @@ for suffix in a b; do
         fi
     fi
 done
+if [[ -f "$state/pid-worker" ]]; then
+    pid=$(<"$state/pid-worker")
+    if [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] && \
+       tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "python $qa/privacy_worker.py"; then
+        kill "$pid" || true
+    fi
+fi
 for suffix in nginx redis pg; do docker rm -fv "${id}${suffix}" >/dev/null 2>&1 || true; done
 if [[ -f "$state/run" ]]; then
     run=$(<"$state/run")

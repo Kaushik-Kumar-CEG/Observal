@@ -107,7 +107,30 @@ async def main():
         assert grant.status_code == 200, ("write-grant", grant.status_code, grant.text[:200])
         replay = await client.post(path + "/write-grant", headers=phone)
         assert replay.status_code == 401, ("one-use grant replay", replay.status_code)
+        edit = {"Authorization": "Bearer " + grant.json()["access_token"]}
+        prepared = await client.post(path + "/removals/prepare", headers=edit)
+        assert prepared.status_code == 200, ("removal prepare", prepared.status_code)
+        removal = await client.post(
+            path + "/removals",
+            headers=edit,
+            json={
+                "nonce": prepared.json()["nonce"],
+                "confirm": True,
+                "owner_generation": consent.json()["owner_generation"],
+            },
+        )
+        assert removal.status_code == 202, ("removal pending", removal.status_code)
+        complete = False
+        for _ in range(30):
+            status = await client.get(path + "/removals/" + removal.json()["removal_id"], headers=phone)
+            assert status.status_code == 200, ("removal status", status.status_code)
+            if status.json()["state"] == "completed":
+                complete = True
+                break
+            await asyncio.sleep(1)
+        assert complete, "local privacy worker did not durably complete removal within 30 seconds"
         print("FOLLOW_AVAILABILITY_CONSENT_BROWSER_ORIGIN_APPROVAL_ONE_USE_GRANT=200; CROSS_ORIGIN=403; REPLAY=401")
+        print("DURABLE_REMOVAL_PENDING_TO_WORKER_COMPLETED=202_TO_200")
 
 
 if __name__ == "__main__":

@@ -56,7 +56,7 @@ isolated() {
     env -i PATH="$PATH" HOME="$HOME" LANG="${LANG:-C.UTF-8}" PYTHONPATH="$PWD" DATABASE_URL="$DATABASE_URL" \
         REDIS_URL="$REDIS_URL" CLICKHOUSE_URL=http://127.0.0.1:9/unused \
         SECRET_KEY="$SECRET_KEY" JWT_KEY_DIR="$JWT_KEY_DIR" QA_PASSWORD="${QA_PASSWORD:-}" \
-        SEED_DEMO_ACCOUNTS=false SKIP_DDL_ON_STARTUP=true "$@"
+        MOBILE_FOLLOW_LOCAL_QA=1 SEED_DEMO_ACCOUNTS=false SKIP_DDL_ON_STARTUP=true "$@"
 }
 cd "$repo/observal-server"
 isolated .venv/bin/python "$qa/seed.py" schema > "$run/seed.log" 2>&1
@@ -74,6 +74,8 @@ for suffix in a b; do
     isolated .venv/bin/uvicorn app:app --app-dir "$qa" --host 127.0.0.1 --port "$port" --no-access-log > "$run/api-$suffix.log" 2>&1 &
     printf '%s\n' "$!" > "$state/pid-$suffix"
 done
+isolated .venv/bin/python "$qa/privacy_worker.py" > "$run/privacy-worker.log" 2>&1 &
+printf '%s\n' "$!" > "$state/pid-worker"
 python3 - "$qa/nginx.conf.template" "$run/nginx.conf" "$(<"$state/port-a")" "$(<"$state/port-b")" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text().replace('__API_A__', sys.argv[3]).replace('__API_B__', sys.argv[4])
