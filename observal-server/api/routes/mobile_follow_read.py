@@ -211,11 +211,13 @@ async def _page(request: Request, authorization: str | None, db: AsyncSession, p
                 if bound_after is None or bound_after != after or generation != row.owner_generation:
                     return error("snapshot_required", 409)
         else:
+            # Generation mismatch is authoritative even during a pending
+            # removal; a prior checkpoint cannot be mistaken for permission.
+            if purpose == "changes" and generation != row.owner_generation:
+                return error("generation_conflict", 409)
             if not _available(row):
                 return error("restricted", 403)
             position = 0
-            if purpose == "changes" and generation != row.owner_generation:
-                return error("generation_conflict", 409)
             if purpose != "changes" and (
                 row.current_revision < minimum or await _stale_image(db, key_for(p), minimum, row.owner_generation)
             ):

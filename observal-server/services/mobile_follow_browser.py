@@ -125,16 +125,24 @@ async def consume_grant_before_mint(db, principal) -> tuple[str, int]:
         partition.owner_generation != principal.generation
         or partition.consent_state != "available"
         or partition.removal_state != "none"
-        or approval is None
-        or approval.status != "approved"
+    ):
+        raise HTTPException(401, "Invalid follow credential")
+    if approval is None or approval.status == "pending":
+        raise HTTPException(403, "Device approval required")
+    if (
+        approval.status != "approved"
         or approval.owner_generation != partition.owner_generation
         or approval.expires_at <= datetime.now(UTC)
     ):
         raise HTTPException(401, "Invalid follow credential")
     generation = partition.owner_generation
-    await db.delete(approval)
+    # Retain the one active device row as a bounded consumed marker. This
+    # distinguishes a never-approved second phone (403) from reuse of a grant
+    # already consumed by this phone (401) across API processes.
+    approval.status = "revoked"
+    approval.approved_at = None
     await db.flush()
-    await db.commit()  # The row is gone durably BEFORE any token is minted.
+    await db.commit()  # One-use consumption is durable BEFORE token minting.
     now = datetime.now(UTC)
     issued = int(now.timestamp())
     return sign_token(

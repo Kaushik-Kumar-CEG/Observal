@@ -4,6 +4,7 @@
 all follow routes, the approved browser UI and privacy gates are complete.
 """
 
+import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import services.dynamic_settings as settings
 from api.deps import get_db
+from services.jwt_service import MOBILE_CLIENT_ID, decode_access_token
 from services.mobile_follow_browser import (
     consume_grant_before_mint,
     enforce_post_limit,
@@ -96,6 +98,15 @@ async def write_approval(
     from services import mobile_follow_auth as auth
 
     origin = issuer_origin(settings.get_sync("deployment.public_url"), settings.get_sync("deployment.frontend_url"))
+    # A signed phone token is never browser authentication, even without an
+    # Origin header. Cross-origin desktop requests are still rejected below.
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            candidate = decode_access_token(authorization[7:].strip(), allow_mobile=True)
+            if candidate.get("client_id") == MOBILE_CLIENT_ID:
+                raise HTTPException(401, {"error": "unauthorized"})
+        except jwt.InvalidTokenError:
+            pass
     require_browser_request(request, origin)
     principal = await auth.authorize_browser_approval(request, authorization, db)
     if body.approve is not True:

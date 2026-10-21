@@ -323,7 +323,7 @@ async def test_seventeen_routes_two_real_http_processes(scratch):
                 "access_token"
             ]
             assert (await first.post(ROOT + "/write-grant", headers=bearer(phone_a))).status_code == 401
-            assert (await first.post(ROOT + "/write-grant", headers=bearer(phone_b))).status_code == 401
+            assert (await first.post(ROOT + "/write-grant", headers=bearer(phone_b))).status_code == 403
             op = str(uuid.uuid4())
             await expect(
                 await first.post(

@@ -104,6 +104,7 @@ async def test_callable_route_requires_browser_guard_before_approval(monkeypatch
 
     auth = types.ModuleType("services.mobile_follow_auth")
     auth.authorize_browser_approval = authorize
+    monkeypatch.setattr(routes, "decode_access_token", lambda *args, **kwargs: {})
     monkeypatch.setitem(sys.modules, "services.mobile_follow_auth", auth)
     monkeypatch.setattr(services, "mobile_follow_auth", auth)
     monkeypatch.setattr(routes.settings, "get_sync", lambda name: ORIGIN)
@@ -139,6 +140,7 @@ async def test_approval_route_commits_without_returning_code_or_grant(monkeypatc
             calls.append("commit")
 
     auth.authorize_browser_approval, auth.approve_challenge = authorize, approve
+    monkeypatch.setattr(routes, "decode_access_token", lambda *args, **kwargs: {})
     monkeypatch.setitem(sys.modules, "services.mobile_follow_auth", auth)
     monkeypatch.setattr(services, "mobile_follow_auth", auth)
     monkeypatch.setattr(routes.settings, "get_sync", lambda name: ORIGIN)
@@ -171,6 +173,7 @@ def test_browser_wire_denials_are_strict_and_size_checked_before_json(monkeypatc
 
     auth.authorize_browser_approval = deny
     auth.authorize_follow_read = deny
+    monkeypatch.setattr(routes, "decode_access_token", lambda *args, **kwargs: {})
     monkeypatch.setitem(sys.modules, "services.mobile_follow_auth", auth)
     monkeypatch.setattr(services, "mobile_follow_auth", auth)
     monkeypatch.setattr(routes.settings, "get_sync", lambda name: ORIGIN)
@@ -259,7 +262,7 @@ def grant_env(monkeypatch):
     events = []
 
     def sign(payload):
-        assert events == ["read-commit", "delete", "flush", "consume-commit"]
+        assert events == ["read-commit", "flush", "consume-commit"]
         assert payload["sub"] == str(owner) and payload["owner_generation"] == 7
         events.append("mint")
         return "signed-token"
@@ -288,10 +291,11 @@ def grant_env(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_grant_consumed_durably_before_signing(grant_env):
-    db, principal, _, events = grant_env
+    db, principal, approval, events = grant_env
     token, ttl = await browser.consume_grant_before_mint(db, principal)
     assert (token, ttl) == ("signed-token", 300)
     assert events[-1] == "mint"
+    assert approval.status == "revoked" and approval.approved_at is None
 
 
 @pytest.mark.asyncio
@@ -300,7 +304,7 @@ async def test_no_token_on_expired_or_unapproved_challenge(grant_env):
     approval.status = "pending"
     with pytest.raises(HTTPException) as error:
         await browser.consume_grant_before_mint(db, principal)
-    assert error.value.status_code == 401
+    assert error.value.status_code == 403
     assert events == ["read-commit"]
 
 
