@@ -41,6 +41,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.api
     image: ghcr.io/observal/observal-api:latest
+    # A retained successful init is not proof after a database restore.
+    entrypoint: ["/bin/sh", "-ec", '/app/.venv/bin/python -m services.mobile_boot_preflight --require-schema && exec "$@"', "--"]
     command:
       [
         "/app/.venv/bin/python",
@@ -188,6 +190,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.api
     image: ghcr.io/observal/observal-api:latest
+    # Fail closed on restored/old schema or mobile-enabled off-clock DB.
+    entrypoint: ["/bin/sh", "-ec", '/app/.venv/bin/python -m services.mobile_boot_preflight --require-schema && exec "$@"', "--"]
     command:
       [
         "/app/.venv/bin/python",

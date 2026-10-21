@@ -104,6 +104,16 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
             timeout=30,
         )
         assert before.returncode == 2 and b"OLD_OR_INCOMPATIBLE_SCHEMA" in before.stdout
+        # The per-process Compose shell gate must refuse to exec an API/worker
+        # even if its old init container is still marked successful.
+        shell_gate = f'{sys.executable} -m services.mobile_boot_preflight --require-schema && exec "$@"'
+        blocked_boot = subprocess.run(
+            ["/bin/sh", "-ec", shell_gate, "--", sys.executable, "-c", "print('BOOT_STARTED')"],
+            env=restore_env,
+            capture_output=True,
+            timeout=30,
+        )
+        assert blocked_boot.returncode == 2 and b"BOOT_STARTED" not in blocked_boot.stdout
         start = time.monotonic()
         migrated = subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "head"],
@@ -131,6 +141,13 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
             timeout=30,
         )
         assert after.returncode == 0, after.stdout[-400:] + after.stderr[-400:]
+        allowed_boot = subprocess.run(
+            ["/bin/sh", "-ec", shell_gate, "--", sys.executable, "-c", "print('BOOT_STARTED')"],
+            env=restore_env,
+            capture_output=True,
+            timeout=30,
+        )
+        assert allowed_boot.returncode == 0 and b"BOOT_STARTED" in allowed_boot.stdout
         print(
             f"RESTORED_POPULATED_068_TO_069_ROWS={row_count} MIGRATION_SECONDS={elapsed:.3f} "
             f"PUBLICATION_RELATION_BYTES_BEFORE={before_size} AFTER={after_size}"

@@ -34,6 +34,8 @@ services:
 
   observal-api:
     image: ghcr.io/observal/observal-api:${OBSERVAL_VERSION:-latest}
+    # A retained successful init is not proof after a database restore.
+    entrypoint: ["/bin/sh", "-ec", '/app/.venv/bin/python -m services.mobile_boot_preflight --require-schema && exec "$@"', "--"]
     command: ["/app/.venv/bin/python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
       - ./.env
@@ -151,6 +153,8 @@ services:
 
   observal-worker:
     image: ghcr.io/observal/observal-api:${OBSERVAL_VERSION:-latest}
+    # Fail closed on restored/old schema or mobile-enabled off-clock DB.
+    entrypoint: ["/bin/sh", "-ec", '/app/.venv/bin/python -m services.mobile_boot_preflight --require-schema && exec "$@"', "--"]
     command: ["/app/.venv/bin/python", "-c", "import asyncio; asyncio.set_event_loop(asyncio.new_event_loop()); from arq import run_worker; from worker import WorkerSettings; run_worker(WorkerSettings)"]
     env_file:
       - ./.env
