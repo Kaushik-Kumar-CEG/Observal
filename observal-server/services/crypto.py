@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -100,24 +102,35 @@ class KeyManager:
     def algorithm(self) -> SigningAlgorithm:
         return self._algorithm
 
-    def initialize(self) -> None:
-        optic.debug("initializing JWT key manager")
+    @contextmanager
+    def _directory_lock(self):
+        """Serialize first signing key creation across API processes sharing a volume."""
         self._key_dir.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(self._key_dir, 0o700)
         except OSError:
             pass
+        descriptor = os.open(self._key_dir / ".signing.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
-        signing_path = self._key_dir / "signing.pem"
-        if signing_path.exists():
-            self._load_private_key(signing_path)
-            if _algorithm_for_key(self.get_private_key()) != self._algorithm:
-                optic.info("JWT algorithm changed; retiring current signing key")
-                self._retire_current_key()
+    def initialize(self) -> None:
+        optic.debug("initializing JWT key manager")
+        with self._directory_lock():
+            signing_path = self._key_dir / "signing.pem"
+            if signing_path.exists():
+                self._load_private_key(signing_path)
+                if _algorithm_for_key(self.get_private_key()) != self._algorithm:
+                    optic.info("JWT algorithm changed; retiring current signing key")
+                    self._retire_current_key()
+                    self._generate_key_pair(signing_path)
+            else:
                 self._generate_key_pair(signing_path)
-        else:
-            self._generate_key_pair(signing_path)
-        self._load_retired_keys()
+            self._load_retired_keys()
         optic.info("JWT signing key ready (alg={}, kid={})", self._algorithm, self._kid)
 
     def get_private_key(self) -> PrivateKey:
@@ -151,8 +164,9 @@ class KeyManager:
 
     def rotate_key(self) -> str:
         optic.info("rotating JWT signing key")
-        self._retire_current_key()
-        self._generate_key_pair(self._key_dir / "signing.pem")
+        with self._directory_lock():
+            self._retire_current_key()
+            self._generate_key_pair(self._key_dir / "signing.pem")
         return self.get_kid()
 
     def find_public_key(self, kid: str) -> PublicKey | None:

@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for the asymmetric key management service (services/crypto.py).
@@ -15,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import time
 from pathlib import Path
@@ -50,6 +52,36 @@ def km(tmp_key_dir):
     manager = KeyManager(key_dir=tmp_key_dir)
     manager.initialize()
     return manager
+
+
+def _concurrent_first_boot(key_dir, gate, results):
+    gate.wait(timeout=10)
+    manager = KeyManager(key_dir=key_dir)
+    manager.initialize()
+    results.put(manager.get_kid())
+
+
+def test_first_boot_signing_key_is_identical_across_concurrent_api_processes(tmp_path):
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("POSIX API process file lock requires fork-capable test host")
+    ctx = multiprocessing.get_context("fork")
+    gate = ctx.Barrier(8)
+    results = ctx.Queue()
+    key_dir = str(tmp_path / "shared-volume-keys")
+    workers = [ctx.Process(target=_concurrent_first_boot, args=(key_dir, gate, results)) for _ in range(8)]
+    try:
+        for worker in workers:
+            worker.start()
+        kids = [results.get(timeout=15) for _ in workers]
+        assert len(set(kids)) == 1
+        on_disk = KeyManager(key_dir=key_dir)
+        on_disk.initialize()
+        assert on_disk.get_kid() == kids[0]
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+            worker.join(timeout=5)
 
 
 # ===================================================================
