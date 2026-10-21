@@ -4,7 +4,7 @@
 # SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from strawberry.fastapi import GraphQLRouter
 
 from api.graphql import get_context_dep, schema
@@ -58,6 +58,7 @@ from api.routes.support import router as support_router
 from api.routes.teams import router as teams_router
 from api.routes.telemetry import router as telemetry_router
 from api.routes.users import router as users_router
+from services.mobile_follow_enablement import require_operator_approval, routes_installed
 from services.saml_health import register_saml_health_probe
 
 REST_ROUTERS = (
@@ -120,6 +121,15 @@ def include_graphql_routes(app: FastAPI) -> None:
 def include_rest_routes(app: FastAPI) -> None:
     for router in REST_ROUTERS:
         app.include_router(router)
+    # All 17 follow paths install together only on explicit operator startup.
+    # The fresh DB decision gate runs before auth/handlers on every request.
+    if routes_installed():
+        from api.routes.mobile_follow_browser import router as follow_browser_router
+        from api.routes.mobile_follow_read import router as follow_read_router
+        from api.routes.mobile_follow_write import router as follow_write_router
+
+        for router in (follow_read_router, follow_write_router, follow_browser_router):
+            app.include_router(router, dependencies=[Depends(require_operator_approval)])
 
 
 def configure_routes(app: FastAPI) -> None:

@@ -62,6 +62,7 @@ services:
       - JWT_KEY_DIR=/data/keys
       - MIGRATION_ARTIFACT_ROOT=/data/migration_artifacts
       - SKIP_DDL_ON_STARTUP=true
+      - OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL=${OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL:-0}
       - DEMO_SUPER_ADMIN_EMAIL=${DEMO_SUPER_ADMIN_EMAIL:-super@demo.example}
       - DEMO_SUPER_ADMIN_PASSWORD=${DEMO_SUPER_ADMIN_PASSWORD:-super-changeme}
       - DEMO_ADMIN_EMAIL=${DEMO_ADMIN_EMAIL:-admin@demo.example}

@@ -44,6 +44,7 @@ services:
     environment:
       - JWT_KEY_DIR=/data/keys
       - SKIP_DDL_ON_STARTUP=true
+      - OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL=${OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL:-0}
       - DEMO_SUPER_ADMIN_EMAIL=${DEMO_SUPER_ADMIN_EMAIL:-super@demo.example}
       - DEMO_ADMIN_EMAIL=${DEMO_ADMIN_EMAIL:-admin@demo.example}
       - DEMO_REVIEWER_EMAIL=${DEMO_REVIEWER_EMAIL:-reviewer@demo.example}

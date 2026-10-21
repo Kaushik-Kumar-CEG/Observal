@@ -55,6 +55,8 @@ spec:
           env:
             - name: SKIP_DDL_ON_STARTUP
               value: "true"
+            - name: OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL
+              value: {{ ternary "1" "0" .Values.api.followSyncV105RouteInstall | quote }}
           envFrom:
             - configMapRef:
                 name: {{ include "observal.configMapName" . }}

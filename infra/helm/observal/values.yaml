@@ -18,6 +18,7 @@ api:
     pullPolicy: IfNotPresent
   replicas: 1
   workers: 2
+  followSyncV105RouteInstall: false  # Not product/privacy approval; DB decisions also required.
   resources:
     limits:
       memory: 1536Mi

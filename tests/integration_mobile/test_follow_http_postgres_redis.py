@@ -35,7 +35,7 @@ from api.routes import mobile_follow_browser, mobile_follow_read, mobile_follow_
 from models import Base
 from models.user import UserRole
 from observal_shared.migration.constants import DEFAULT_PROJECT_ID
-from services import dynamic_settings, mobile_follow_auth
+from services import dynamic_settings, mobile_follow_auth, mobile_follow_enablement
 from services import redis as redis_service
 from services.crypto import init_key_manager
 from services.jwt_service import create_access_token
@@ -111,7 +111,7 @@ def _app(db_session):
     return app
 
 
-def _serve(sock, url, redis_url, key_dir):
+def _serve(sock, url, redis_url, key_dir, *, production=False):
     """Each spawned process has an independent pool, engine and settings cache."""
     import uvicorn
 
@@ -131,7 +131,16 @@ def _serve(sock, url, redis_url, key_dir):
 
     async def run():
         await dynamic_settings.load_sync_cache()
-        await uvicorn.Server(uvicorn.Config(_app(db_session), log_level="warning")).serve(sockets=[sock])
+        if production:
+            from routes import include_rest_routes
+
+            os.environ[mobile_follow_enablement.ROUTE_INSTALL_ENV] = "1"
+            app = FastAPI()
+            include_rest_routes(app)
+            app.dependency_overrides[get_db] = db_session
+        else:
+            app = _app(db_session)
+        await uvicorn.Server(uvicorn.Config(app, log_level="warning")).serve(sockets=[sock])
         await redis.aclose()
         await engine.dispose()
 
@@ -225,6 +234,76 @@ async def scratch(tmp_path):
         async with admin.connect() as conn:
             await conn.execute(text("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)"))
         await admin.dispose()
+
+
+@pytest.mark.asyncio
+async def test_production_route_install_stays_closed_until_fresh_owner_and_operator_decisions(scratch):
+    url, key_dir, _redis, owner, _other = scratch
+    ctx = multiprocessing.get_context("spawn")
+    workers, sockets, ports = [], [], []
+    try:
+        for _ in range(2):
+            sock = socket.socket()
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(128)
+            sockets.append(sock)
+            ports.append(sock.getsockname()[1])
+            worker = ctx.Process(target=_serve, args=(sock, url, REDIS_URL, key_dir), kwargs={"production": True})
+            worker.start()
+            workers.append(worker)
+        phone, _ = create_access_token(owner, UserRole.super_admin, client_id="observal-mobile", device_id="phone-a")
+        async with (
+            httpx.AsyncClient(base_url=f"http://127.0.0.1:{ports[0]}", timeout=15) as first,
+            httpx.AsyncClient(base_url=f"http://127.0.0.1:{ports[1]}", timeout=15) as second,
+        ):
+            for _ in range(100):
+                try:
+                    if (await first.get("/api/v1/config/public")).status_code == 200 and (
+                        await second.get("/api/v1/config/public")
+                    ).status_code == 200:
+                        break
+                except httpx.TransportError:
+                    pass
+                assert all(worker.is_alive() for worker in workers), [worker.exitcode for worker in workers]
+                await asyncio.sleep(0.1)
+            else:
+                pytest.fail("normal API worker startup failed")
+            for client in (first, second):
+                assert (await client.get(ROOT + "/availability", headers=bearer(phone))).status_code == 404
+            engine = create_async_engine(url)
+            try:
+                async with engine.begin() as db:
+                    for key, value in (
+                        (mobile_follow_enablement.ACK_KEY, mobile_follow_enablement.ACK_VALUE),
+                        (mobile_follow_enablement.ENABLE_KEY, "true"),
+                    ):
+                        await db.execute(
+                            text(
+                                "INSERT INTO enterprise_config (id,key,value,updated_at) "
+                                "VALUES (:id,:key,:value,clock_timestamp())"
+                            ),
+                            {"id": uuid.uuid4(), "key": key, "value": value},
+                        )
+                for client in (first, second):
+                    result = await client.get(ROOT + "/availability", headers=bearer(phone))
+                    assert result.status_code == 200, (result.status_code, result.text[:200])
+                async with engine.begin() as db:
+                    await db.execute(
+                        text("UPDATE enterprise_config SET value='false' WHERE key=:key"),
+                        {"key": mobile_follow_enablement.ENABLE_KEY},
+                    )
+                for client in (first, second):
+                    assert (await client.get(ROOT + "/availability", headers=bearer(phone))).status_code == 404
+                    assert (await client.post(ROOT + "/write-authorization", headers=bearer(phone))).status_code == 503
+            finally:
+                await engine.dispose()
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+            worker.join(timeout=10)
+        for sock in sockets:
+            sock.close()
 
 
 def bearer(token):
