@@ -61,13 +61,23 @@ docker run -d --name "${id}ch" --label "observal.followqa.owner=$id" -p 127.0.0.
 pgport=$(docker port "${id}pg" 5432/tcp | awk -F: '{print $NF}')
 redisport=$(docker port "${id}redis" 6379/tcp | awk -F: '{print $NF}')
 chport=$(docker port "${id}ch" 8123/tcp | awk -F: '{print $NF}')
-for _ in {1..60}; do
+# The ClickHouse entrypoint briefly starts a temporary server to create its user
+# and database, then stops it before starting the final server. A single SELECT 1
+# can hit that temporary process and fail immediately on the next query.
+ready_streak=0
+for _ in {1..90}; do
     if docker exec "${id}pg" pg_isready -q -U followqa && \
         docker exec "${id}redis" redis-cli ping 2>/dev/null | grep -q PONG && \
         docker exec "${id}ch" clickhouse-client --user followqa --password disposable-follow-qa \
-            --query 'SELECT 1' >/dev/null 2>&1; then break; fi
+            --query 'SELECT 1' >/dev/null 2>&1; then
+        ready_streak=$((ready_streak + 1))
+        (( ready_streak >= 5 )) && break
+    else
+        ready_streak=0
+    fi
     sleep 1
 done
+(( ready_streak >= 5 )) || { echo 'Disposable PostgreSQL/Redis/ClickHouse never reached stable readiness' >&2; exit 1; }
 docker exec "${id}pg" pg_isready -q -U followqa
 docker exec "${id}redis" redis-cli ping | grep -q PONG
 docker exec "${id}ch" clickhouse-client --user followqa --password disposable-follow-qa --query 'SELECT 1' >/dev/null
