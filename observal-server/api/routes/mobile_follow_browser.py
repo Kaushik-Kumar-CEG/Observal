@@ -34,6 +34,9 @@ class BrowserErrorRoute(APIRoute):
             try:
                 await enforce_post_limit(request)
                 if request.url.path.endswith("/write-approval"):
+                    # A signed phone bearer must be 401 even when it has no
+                    # browser Origin; do not let origin validation mask it.
+                    _reject_mobile_bearer(request.headers.get("authorization"))
                     origin = issuer_origin(
                         settings.get_sync("deployment.public_url"), settings.get_sync("deployment.frontend_url")
                     )
@@ -60,6 +63,17 @@ class BrowserErrorRoute(APIRoute):
 
 
 router = APIRouter(prefix="/api/v1/mobile-follow-sync/v1", tags=["mobile-follow-sync"], route_class=BrowserErrorRoute)
+
+
+def _reject_mobile_bearer(authorization: str | None) -> None:
+    if not authorization or not authorization.startswith("Bearer "):
+        return
+    try:
+        candidate = decode_access_token(authorization[7:].strip(), allow_mobile=True)
+        if candidate.get("client_id") == MOBILE_CLIENT_ID:
+            raise HTTPException(401, {"error": "unauthorized"})
+    except jwt.InvalidTokenError:
+        pass
 
 
 class ApprovalRequest(BaseModel):
@@ -100,13 +114,7 @@ async def write_approval(
     origin = issuer_origin(settings.get_sync("deployment.public_url"), settings.get_sync("deployment.frontend_url"))
     # A signed phone token is never browser authentication, even without an
     # Origin header. Cross-origin desktop requests are still rejected below.
-    if authorization and authorization.startswith("Bearer "):
-        try:
-            candidate = decode_access_token(authorization[7:].strip(), allow_mobile=True)
-            if candidate.get("client_id") == MOBILE_CLIENT_ID:
-                raise HTTPException(401, {"error": "unauthorized"})
-        except jwt.InvalidTokenError:
-            pass
+    _reject_mobile_bearer(authorization)
     require_browser_request(request, origin)
     principal = await auth.authorize_browser_approval(request, authorization, db)
     if body.approve is not True:

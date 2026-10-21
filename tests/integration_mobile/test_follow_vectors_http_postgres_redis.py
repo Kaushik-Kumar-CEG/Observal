@@ -44,6 +44,8 @@ REPLAYED = (
     "phone_a_browser_sees_consent_state_before_initial_disclosure",
     "opt_in_after_disclosure_generation_7",
     "phone_b_bound_browser_challenge",
+    "second_phone_cannot_mint_write_before_browser_approval",
+    "mobile_read_cannot_self_approve",
     "browser_approves_only_phone_b",
     "phone_b_write_grant_binds_generation",
     "read_only_mobile_cannot_write",
@@ -56,6 +58,7 @@ REPLAYED = (
     "phone_b_prepares_remove_all_gen7",
     "phone_b_remove_all_atomically_advances_to_8",
     "phone_b_lost_202_old_write_grant_cannot_replay",
+    "old_change_checkpoint_after_generation_advance_conflicts",
     "phone_b_lost_202_read_authenticated_nonce_lookup",
 )
 
@@ -64,13 +67,7 @@ REPLAYED = (
 # the name prevents a generic reason from hiding two different missing scenarios.
 def gap(case):
     name = case["name"]
-    if name == "second_phone_cannot_mint_write_before_browser_approval":
-        barrier = "observed real fresh unapproved write-grant returns 401 unauthorized, vector expects 403 restricted"
-    elif name == "mobile_read_cannot_self_approve":
-        barrier = "observed real mobile approval returns 403 restricted, vector expects 401 unauthorized"
-    elif name == "old_change_checkpoint_after_generation_advance_conflicts":
-        barrier = "observed 403 restricted while removal_pending; vector expects 409 generation_conflict"
-    elif case.get("invalid_response_schema") or case.get("invalid_client_cross_field"):
+    if case.get("invalid_response_schema") or case.get("invalid_client_cross_field"):
         barrier = "requires a deliberately malformed server reply and Android rejection, not a real-router success"
     elif case["method"] == "none" or (case.get("client_result") and "local" in name):
         barrier = "requires Android local encrypted state or offline client behavior, absent from HTTP harness"
@@ -148,7 +145,7 @@ async def test_named_vectors_replayed_over_real_http(_scratch_fixture):  # noqa:
             seen = []
             for name in REPLAYED:
                 case = BY_NAME[name]
-                request = dict(case.get("request", {}))
+                request = dict(case.get("request") or {})
                 for generation_field in ("owner_generation", "original_owner_generation"):
                     if generation_field in request:
                         request[generation_field] -= 5
