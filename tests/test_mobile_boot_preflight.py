@@ -22,10 +22,11 @@ class QueryResult:
 
 
 class Database:
-    def __init__(self, *, clock, auth, head):
+    def __init__(self, *, clock, auth, head, trigger=True):
         self.clock = clock
         self.auth = auth
         self.head = head
+        self.trigger = trigger
 
     async def __aenter__(self):
         return self
@@ -45,6 +46,8 @@ class Database:
 
     async def scalar(self, statement):
         sql = str(statement)
+        if "pg_trigger" in sql:
+            return self.trigger
         if "to_regclass" in sql:
             return True
         if "alembic_version" in sql:
@@ -71,3 +74,13 @@ async def test_helm_per_pod_check_reads_actual_mobile_flag_before_off_clock_retu
     if head == preflight.MOBILE_SCHEMA_HEAD:
         assert result.auth_enabled is auth
     assert await preflight.main(require_schema=True) == expected
+
+
+@pytest.mark.asyncio
+async def test_schema_stamp_without_enabled_070_erasure_trigger_refuses_api_and_worker_boot(monkeypatch):
+    db = Database(clock="on", auth=False, head=preflight.MOBILE_SCHEMA_HEAD, trigger=False)
+    monkeypatch.setattr(preflight, "engine", SimpleNamespace(connect=lambda: db, dispose=AsyncMock()))
+    result = await preflight.inspect_mobile_postgres()
+    assert result.status == "MISSING_FOLLOW_ERASURE_TRIGGER"
+    assert not result.follow_erasure_trigger_ready
+    assert await preflight.main(require_schema=True) == 2

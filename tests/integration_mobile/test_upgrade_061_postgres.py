@@ -132,7 +132,7 @@ async def test_existing_publication_gets_null_retained_floor_on_upgrade():
         try:
             async with verify.connect() as db:
                 assert (
-                    await db.scalar(text("SELECT version_num FROM alembic_version")) == "069_mobile_publication_clock"
+                    await db.scalar(text("SELECT version_num FROM alembic_version")) == "070_mobile_follow_sync_state"
                 )
                 assert await db.scalar(text("SELECT count(*) FROM first_admin_provision_audit")) == 0
                 for table in ("mobile_source_line_highwater", "mobile_source_final_receipts"):
@@ -175,8 +175,8 @@ async def test_existing_publication_gets_null_retained_floor_on_upgrade():
             capture_output=True,
             timeout=60,
         )
-        assert downgrade.returncode != 0, "An old publication must block pre-verification downgrade to 066"
-        assert b"Cannot restore untrusted historic mobile publication timestamps" in downgrade.stderr
+        assert downgrade.returncode != 0, "070 privacy receipts must block downgrade to 066"
+        assert b"Cannot discard follow-sync consent, privacy receipts or erasure fences" in downgrade.stderr
     finally:
         if created:
             async with admin.connect() as conn:

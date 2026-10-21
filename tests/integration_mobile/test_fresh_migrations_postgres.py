@@ -65,7 +65,7 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
         try:
             async with verify.connect() as conn:
                 assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == (
-                    "069_mobile_publication_clock"
+                    "070_mobile_follow_sync_state"
                 )
                 assert (
                     await conn.execute(
@@ -98,8 +98,8 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
                 ).scalar_one() == 0
         finally:
             await verify.dispose()
-        # The 069 publication clock quarantine cannot be downgraded to
-        # untrusted historical timestamps; 068 erasure stays protected.
+        # The 070 privacy fences cannot be downgraded, including through 069;
+        # a restore from an isolated backup is required.
         downgrade = subprocess.run(
             [sys.executable, "-m", "alembic", "downgrade", "067_mobile_short_retention_fence"],
             env=env,
@@ -107,12 +107,12 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
             timeout=105,
         )
         assert downgrade.returncode != 0
-        assert b"Cannot restore untrusted historic mobile publication timestamps" in downgrade.stderr
+        assert b"Cannot discard follow-sync consent, privacy receipts or erasure fences" in downgrade.stderr
         verify = create_async_engine(scratch_url)
         try:
             async with verify.connect() as conn:
                 assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == (
-                    "069_mobile_publication_clock"
+                    "070_mobile_follow_sync_state"
                 )
         finally:
             await verify.dispose()

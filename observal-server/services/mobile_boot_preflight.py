@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from database import engine
 
-MOBILE_SCHEMA_HEAD = "069_mobile_publication_clock"
+MOBILE_SCHEMA_HEAD = "070_mobile_follow_sync_state"
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class MobilePreflight:
     pg_commit_clock: str
     pg_restart_pending: bool
     schema_head: str
+    follow_erasure_trigger_ready: bool
     auth_enabled: bool
     barrier_closed: bool
     source_policy_ready: bool
@@ -49,7 +50,24 @@ async def inspect_mobile_postgres() -> MobilePreflight:
             else "missing"
         )
         if head != MOBILE_SCHEMA_HEAD:
-            return MobilePreflight("OLD_OR_INCOMPATIBLE_SCHEMA", clock, pending, head, False, True, False, False)
+            return MobilePreflight("OLD_OR_INCOMPATIBLE_SCHEMA", clock, pending, head, False, False, True, False, False)
+        # create_all() does not install 070's subject-deletion privacy trigger.
+        # A stamped or partly restored DB must never pass an image's boot gate.
+        trigger_ready = bool(
+            await conn.scalar(
+                text("""SELECT EXISTS (
+                    SELECT 1 FROM pg_trigger t
+                    WHERE t.tgrelid = to_regclass('users')
+                      AND t.tgname = 'mobile_follow_erase_subject'
+                      AND t.tgenabled = 'O' AND NOT t.tgisinternal
+                      AND t.tgfoid = to_regprocedure('mobile_follow_erase_subject()')
+                )""")
+            )
+        )
+        if not trigger_ready:
+            return MobilePreflight(
+                "MISSING_FOLLOW_ERASURE_TRIGGER", clock, pending, head, False, False, True, False, False
+            )
         settings = dict(
             (
                 await conn.execute(
@@ -63,7 +81,7 @@ async def inspect_mobile_postgres() -> MobilePreflight:
         )
         auth = settings.get("mobile.auth_enabled") == "true"
         if clock != "on" or pending:
-            return MobilePreflight("MISSING_DB_PREREQUISITE", clock, pending, head, auth, True, False, False)
+            return MobilePreflight("MISSING_DB_PREREQUISITE", clock, pending, head, True, auth, True, False, False)
         state = (
             await conn.execute(
                 text("SELECT blocked,source_policy_ready FROM mobile_read_controls WHERE project_id='default'")
@@ -86,7 +104,7 @@ async def inspect_mobile_postgres() -> MobilePreflight:
             status = "EVIDENCE_UNQUALIFIED"
         else:
             status = "PREFLIGHT_ONLY"
-        return MobilePreflight(status, clock, pending, head, auth, closed, source_ready, qualified)
+        return MobilePreflight(status, clock, pending, head, True, auth, closed, source_ready, qualified)
 
 
 async def main(*, require_schema: bool = False) -> int:
@@ -105,6 +123,7 @@ async def main(*, require_schema: bool = False) -> int:
         return (
             0
             if result.schema_head == MOBILE_SCHEMA_HEAD
+            and result.follow_erasure_trigger_ready
             and (not result.auth_enabled or (result.pg_commit_clock == "on" and not result.pg_restart_pending))
             else 2
         )

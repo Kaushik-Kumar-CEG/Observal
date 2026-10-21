@@ -124,7 +124,7 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         assert migrated.returncode == 0, migrated.stderr[-500:]
         elapsed = time.monotonic() - start
         async with restored.connect() as conn:
-            assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "069_mobile_publication_clock"
+            assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "070_mobile_follow_sync_state"
             assert await conn.scalar(text("SELECT current_setting('track_commit_timestamp')")) == "on"
             assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == row_count
             after_size = await conn.scalar(text("SELECT pg_total_relation_size('mobile_publication_events')"))
@@ -149,7 +149,7 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         )
         assert allowed_boot.returncode == 0 and b"BOOT_STARTED" in allowed_boot.stdout
         print(
-            f"RESTORED_POPULATED_068_TO_069_ROWS={row_count} MIGRATION_SECONDS={elapsed:.3f} "
+            f"RESTORED_POPULATED_068_TO_070_ROWS={row_count} MIGRATION_SECONDS={elapsed:.3f} "
             f"PUBLICATION_RELATION_BYTES_BEFORE={before_size} AFTER={after_size}"
         )
     finally:
