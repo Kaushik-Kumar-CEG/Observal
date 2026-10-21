@@ -283,6 +283,9 @@ async def verify_capabilities(runtime: Path, users: dict[str, str]) -> None:
             assert capabilities["viewer_id"] == user_id
             assert capabilities["synthetic_test_cohort"] is True, "cohort not qualified"
             assert set(capabilities["supported_kinds"]) == EXPECTED, "three-kind evidence not qualified"
+            proofs[email]["capabilities_status"] = str(response.status_code)
+            proofs[email]["synthetic_test_cohort"] = str(capabilities["synthetic_test_cohort"]).lower()
+            proofs[email]["supported_kinds"] = ",".join(capabilities["supported_kinds"])
             own_scope = "author" if email.startswith("owner@") else "user"
             positive = await client.get(
                 f"/api/v1/mobile-activity/v1/people/{user_id}/summary",
@@ -294,6 +297,11 @@ async def verify_capabilities(runtime: Path, users: dict[str, str]) -> None:
             assert summary["component_trace_union"]["value"] > 0
             assert summary["confirmed_skill_loads"]["value"] > 0
             assert summary["recorded_hook_runs"]["value"] > 0
+            proofs[email]["positive_scope"] = own_scope
+            proofs[email]["positive_summary_status"] = str(positive.status_code)
+            proofs[email]["positive_mcp_calls"] = str(summary["mcp_calls"]["value"])
+            proofs[email]["positive_skill_loads"] = str(summary["confirmed_skill_loads"]["value"])
+            proofs[email]["positive_hook_runs"] = str(summary["recorded_hook_runs"]["value"])
             if email.startswith("viewer@"):
                 for subject_id, scope in ((user_id, "author"), (users["owner@follow-qa.invalid"], "user")):
                     denied = await client.get(
@@ -302,6 +310,8 @@ async def verify_capabilities(runtime: Path, users: dict[str, str]) -> None:
                         headers=mobile,
                     )
                     assert denied.status_code == 403, "ordinary viewer gained foreign or Author scope"
+                proofs[email]["self_author_status"] = "403"
+                proofs[email]["foreign_user_status"] = "403"
             else:
                 actor = users["viewer@follow-qa.invalid"]
                 actor_read = await client.get(
@@ -310,8 +320,11 @@ async def verify_capabilities(runtime: Path, users: dict[str, str]) -> None:
                     headers=mobile,
                 )
                 assert actor_read.status_code == 200 and actor_read.json()["component_trace_union"]["value"] > 0
+                proofs[email]["other_user_scope_status"] = "200"
             available = await client.get("/api/v1/mobile-follow-sync/v1/availability", headers=mobile)
             assert available.status_code == 200, f"follow availability failed: {available.status_code}"
+            proofs[email]["follow_availability_status"] = str(available.status_code)
+            proofs[email]["follow_state"] = available.json()["state"]
         # Only IDs, never passwords, JWTs or OAuth challenge codes, leave the
         # 0700 runtime for a session-bound handoff receipt after validation.
         (runtime / "probe-roles.json").write_text(json.dumps(proofs, sort_keys=True))
