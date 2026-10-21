@@ -3,6 +3,7 @@
 """Opt-in, disposable loopback PostgreSQL checks for the 070 privacy poller."""
 
 import os
+import time
 import uuid
 
 import pytest
@@ -100,6 +101,26 @@ async def test_restart_and_owner_fairness_are_bounded(scratch, monkeypatch):
             )
             == 0
         )
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_default_burst_budget_rotates_without_marking_pending_complete(scratch, monkeypatch):
+    monkeypatch.setattr(job, "async_session", scratch)
+    assert job.BATCH_PARTITIONS == 128
+    # 129 distinct owners force a cursor wrap; this small zero-row fixture
+    # measures polling overhead only, NOT 11K rows/owner or 24h capacity.
+    actions = [await _pending(scratch, f"worker-burst-{i}") for i in range(129)]
+    begin = time.monotonic()
+    ctx = {}
+    await job.run_mobile_follow_privacy(ctx)
+    first_tick = time.monotonic() - begin
+    first_statuses = [await _status(scratch, ident) for _, ident in actions]
+    assert first_statuses.count("completed") <= 128
+    assert first_statuses.count("pending") >= 1
+    await job.run_mobile_follow_privacy(ctx)
+    final_statuses = [await _status(scratch, ident) for _, ident in actions]
+    assert all(status == "completed" for status in final_statuses)
+    print(f"local_zero_row_128_partition_tick_seconds={first_tick:.4f}; not_capacity_proof")
 
 
 @pytest.mark.asyncio(loop_scope="module")

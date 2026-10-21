@@ -17,7 +17,12 @@ from services.mobile_follow_enablement import WORKER_KEY
 from services.mobile_follow_privacy import erase_batch
 from services.mobile_follow_store import Partition
 
-BATCH_PARTITIONS = 16
+# At the scheduled 30-second cadence, 16 steps/tick can process at most
+# 46,080 partition-steps/day. 2,195 simultaneous owners with the admitted
+# 10,000 changes + 1,000 subjects each need up to 111 steps: at least 243,645
+# steps, which cannot finish in 24h even with zero SQL latency. 128 steps/tick
+# leaves arithmetic headroom; it is still NOT a measured 24h SLA under load.
+BATCH_PARTITIONS = 128
 # No schema/index change in 070: root state prunes idle partitions; the
 # per-partition action lookup uses its full composite PK prefix (up to the
 # bounded 1,000 retained receipts + one current slot).
@@ -99,7 +104,7 @@ async def _operator_failure(key: Partition, action_id, *, reason: str) -> None:
 
 
 async def run_mobile_follow_privacy(ctx: dict) -> int:
-    """Poll at most 16 owner partitions; ≤100 erased rows per transaction.
+    """Poll at most 128 owner partitions; ≤100 erased rows per transaction.
 
     needs_operator is observed but never automatically resumed. A restart loses
     only the fairness cursor: each committed erase_batch step remains durable.

@@ -12,6 +12,7 @@ import json
 import multiprocessing
 import os
 import socket
+import uuid
 from pathlib import Path
 
 import httpx
@@ -39,6 +40,15 @@ VECTORS = json.loads(
 BY_NAME = {case["name"]: case for case in VECTORS}
 
 # Ordered: each step depends on the real durable result of its predecessors.
+REPLAYED_WITHDRAWAL = (
+    "phone_a_withdraw_without_write_grant_denied",
+    "phone_b_mobile_read_cannot_restore_opt_in_after_withdrawal",
+    "phone_b_cannot_mint_new_grant_during_opt_out",
+    "withdrawal_denies_snapshot_not_empty",
+    "withdrawal_denies_changes_not_empty",
+    "withdrawal_denies_export_not_empty",
+)
+
 REPLAYED = (
     "availability_fresh_same_issuer_v12_proof",
     "phone_a_browser_sees_consent_state_before_initial_disclosure",
@@ -87,15 +97,15 @@ def gap(case):
     return f"{name}: {barrier}"
 
 
-GAPS = {case["name"]: gap(case) for case in VECTORS if case["name"] not in REPLAYED}
+GAPS = {case["name"]: gap(case) for case in VECTORS if case["name"] not in REPLAYED + REPLAYED_WITHDRAWAL}
 
 
 def test_vector_accounting_is_explicit_not_fake_coverage():
     assert len(VECTORS) == 146
     assert len(BY_NAME) == 146, "duplicate vector names cannot be accounted for"
-    assert len(REPLAYED) == len(set(REPLAYED))
-    assert set(REPLAYED) | set(GAPS) == set(BY_NAME)
-    assert not set(REPLAYED) & set(GAPS)
+    assert len(REPLAYED + REPLAYED_WITHDRAWAL) == len(set(REPLAYED + REPLAYED_WITHDRAWAL))
+    assert set(REPLAYED + REPLAYED_WITHDRAWAL) | set(GAPS) == set(BY_NAME)
+    assert not set(REPLAYED + REPLAYED_WITHDRAWAL) & set(GAPS)
     assert len(set(GAPS.values())) == len(GAPS), "each unimplemented case needs an individual reason"
     assert all(reason and len(reason.split(": ", 1)[-1]) > 25 for reason in GAPS.values())
 
@@ -245,6 +255,102 @@ async def test_named_vectors_replayed_over_real_http(_scratch_fixture):  # noqa:
                         )
                         == 3
                     )
+            finally:
+                await engine.dispose()
+    finally:
+        if worker.is_alive():
+            worker.terminate()
+        worker.join(timeout=10)
+        if worker.is_alive():
+            worker.kill()
+            worker.join(timeout=5)
+        sock.close()
+
+
+@pytest.mark.skipif(os.getenv("MOBILE_FOLLOW_HTTP_SCRATCH") != "1", reason="requires disposable PG15440 and Redis16380")
+@pytest.mark.asyncio
+async def test_post_withdrawal_named_denials_real_http(_scratch_fixture):  # noqa: F811
+    """Persist a browser-authorized withdrawal, then replay frozen denials."""
+    url, key_dir, _, owner, _ = _scratch_fixture
+    ctx = multiprocessing.get_context("spawn")
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(128)
+    worker = ctx.Process(target=_serve, args=(sock, url, REDIS_URL, key_dir))
+    worker.start()
+    try:
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{sock.getsockname()[1]}",
+            timeout=15,
+            event_hooks={"response": [validate_contract]},
+        ) as client:
+            phone_a, _ = create_access_token(
+                owner, UserRole.super_admin, client_id="observal-mobile", device_id="phone-a"
+            )
+            phone_b, _ = create_access_token(
+                owner, UserRole.super_admin, client_id="observal-mobile", device_id="phone-b"
+            )
+            desktop, _ = create_access_token(owner, UserRole.super_admin)
+            for _ in range(100):
+                try:
+                    if (await client.get(ROOT + "/consent/state", headers=browser(desktop))).status_code == 200:
+                        break
+                except httpx.TransportError:
+                    pass
+                assert worker.is_alive(), worker.exitcode
+                await asyncio.sleep(0.1)
+            else:
+                pytest.fail("scratch HTTP worker did not become ready")
+            accepted = await client.post(
+                ROOT + "/consent",
+                headers=browser(desktop),
+                json={"consent": True, "consent_id": str(uuid.uuid4()), "owner_generation": 1},
+            )
+            assert accepted.status_code == 200 and accepted.json()["owner_generation"] == 2
+            # First named 401 occurs BEFORE withdrawal, with an actual read-only phone bearer.
+            first = BY_NAME[REPLAYED_WITHDRAWAL[0]]
+            denied = await client.post(
+                ROOT + "/consent/withdraw", headers=bearer(phone_a), json={**first["request"], "owner_generation": 2}
+            )
+            assert denied.status_code == first["status"] and denied.json() == first["body"]
+            withdrawal = await client.post(
+                ROOT + "/consent/withdraw",
+                headers=browser(desktop),
+                json={"confirm": True, "withdrawal_id": str(uuid.uuid4()), "owner_generation": 2},
+            )
+            assert withdrawal.status_code == 202 and withdrawal.json()["state"] == "pending"
+            for name in REPLAYED_WITHDRAWAL[1:]:
+                case = BY_NAME[name]
+                body = dict(case.get("request") or {})
+                if "owner_generation" in body:
+                    body["owner_generation"] = 3
+                path = case["path"].removeprefix("/mobile-follow-sync/v1")
+                # Frozen synthetic generations 8/9 correspond to this fresh DB's 2/3.
+                path = path.replace("owner_generation=9", "owner_generation=3")
+                auth = bearer(phone_b)
+                response = await client.request(
+                    case["method"],
+                    ROOT + path,
+                    headers=auth,
+                    json=body if "request" in case else None,
+                )
+                assert response.status_code == case["status"], (name, response.status_code, response.text[:200])
+                assert response.json() == case["body"], name
+                if "headers" in case:
+                    for header, expected in case["headers"].items():
+                        assert response.headers[header] == expected, name
+            engine = create_async_engine(url)
+            try:
+                async with engine.connect() as conn:
+                    row = (
+                        await conn.execute(
+                            text(
+                                "SELECT consent_state,removal_state FROM mobile_follow_partitions WHERE owner_id=:owner"
+                            ),
+                            {"owner": owner},
+                        )
+                    ).one()
+                    assert row == ("withdrawal_pending", "pending"), "503 denials must not count as empty or erased"
             finally:
                 await engine.dispose()
     finally:

@@ -121,12 +121,13 @@ async def consume_grant_before_mint(db, principal) -> tuple[str, int]:
         )
         .with_for_update()
     )
-    if (
-        partition.owner_generation != principal.generation
-        or partition.consent_state != "available"
-        or partition.removal_state != "none"
-    ):
+    if partition.owner_generation != principal.generation:
         raise HTTPException(401, "Invalid follow credential")
+    if partition.consent_state != "available" or partition.removal_state != "none":
+        # The mobile read credential is still valid during a protected opt-out;
+        # report the frozen restricted state, not an invalid token. Do not
+        # mint, revive or reveal an approval (the barrier already removed it).
+        raise HTTPException(403, "Follow access restricted")
     if approval is None or approval.status == "pending":
         raise HTTPException(403, "Device approval required")
     if (

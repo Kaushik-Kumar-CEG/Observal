@@ -422,7 +422,9 @@ def test_withdrawal_blocks_page_but_historical_lookup(monkeypatch, setup):
     p, row = setup
     row.consent_state = "withdrawal_pending"
     result = asyncio.run(read._page(request("snapshot"), "bearer", None, "snapshot"))
-    assert result.status_code == 403
+    assert result.status_code == 503
+    assert result.headers["Retry-After"] == "60"
+    assert json.loads(result.body) == {"error": "withdrawal_pending"}
 
     async def status(*args):
         return dict(

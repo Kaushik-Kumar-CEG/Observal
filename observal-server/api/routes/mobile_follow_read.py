@@ -118,6 +118,14 @@ def _available(row) -> bool:
     return row.consent_state == "available" and row.removal_state == "none"
 
 
+def _blocked_page(row) -> JSONResponse:
+    if row.consent_state == "withdrawal_pending":
+        # A durable privacy fence is pending worker erasure, not an empty list
+        # or a permanent authorization refusal. The frozen 1.0.5 retry is 60s.
+        return JSONResponse({"error": "withdrawal_pending"}, status_code=503, headers={"Retry-After": "60"})
+    return error("restricted", 403)
+
+
 @router.get("/availability")
 async def availability(request: Request, authorization: str | None = Header(None), db: AsyncSession = Depends(get_db)):
     p, row = await principal_for(request, authorization, db)
@@ -200,7 +208,7 @@ async def _page(request: Request, authorization: str | None, db: AsyncSession, p
                 generation=row.owner_generation,
             )
             if not _available(row):
-                return error("restricted", 403)
+                return _blocked_page(row)
             if purpose == "changes":
                 bound_after = await db.scalar(
                     text(
@@ -216,7 +224,7 @@ async def _page(request: Request, authorization: str | None, db: AsyncSession, p
             if purpose == "changes" and generation != row.owner_generation:
                 return error("generation_conflict", 409)
             if not _available(row):
-                return error("restricted", 403)
+                return _blocked_page(row)
             position = 0
             if purpose != "changes" and row.current_revision < minimum:
                 return error("unavailable", 503, retry=True)

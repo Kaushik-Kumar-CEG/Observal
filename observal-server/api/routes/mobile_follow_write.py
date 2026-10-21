@@ -231,6 +231,15 @@ async def _browser(request, authorization, db, *, consent=False):
     )
     try:
         auth._route(request, allowed)
+        # A valid phone read token is not a browser approval, even if it omits
+        # Origin. Deny by credential class before cross-origin checks so the
+        # agreed phone-only consent/withdrawal wire remains a 401, not 403.
+        try:
+            candidate = decode_access_token(auth._bearer(authorization), allow_mobile=True)
+        except jwt.InvalidTokenError:
+            candidate = None
+        if candidate is not None and candidate.get("client_id") == auth.MOBILE_CLIENT_ID:
+            _error(401, "unauthorized")
         if request.method == "POST":
             origin = issuer_origin(
                 settings.get_sync("deployment.public_url"), settings.get_sync("deployment.frontend_url")
