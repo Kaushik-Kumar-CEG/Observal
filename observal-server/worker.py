@@ -24,6 +24,7 @@ from jobs.mcp_sync import MAX_TRIES as MCP_SYNC_MAX_TRIES
 from jobs.mcp_sync import sync_mcp_webhook
 from jobs.migration import MAX_MIGRATION_JOB_TIMEOUT_SECONDS, purge_migration_artifacts, run_migration_job
 from jobs.mobile_evidence import run_mobile_projection_queue, run_mobile_retention_sweep, scan_retained_mobile_sources
+from jobs.mobile_follow_privacy import run_mobile_follow_privacy
 from jobs.review_checks import run_review_checks
 from jobs.usage_ping import submit_usage_ping
 from logging_config import setup_logging
@@ -74,6 +75,7 @@ class WorkerSettings:
         run_mobile_projection_queue,
         scan_retained_mobile_sources,
         run_mobile_retention_sweep,
+        run_mobile_follow_privacy,
     ]
     cron_jobs = [
         cron(sync_component_sources, hour={0, 6, 12, 18}),  # Every 6 hours
@@ -82,6 +84,7 @@ class WorkerSettings:
         cron(run_mobile_projection_queue, second={0, 30}, timeout=120),
         cron(scan_retained_mobile_sources, minute={20}, timeout=120, unique=True),  # Hourly bounded backfill
         cron(run_mobile_retention_sweep, minute=set(range(0, 60, 5)), timeout=120, unique=True),
+        cron(run_mobile_follow_privacy, second={10, 40}, timeout=120, unique=True),
         cron(maintain_clickhouse, hour={0, 4, 8, 12, 16, 20}, timeout=120),  # Every 4 hours
         cron(batch_generate_insights, weekday={0}, hour={6}, minute={0}, timeout=300),  # Weekly Monday 6AM
         cron(

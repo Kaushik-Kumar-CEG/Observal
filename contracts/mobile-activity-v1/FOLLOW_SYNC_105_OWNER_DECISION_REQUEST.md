@@ -1,0 +1,18 @@
+<!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+# Accountable product/privacy/operations decisions required before follow-sync enablement
+
+**Request, not approval. All decision fields below are Not recorded.** Android's formal whole-set design/wire AGREE pins `FOLLOW_SYNC_V105_PROPOSAL.md` `4c6a6d813a3d4e6f5b1465437f67426b4923a10efaf08dfc81429058e48f076e`, `follow-sync-v105-openapi.yaml` `d844f7164afab68b973841397861b7de563fbba69cfc1c5c9500a34b230fb339`, `follow-sync-v105-vectors.json` `40f75853dc07e25d76f7c5b374b7fdb5664576c918700a74e3693ef5f0c0a492`. This AGREE authorizes source/test work, not enablement. The 17 HTTP handlers are unregistered; no Flare candidate is bound.
+
+| Named decision needed | Exact question for accountable owner | Decision / identity / dated evidence |
+| --- | --- | --- |
+| Product subject quota | Approve/reject **1,000 distinct server subjects per account owner+project+cohort** (including unfollowed high-water), no silent trimming of the 1,001st encrypted local follow; define product warning/unblock path. | **Not recorded** |
+| Privacy consent/lawful basis | Approve/reject separately disclosed browser opt-in to account-wide follow UUID storage, explicit per-device edit approval, user-visible wording, retention and full withdrawal/DSR semantics. A browser bearer cannot prove disclosure was actually viewed. | **Not recorded** |
+| Physical storage and fairness | Approve/reject 10,000 admitted 200/409 outcomes + 1,000 protected first unfollows/90d, two image + two change lease slots, 2 MiB logical pins, 16 MiB logical history, 1,000 accepted consents and 1,000 indexed privacy receipts + one current state-only slot. Set per-server/project fair admission, backup, WAL and physical-space budget. | **Not recorded** |
+| Degraded lost-202 recovery | Approve/reject one current **state-only** receipt when indexed quota is full; later terminal action may supersede it so 404 is **UNKNOWN**, not completed/no-commit. Define audited human reconciliation UX. | **Not recorded** |
+| Erasure deadline and operator capacity | Approve/reject 24h completion policy with a quantified worst-case admission and worker-throughput budget. A 16-partition/tick poller scheduled twice a minute has an ideal upper bound of 46,080 steps/day; 2,195 concurrent owners with 21 steps each exceed it even at zero SQL time. Fences remain closed and overdue work is marked needs_operator, not falsely completed; define operational scaling or another approved completion strategy before enablement. | **Not recorded** |
+
+**Disposable physical evidence, not owner approval:** local PostgreSQL 16 scratch filled one synthetic owner with 1,000 subjects, 10,000 outcomes, 1,000 changes, 4 leases/4,000 pins, 1,000 indexed + one state-only receipt and 1,000 consents. Rerun `/tmp/mobile-follow-070-physical-local.json`: follow relations total **8,093,696 bytes**, synthetic fill WAL **11,354,168 bytes** (includes user rows), scratch whole-DB `pg_dump -Fc` **1,516,623 bytes**, 100-row direct page query p50/p95 **0.1603/0.3208 ms** over 100 samples. No deletes, VACUUM, retained turnover, actual phone HTTP latency, backup restore, concurrency, managed provider or candidate-sized table. This does not establish a production budget or throughput.
+
+Accountable whole-branch human privacy/security+migration review: **Not recorded** (see `ACCOUNTABLE_WHOLE_BRANCH_REVIEW_REQUEST.md`). Individually signed handling of the separately invoked **13 failures + 5 errors: Not recorded** (see all 18 fields in `EXCLUDED_SUITE_DISPOSITION_REQUEST.md`). New isolated Flare instance-bound receipt, protected access, Android READY and rollout: **Not recorded / PAUSE**.
