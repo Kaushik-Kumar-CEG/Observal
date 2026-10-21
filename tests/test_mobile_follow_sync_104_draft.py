@@ -36,7 +36,9 @@ def test_follow_sync_proposal_does_not_mutate_accepted_v12_bytes():
 def test_follow_sync_draft_is_not_an_immutable_hash_packet():
     proposal = (ROOT / "FOLLOW_SYNC_V104_DRAFT.md").read_text()
     handoff = (ROOT / "FOLLOW_SYNC_104_SHARED_DRAFT_HANDOFF.md").read_text()
-    assert "MUTABLE SHARED DRAFT" in proposal and "BEFORE any three-hash packet" in handoff
+    assert "MUTABLE SHARED DRAFT" in proposal
+    assert "no immutable hash decision yet" in handoff
+    assert "NOT formal AGREE" in handoff
     for name in ("follow-sync-v104-draft-openapi.yaml", "follow-sync-v104-draft-vectors.json"):
         assert name in proposal and name in handoff
 
