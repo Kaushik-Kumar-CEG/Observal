@@ -25,6 +25,7 @@ def owned(monkeypatch, tmp_path):
     state = qa / ".runtime"
     state.mkdir()
     (state / "id").write_text("followqa1234567890\n")
+    (state / "issuer-port").write_text("18443\n")
     runtime = Path(tempfile.mkdtemp(prefix="observal-follow-qa.", dir="/tmp"))
     (state / "run").write_text(str(runtime) + "\n")
     monkeypatch.setenv("MOBILE_FOLLOW_LOCAL_QA", "1")
@@ -57,6 +58,27 @@ def test_reject_wrong_docker_ownership_or_port(monkeypatch, owned, suffix):
 
     monkeypatch.setattr(source.subprocess, "run", docker)
     with pytest.raises(RuntimeError, match="unrelated loopback"):
+        source.require_disposable_environment()
+
+
+def test_android_18446_issuer_is_separate_from_default_18443(monkeypatch, owned):
+    qa = Path(source.__file__).resolve().parent
+    (qa / ".runtime").rename(qa / ".runtime-android-a1b2c3")
+    state = qa / ".runtime-android-a1b2c3"
+    (state / "issuer-port").write_text("18446\n")
+    monkeypatch.setenv("MOBILE_FOLLOW_QA_STATE_NAME", ".runtime-android-a1b2c3")
+    monkeypatch.setenv("MOBILE_FOLLOW_QA_PORT", "18446")
+    monkeypatch.setattr(source, "ISSUER_PORT", 18446)
+
+    def docker(args, **_kwargs):
+        if args[1] == "inspect":
+            return SimpleNamespace(stdout="followqa1234567890\n")
+        return SimpleNamespace(stdout="127.0.0.1:15440\n" if args[2].endswith("pg") else "127.0.0.1:18123\n")
+
+    monkeypatch.setattr(source.subprocess, "run", docker)
+    assert source.require_disposable_environment() == owned
+    (state / "issuer-port").write_text("18443\n")
+    with pytest.raises(RuntimeError, match="does not match selected issuer"):
         source.require_disposable_environment()
 
 

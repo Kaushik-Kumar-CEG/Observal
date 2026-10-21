@@ -3,6 +3,7 @@
 """Local-only actual HTTP checks. Never prints tokens, codes, password, or CA key."""
 
 import asyncio
+import os
 import re
 import ssl
 import sys
@@ -14,12 +15,20 @@ import httpx
 
 async def main():
     qa = Path(__file__).resolve().parent
-    state = qa / ".runtime"
+    state_name = os.environ.get("MOBILE_FOLLOW_QA_STATE_NAME", ".runtime")
+    issuer_port = int(os.environ.get("MOBILE_FOLLOW_QA_PORT", "18443"))
+    assert (
+        (state_name == ".runtime" and issuer_port == 18443)
+        or (re.fullmatch(r"\.runtime-scratch-[0-9a-f]{6,12}", state_name) and issuer_port == 18444)
+        or (re.fullmatch(r"\.runtime-android-[0-9a-f]{6,12}", state_name) and issuer_port == 18446)
+    ), "refusing unrelated QA state or port"
+    state = qa / state_name
+    assert (state / "issuer-port").read_text().strip() == str(issuer_port)
     runtime = Path((state / "run").read_text().strip())
-    origin = "https://localhost:18443"
+    origin = f"https://localhost:{issuer_port}"
     tls = ssl.create_default_context(cafile=str(runtime / "ca.crt"))
     async with httpx.AsyncClient(verify=tls, base_url=origin, timeout=15, trust_env=False) as client:
-        for path in ("/readyz", "/login", "/device", "/follow/approve"):
+        for path in ("/readyz", "/login", "/device", "/follow/approve", "/follow/consent"):
             r = await client.get(path)
             assert r.status_code == 200, (path, r.status_code)
             if path != "/readyz":
@@ -28,7 +37,7 @@ async def main():
                 assert scripts, path
                 js = await client.get(scripts[0])
                 assert js.status_code == 200 and "javascript" in js.headers.get("content-type", "")
-        print("TRUSTED_TLS_SPA_LOGIN_DEVICE_FOLLOW_APPROVE_ASSET=200")
+        print("TRUSTED_TLS_SPA_LOGIN_DEVICE_FOLLOW_APPROVE_CONSENT_ASSETS=200")
         ports = [(state / f"port-{suffix}").read_text().strip() for suffix in ("a", "b")]
         for port in ports:
             async with httpx.AsyncClient(trust_env=False) as api:
@@ -93,6 +102,12 @@ async def main():
             f"SUPPORTED_KINDS={len(capabilities.json()['supported_kinds'])}"
         )
         if "--routes-only" in sys.argv:
+            assert capabilities.json()["synthetic_test_cohort"] is True, "Android would reject trace capability"
+            assert capabilities.json()["supported_kinds"] == [
+                "mcp_calls",
+                "confirmed_skill_loads",
+                "recorded_hook_runs",
+            ], "v1.2 capability lacks verified three-kind source"
             # Authorization challenge creates only short-lived OAuth state. Do
             # not change owner consent, follow grants or removals on Android's
             # final shared session.

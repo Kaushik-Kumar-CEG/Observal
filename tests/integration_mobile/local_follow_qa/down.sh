@@ -3,10 +3,23 @@
 # SPDX-License-Identifier: Apache-2.0
 set -Eeuo pipefail
 qa=$(cd "$(dirname "$0")" && pwd)
-state="$qa/.runtime"
+state_name=${MOBILE_FOLLOW_QA_STATE_NAME:-.runtime}
+[[ "$state_name" == .runtime || "$state_name" =~ ^\.runtime-scratch-[0-9a-f]{6,12}$ || \
+   "$state_name" =~ ^\.runtime-android-[0-9a-f]{6,12}$ ]] || {
+    echo 'Invalid QA state name; refusing cleanup' >&2; exit 1;
+}
+state="$qa/$state_name"
 [[ -d "$state" && ! -L "$state" ]] || { echo 'No owned QA state'; exit 0; }
 id=$(<"$state/id")
-[[ "$id" =~ ^followqa[0-9a-f]{10}$ ]] || { echo 'Invalid QA state; refusing destructive cleanup' >&2; exit 1; }
+[[ "$id" =~ ^followqa[0-9a-f]{10}$ && "${MOBILE_FOLLOW_QA_EXPECT_ID:-}" == "$id" ]] || {
+    echo 'Exact expected QA ID required; refusing destructive cleanup' >&2; exit 1;
+}
+issuer_port=$(<"$state/issuer-port")
+[[ "$state_name" == .runtime && "$issuer_port" == 18443 ]] || \
+    [[ "$state_name" =~ ^\.runtime-scratch- && "$issuer_port" == 18444 ]] || \
+    [[ "$state_name" =~ ^\.runtime-android- && "$issuer_port" == 18446 ]] || {
+        echo 'QA state/issuer mismatch; refusing cleanup' >&2; exit 1;
+    }
 docker info >/dev/null || { echo 'Docker unavailable; preserving QA state' >&2; exit 1; }
 owned_process() {
     local pid=$1
@@ -59,16 +72,17 @@ if [[ -f "$state/run" ]]; then
 fi
 rm -f -- "$state"/*
 rmdir "$state"
-if ! python3 - <<'PY'
-import socket
-for family, address in ((socket.AF_INET, ('0.0.0.0', 18443)), (socket.AF_INET6, ('::', 18443))):
+if ! python3 - "$issuer_port" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+for family, address in ((socket.AF_INET, ('0.0.0.0', port)), (socket.AF_INET6, ('::', port))):
     with socket.socket(family) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if family == socket.AF_INET6: sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
         sock.bind(address)
 PY
 then
-    echo 'WARNING: 18443 still has a listener; inspect before restarting' >&2
+    echo "WARNING: $issuer_port still has a listener; inspect before restarting" >&2
     exit 1
 fi
-echo 'QA containers, processes, temporary CA and state removed; 18443 has no listener'
+echo "QA containers, processes, temporary CA and state removed; $issuer_port has no listener"

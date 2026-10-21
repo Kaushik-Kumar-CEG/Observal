@@ -7,7 +7,7 @@ http {
     include /etc/nginx/mime.types;
     access_log off; # do not log browser/device challenge codes
     server {
-        listen 127.0.0.1:18443 ssl;
+        listen 127.0.0.1:__ISSUER_PORT__ ssl;
         server_name localhost;
         ssl_certificate /qa/leaf.crt;
         ssl_certificate_key /qa/leaf.key;

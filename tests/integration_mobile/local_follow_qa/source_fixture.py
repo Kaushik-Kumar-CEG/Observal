@@ -11,16 +11,18 @@ sources qualify. In particular, it must not be wired into up.sh as a flag overri
 """
 
 import asyncio
+import json
 import os
 import re
 import ssl
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
+import jwt
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
@@ -31,16 +33,28 @@ from services.clickhouse.client import _query
 
 KINDS = ("mcp", "skill", "hook")
 EXPECTED = {"mcp_calls", "confirmed_skill_loads", "recorded_hook_runs"}
-ORIGIN = "https://localhost:18443"
+ISSUER_PORT = int(os.environ.get("MOBILE_FOLLOW_QA_PORT", "18443"))
+ORIGIN = f"https://localhost:{ISSUER_PORT}"
 
 
 def require_disposable_environment() -> Path:
     pg = make_url(os.environ["DATABASE_URL"])
     ch = urlsplit(os.environ["CLICKHOUSE_URL"])
     qa = Path(__file__).resolve().parent
-    state = qa / ".runtime"
+    state_name = os.environ.get("MOBILE_FOLLOW_QA_STATE_NAME", ".runtime")
+    expected_port = (
+        18443 if state_name == ".runtime" else 18446 if state_name.startswith(".runtime-android-") else 18444
+    )
+    if not (
+        state_name == ".runtime"
+        or re.fullmatch(r"\.runtime-scratch-[0-9a-f]{6,12}", state_name)
+        or re.fullmatch(r"\.runtime-android-[0-9a-f]{6,12}", state_name)
+    ):
+        raise RuntimeError("Invalid disposable QA state name")
+    state = qa / state_name
     if (
-        os.environ.get("MOBILE_FOLLOW_LOCAL_QA") != "1"
+        expected_port != ISSUER_PORT
+        or os.environ.get("MOBILE_FOLLOW_LOCAL_QA") != "1"
         or pg.host != "127.0.0.1"
         or pg.database != "followqa"
         or pg.username != "followqa"
@@ -55,6 +69,8 @@ def require_disposable_environment() -> Path:
     ):
         raise RuntimeError("Only the disposable loopback follow QA database is permitted")
     session_id = (state / "id").read_text().strip()
+    if (state / "issuer-port").read_text().strip() != str(ISSUER_PORT):
+        raise RuntimeError("QA session port does not match selected issuer")
     if not re.fullmatch(r"followqa[0-9a-f]{10}", session_id):
         raise RuntimeError("Invalid disposable QA session identity")
     for suffix, port, requested in (("pg", 5432, pg.port), ("ch", 8123, ch.port)):
@@ -223,6 +239,7 @@ async def verify_capabilities(runtime: Path, users: dict[str, str]) -> None:
     tls = ssl.create_default_context(cafile=str(runtime / "ca.crt"))
     async with httpx.AsyncClient(base_url=ORIGIN, verify=tls, trust_env=False, timeout=15) as client:
         password = (runtime / "password").read_text().strip()
+        proofs: dict[str, dict[str, str]] = {}
         for email, user_id in users.items():
             login = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
             assert login.status_code == 200, f"disposable login failed: {login.status_code}"
@@ -242,15 +259,63 @@ async def verify_capabilities(runtime: Path, users: dict[str, str]) -> None:
                 },
             )
             assert redeemed.status_code == 200, f"device token failed: {redeemed.status_code}"
-            response = await client.get(
-                "/api/v1/mobile-activity/v1/capabilities",
-                headers={"Authorization": "Bearer " + redeemed.json()["access_token"]},
+            mobile = {"Authorization": "Bearer " + redeemed.json()["access_token"]}
+            proof = await client.get("/api/v1/auth/mobile/credential", headers=mobile)
+            assert proof.status_code == 200 and proof.json()["subject_id"] == user_id
+            token = redeemed.json()
+            access_exp = datetime.fromtimestamp(
+                jwt.decode(token["access_token"], options={"verify_signature": False})["exp"], UTC
             )
+            refresh_exp = datetime.fromtimestamp(
+                jwt.decode(token["refresh_token"], options={"verify_signature": False})["exp"], UTC
+            )
+            assert datetime.now(UTC) < access_exp <= datetime.now(UTC) + timedelta(days=1, seconds=60)
+            assert refresh_exp > access_exp
+            proofs[email] = {
+                "subject_id": user_id,
+                "probe_device_id": proof.json()["device_id"],
+                "probe_mobile_access_expires_at": access_exp.isoformat(),
+                "probe_mobile_refresh_expires_at": refresh_exp.isoformat(),
+            }
+            response = await client.get("/api/v1/mobile-activity/v1/capabilities", headers=mobile)
             assert response.status_code == 200, f"capabilities failed: {response.status_code}"
             capabilities = response.json()
             assert capabilities["viewer_id"] == user_id
             assert capabilities["synthetic_test_cohort"] is True, "cohort not qualified"
             assert set(capabilities["supported_kinds"]) == EXPECTED, "three-kind evidence not qualified"
+            own_scope = "author" if email.startswith("owner@") else "user"
+            positive = await client.get(
+                f"/api/v1/mobile-activity/v1/people/{user_id}/summary",
+                params={"scope": own_scope, "period": "3m"},
+                headers=mobile,
+            )
+            assert positive.status_code == 200, f"{own_scope} scoped read failed: {positive.status_code}"
+            summary = positive.json()
+            assert summary["component_trace_union"]["value"] > 0
+            assert summary["confirmed_skill_loads"]["value"] > 0
+            assert summary["recorded_hook_runs"]["value"] > 0
+            if email.startswith("viewer@"):
+                for subject_id, scope in ((user_id, "author"), (users["owner@follow-qa.invalid"], "user")):
+                    denied = await client.get(
+                        f"/api/v1/mobile-activity/v1/people/{subject_id}/summary",
+                        params={"scope": scope, "period": "3m"},
+                        headers=mobile,
+                    )
+                    assert denied.status_code == 403, "ordinary viewer gained foreign or Author scope"
+            else:
+                actor = users["viewer@follow-qa.invalid"]
+                actor_read = await client.get(
+                    f"/api/v1/mobile-activity/v1/people/{actor}/summary",
+                    params={"scope": "user", "period": "3m"},
+                    headers=mobile,
+                )
+                assert actor_read.status_code == 200 and actor_read.json()["component_trace_union"]["value"] > 0
+            available = await client.get("/api/v1/mobile-follow-sync/v1/availability", headers=mobile)
+            assert available.status_code == 200, f"follow availability failed: {available.status_code}"
+        # Only IDs, never passwords, JWTs or OAuth challenge codes, leave the
+        # 0700 runtime for a session-bound handoff receipt after validation.
+        (runtime / "probe-roles.json").write_text(json.dumps(proofs, sort_keys=True))
+        (runtime / "probe-roles.json").chmod(0o600)
 
 
 async def main() -> None:
@@ -260,7 +325,7 @@ async def main() -> None:
         await verify_capabilities(runtime, users)
     finally:
         await engine.dispose()
-    print("DISPOSABLE_PI_RAW_SOURCE_RETENTION_THREE_KINDS_BOTH_VIEWERS=PASS")
+    print("DISPOSABLE_PI_RAW_SOURCE_RETENTION_THREE_KINDS_SCOPED_READ_AND_DENIAL_BOTH_VIEWERS=PASS")
 
 
 if __name__ == "__main__":

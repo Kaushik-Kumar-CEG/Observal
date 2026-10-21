@@ -29,6 +29,10 @@ async def schema():
 
 async def fixture():
     password = os.environ["QA_PASSWORD"]
+    issuer_port = int(os.environ.get("MOBILE_FOLLOW_QA_PORT", "18443"))
+    assert issuer_port in (18443, 18444, 18446), "disposable QA issuer only"
+    window = int(os.environ.get("MOBILE_FOLLOW_QA_WINDOW_MINUTES", "60"))
+    assert 1 <= window <= 120, "synthetic QA window must remain bounded"
     owner = User(
         id=uuid.uuid4(),
         email="owner@follow-qa.invalid",
@@ -53,9 +57,9 @@ async def fixture():
         await db.execute(
             text(
                 "UPDATE mobile_read_controls SET blocked=false, source_policy_ready=true, "
-                "synthetic_expires_at=clock_timestamp()+interval '1 hour' WHERE project_id=:project"
+                "synthetic_expires_at=clock_timestamp()+make_interval(mins => :window) WHERE project_id=:project"
             ),
-            {"project": str(DEFAULT_PROJECT_ID)},
+            {"project": str(DEFAULT_PROJECT_ID), "window": window},
         )
         values = {
             "mobile.auth_enabled": "true",
@@ -64,8 +68,8 @@ async def fixture():
             "mobile.synthetic_test_server_id": str(server),
             "mobile.synthetic_test_viewer_id": str(owner.id),
             "mobile.synthetic_test_self_user_viewer_id": str(other.id),
-            "deployment.public_url": "https://localhost:18443",
-            "deployment.frontend_url": "https://localhost:18443",
+            "deployment.public_url": f"https://localhost:{issuer_port}",
+            "deployment.frontend_url": f"https://localhost:{issuer_port}",
         }
         for key, value in values.items():
             await db.execute(
