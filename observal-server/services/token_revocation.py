@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """User-wide token revocation.
@@ -8,8 +9,11 @@ to the user is dead. Tokens issued afterwards are unaffected, so a new login
 never has to clear the key, and nothing can bring an older token back.
 
 The key never expires. It must outlive every token it revokes, whatever token
-lifetimes are configured, and Redis never evicts keys without a TTL under
-``volatile-lru``. It costs one small key per user who has ever been revoked.
+lifetimes are configured. Every supported Redis deployment must use
+``noeviction``: ``allkeys-lru`` can drop this marker and ``volatile-lru`` can
+silently drop the expiring mobile logout/JTI revocation keys. Under capacity
+pressure writes fail instead of reauthorizing a token. It costs one small key
+per user who has ever been revoked.
 """
 
 import time
