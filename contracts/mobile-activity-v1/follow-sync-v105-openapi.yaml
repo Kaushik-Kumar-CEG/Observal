@@ -1,0 +1,619 @@
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+openapi: 3.1.0
+info:
+  title: Observal account-owned mobile follows (IMMUTABLE 1.0.5 FORMAL REVIEW PROPOSAL — NOT AGREED)
+  version: 1.0.5
+  description: >-
+    Separate from frozen activity v1.2. No endpoint exists or is authorized before
+    Android's explicit agreement to the exact whole-file proposal, schema and vectors.
+    JSON integers (including every generation/revision/ordinal) are 0..9007199254740991;
+    the server rejects an increment at the limit, never wraps or rounds. All POST
+    bodies are at most 4096 UTF-8 bytes BEFORE parsing. No authenticated redirects.
+    PROPOSED owner-policy quota: <=1000 distinct subjects per generation, fixed
+    page 100 (<=10 pages). Per owner/project/cohort at most TWO snapshot/export
+    images plus TWO fixed-upper change leases, <=4000 pinned rows, <=2 MiB
+    reserved logical pinned bytes and <=16 MiB rolling 90d retained write
+    history. Each approved device holds at most one per purpose; two devices
+    with different R can both progress. Equivalent cursorless requests reuse
+    their image/lease even after lost first 429, with independent device auth.
+    Non-equivalent third change reader uses a fresh snapshot slot or bounded
+    503 until <=15min expiry, never endless stale image->change loop.
+    10000 durably admitted normal 200 OR 409 outcomes/90d + 1000 reserved
+    successful active unfollows cap one-subject churn and conflict-ID floods.
+    Privacy remove/withdraw share <=1000 durably indexed nonce/status receipts
+    per rolling 90d plus ONE current state-only recovery slot per owner. At
+    saturation still fence and erase; state_only 202 may be queried while
+    current, then an overwritten lost 202 needs audited review, not a false
+    completed erasure or unbounded receipt retention.
+    Redacted history_capacity_reached is PRE-ADMISSION: no persisted ID/outcome,
+    no 90d replay guarantee, no automatic retry of the old intent. Remove/withdraw/DSR erasure and revoke still succeed.
+    Unsatisfiable reservation returns 503 before first page or first 429. Fixed 15min
+    lease; erasure/withdrawal immediately purges. At most one 429 per page
+    (Retry-After <=60s; read_lease_id + retry_cursor even on first 429), then
+    <=5s healthy processing. Incomplete pages have exactly 100 rows. Deltas
+    admitted only if <=89d old so 15min pin never exceeds 90d retention; >1000
+    delta rows return snapshot_required BEFORE any page. No partial page is
+    authoritative. An effective 200 operation lookup is historical, NOT proof
+    of current Following without a later complete authoritative checkpoint.
+servers:
+  - url: /api/v1
+paths:
+  /mobile-follow-sync/v1/availability:
+    get:
+      operationId: followSyncAvailability
+      security: [{mobileRead: []}]
+      description: >-
+        A strict 200 requires version 1.0.5. Only this path, after fresh same-issuer
+        v1.2 credential AND capabilities proof, treats HTTP 404/405 (even non-JSON)
+        as extension absent/local-follows-only. 401/403/503, HTML 200, unknown
+        version, cross-origin and redirects NEVER become an empty snapshot.
+      responses:
+        '200': {description: "Current owner state", content: {application/json: {schema: {$ref: '#/components/schemas/Availability'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '404': {description: "Only a proven older server can lack this extension; no JSON body required."}
+        '405': {description: "Only a proven older server can reject this method; no JSON body required."}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/consent/state:
+    get:
+      operationId: browserViewCurrentConsentAndGeneration
+      security: [{browserBearer: []}]
+      description: Same issuing-server browser account session displays owner generation and disclosure state, no private bookmarks or activity.
+      responses:
+        '200': {description: "Browser-visible consent decision state", content: {application/json: {schema: {$ref: '#/components/schemas/BrowserConsentState'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/consent:
+    post:
+      operationId: explicitlyOptInAfterDisclosure
+      security: [{browserBearer: []}]
+      description: Authenticated same-owner browser/desktop bearer; mobile read bearer CANNOT re-enable consent. Browser UI must display disclosure; a bearer alone cannot cryptographically prove the UI was viewed. Only consent_required state accepts a new consent_id. Already available plus another ID returns 409 consent_already_available, never increments generation or deletes follows. Stale pre-withdrawal retry is rejected; identical accepted same-generation retries are idempotent. At most 1000 accepted consent IDs/owner/project/cohort over rolling 90d; a new ID at capacity is pre-admission redacted 409 consent_capacity_reached, no grant or stored ID. Withdrawal and erasure are never blocked.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ConsentRequest'}}}}
+      responses:
+        '200': {description: "Owner-wide consent", content: {application/json: {schema: {$ref: '#/components/schemas/ConsentState'}}}}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/consent/withdraw:
+    post:
+      operationId: explicitlyWithdrawAccountConsent
+      security: [{followWrite: []}, {browserBearer: []}]
+      description: >-
+        Current approved mobile:follow-write or same-owner browser/desktop bearer
+        (including when all phones are unlinked); NEVER a mobile read bearer.
+        Explicit account-wide confirmation; browser/desktop bearer does not
+        acquire follow-edit scope. Recheck current generation and owner;
+        explicit account-wide confirmation. Atomically increment owner generation,
+        fence edits, invalidate ALL device write approvals/JWT generations, then
+        durably erase bookmarks/high-water/dedup and consent in idempotent batches.
+        202 is pending, never completed. Unlink/logout is NOT withdrawal.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/WithdrawRequest'}}}}
+      responses:
+        '202': {description: "Fenced durable withdrawal", content: {application/json: {schema: {$ref: '#/components/schemas/WithdrawalState'}}}}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/consent/withdrawals/{withdrawal_id}:
+    get:
+      operationId: getAccountConsentWithdrawalStatus
+      security: [{mobileRead: []}, {browserBearer: []}]
+      description: >-
+        Only nonce_lookup_90d mode keeps this ID/status for 90 days. state_only
+        uses ONE current slot; after a later terminal privacy action supersedes
+        it, this ID can be 404 UNKNOWN inside 90 days. Unknown is NOT no commit
+        or completed erasure: preserve local evidence, show Needs review and
+        seek audited operator reconciliation, never auto-replay/re-consent.
+      parameters: [{$ref: '#/components/parameters/WithdrawalId'}]
+      responses:
+        '200': {description: "Redacted durable removal state", content: {application/json: {schema: {$ref: '#/components/schemas/WithdrawalState'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '404': {$ref: '#/components/responses/Unknown'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/write-authorization:
+    post:
+      operationId: requestBrowserWriteApproval
+      security: [{mobileRead: []}]
+      description: One-use code bound to owner/device/server/project/cohort AND current owner generation; generation change invalidates even unapproved challenges. Code in browser URL is NOT a token.
+      responses:
+        '200': {description: "Bounded browser challenge", content: {application/json: {schema: {$ref: '#/components/schemas/WriteApprovalChallenge'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/write-approval:
+    post:
+      operationId: browserApproveWriteForOneDevice
+      security: [{browserBearer: []}]
+      description: Fresh same-account browser session only; mobile bearer cannot approve its own write scope.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/WriteApprovalRequest'}}}}
+      responses:
+        '200': {description: "Device-specific approval", content: {application/json: {schema: {$ref: '#/components/schemas/WriteApprovalState'}}}}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/write-grant:
+    post:
+      operationId: mintGenerationBoundWriteGrant
+      security: [{mobileRead: []}]
+      description: Requires current separate browser-approved device record, consent, active family/Redis and barrier. No refresh or general API authority.
+      responses:
+        '200': {description: "<=300 second generation-bound unrefreshable JWT", content: {application/json: {schema: {$ref: '#/components/schemas/WriteGrant'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/snapshot:
+    get:
+      operationId: pagedGenerationBoundSnapshot
+      security: [{mobileRead: []}]
+      parameters: [{$ref: '#/components/parameters/PageLimit'}, {$ref: '#/components/parameters/MinRevision'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: "Admitted durable read lease pinned to owner generation, revision and erasure floor; <=10 pages, no partial list authoritative", content: {application/json: {schema: {$ref: '#/components/schemas/SnapshotPage'}}}}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/LeasedRateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/changes:
+    get:
+      operationId: pagedGenerationBoundChanges
+      security: [{mobileRead: []}]
+      parameters:
+        - {name: after_revision, in: query, required: true, schema: {$ref: '#/components/schemas/UnsignedSafeInt'}, description: "Canonical base-10 digits only, no leading zero except 0; reject >2^53-1 BEFORE parsing as JS Number."}
+        - {name: owner_generation, in: query, required: true, schema: {$ref: '#/components/schemas/PositiveSafeInt'}}
+        - {$ref: '#/components/parameters/PageLimit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: "Durable lease pinned to inclusive upper revision across <=10 pages; >1000 eligible deltas return 409 snapshot_required before page one. Checkpoint only at complete", content: {application/json: {schema: {$ref: '#/components/schemas/ChangesPage'}}}}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/LeasedRateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/operations:
+    post:
+      operationId: conditionalSingleGenerationBoundEdit
+      security: [{followWrite: []}]
+      description: >-
+        One subject only. Compare account owner_generation AND person revision
+        transactionally under owner/subject locks. Store DURABLY ADMITTED 200/409 outcome >=90 days within the owner history
+        budget; same admitted ID/body in current generation replays status and
+        JSON. Pre-admission history_capacity_reached stores no ID/result and
+        needs a new explicit choice/ID after quota recovers.
+        Superseded generations never reapply a prior result after removal. An old
+        write JWT is denied 401 before parsing the body; a NEW current write
+        grant presenting an old-generation body is rejected 409.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FollowOperation'}}}}
+      responses:
+        '200': {description: "Applied in current generation", content: {application/json: {schema: {$ref: '#/components/schemas/AppliedOperation'}}}}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '409': {description: "Generation, person, reused ID, or capacity conflict", content: {application/json: {schema: {$ref: '#/components/schemas/OperationConflict'}}}}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/operations/{operation_id}:
+    get:
+      operationId: findGenerationAwareOperationOutcome
+      security: [{mobileRead: []}]
+      parameters: [{$ref: '#/components/parameters/OperationId'}]
+      responses:
+        '200': {description: "HISTORICAL operation result, NOT current Following. Owner+device+Redis protected; after withdrawal known owner ID only redacted effective=false. Strict client verifies path ID and later complete authoritative checkpoint at or after applied revision before labeling current state.", content: {application/json: {schema: {$ref: '#/components/schemas/OperationOutcome'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '404': {description: "Unknown is NOT proof of no commit", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '410': {description: "Dedup retention ended; explicit fresh snapshot/rebase", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/removals/prepare:
+    post:
+      operationId: prepareOwnerGenerationRemoval
+      security: [{followWrite: []}]
+      description: Fresh <=120s nonce bound to current generation and approved device. Phone unlink is not remove-all.
+      responses:
+        '200': {description: "Bound challenge", content: {application/json: {schema: {$ref: '#/components/schemas/RemovalChallenge'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/removals:
+    post:
+      operationId: removeAllFollowsAndAdvanceGeneration
+      security: [{followWrite: []}]
+      description: >-
+        Accept nonce once; atomically advance owner_generation and fence ALL old
+        pending edits, including unseen subject UUIDs. After acceptance old write
+        JWT is rejected 401; use read-authorized removals/lookup with original
+        nonce for lost-202 recovery. Never bypass write revocation for replay.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RemovalRequest'}}}}
+      responses:
+        '202': {description: "Durable fence pending, not success", content: {application/json: {schema: {$ref: '#/components/schemas/RemovalState'}}}}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/removals/lookup:
+    post:
+      operationId: locateRemovalByOriginalNonce
+      security: [{mobileRead: []}]
+      description: >-
+        Same owner/device only; 90-day minimal nonce digest/status applies ONLY
+        to durably indexed nonce_lookup_90d receipts, including after write JWT
+        revocation. state_only uses ONE current slot: after a later terminal
+        action supersedes it, lookup may return 404 UNKNOWN before 90 days.
+        Unknown does NOT prove no commit or completed erasure; retain local
+        nonce, show Needs review and seek audited operator reconciliation.
+        Never replay an old write grant or delete the only local evidence.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RemovalLookup'}}}}
+      responses:
+        '200': {description: "Existing removal state", content: {application/json: {schema: {$ref: '#/components/schemas/RemovalState'}}}}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '404': {$ref: '#/components/responses/Unknown'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/removals/{removal_id}:
+    get:
+      operationId: getRemoveAllStatus
+      security: [{mobileRead: []}]
+      description: >-
+        Indexed nonce_lookup_90d ID/status retains 90-day recovery; state_only
+        ID/status exists only while its ONE current slot is not superseded.
+        A later terminal privacy action can make it 404 UNKNOWN before 90 days.
+        Unknown is NOT no commit or completed erasure: preserve local evidence,
+        show Needs review and require audited operator reconciliation.
+      parameters: [{$ref: '#/components/parameters/RemovalId'}]
+      responses:
+        '200': {description: "Fenced pending/needs_operator/completed state", content: {application/json: {schema: {$ref: '#/components/schemas/RemovalState'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '404': {$ref: '#/components/responses/Unknown'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /mobile-follow-sync/v1/export:
+    get:
+      operationId: ownerOnlyUUIDExport
+      security: [{mobileRead: []}]
+      description: Same bounded generation-pinned snapshot wire; no names, activity, personal period or credentials.
+      parameters: [{$ref: '#/components/parameters/PageLimit'}, {$ref: '#/components/parameters/MinRevision'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: "Durable owner UUID-only lease, <=10 pages at capacity", content: {application/json: {schema: {$ref: '#/components/schemas/SnapshotPage'}}}}
+        '400': {$ref: '#/components/responses/Invalid'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Restricted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/LeasedRateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+components:
+  securitySchemes:
+    mobileRead: {type: http, scheme: bearer, bearerFormat: JWT, description: "Exact v1.2 mobile:read only; account/device/Redis rechecked per call."}
+    followWrite: {type: http, scheme: bearer, bearerFormat: JWT, description: "Independently browser-approved short-lived mobile:follow-write audience, generation-checked every write."}
+    browserBearer: {type: http, scheme: bearer, bearerFormat: JWT, description: "Same-account browser/desktop token, never a mobile bearer."}
+  parameters:
+    PageLimit: {name: limit, in: query, required: false, schema: {type: integer, const: 100, default: 100}, description: "Omitted means 100, explicitly any other value including 1 is 400; stable <=10-page capacity guarantee."}
+    MinRevision: {name: min_revision, in: query, required: false, schema: {$ref: '#/components/schemas/UnsignedSafeInt'}, description: "Optional canonical safe integer. A cursorless fresh snapshot/export MUST meet this revision; existing shared image pinned below it returns 503 unavailable with Retry-After<=60 until fixed <=15-minute expiry, never falsely claims wall-time freshness. Cursor requests are bound to original pinned revision."}
+    Cursor: {name: cursor, in: query, required: false, schema: {type: string, minLength: 1, maxLength: 1300, pattern: '^[A-Za-z0-9_.~-]+$'}, description: "Signed purpose/owner/generation/lease/keyset; fixed 15min PostgreSQL lease. Equivalent cursorless first requests (including lost initial 429 and second phone) reuse the same owner image. Change deltas >89d not admitted. Complete URL <=2048 with API origin <=512."}
+    OperationId: {name: operation_id, in: path, required: true, schema: {type: string, format: uuid}}
+    RemovalId: {name: removal_id, in: path, required: true, schema: {type: string, format: uuid}}
+    WithdrawalId: {name: withdrawal_id, in: path, required: true, schema: {type: string, format: uuid}}
+  schemas:
+    UnsignedSafeInt: {type: integer, minimum: 0, maximum: 9007199254740991, description: "Exact IEEE-754 JS-safe integer; reject 9007199254740992 or noncanonical query decimal."}
+    PositiveSafeInt: {type: integer, minimum: 1, maximum: 9007199254740991, description: "Never wrap; on increment overflow fail closed with revision_exhausted."}
+    Availability:
+      type: object
+      additionalProperties: false
+      required: [version, state, server_id, project_id, viewer_id, cohort, owner_generation, current_revision, max_page_size, max_distinct_subjects, max_read_leases, max_pinned_logical_bytes, max_retained_history_logical_bytes, max_normal_edits_90d, max_protected_unfollows_90d, read_lease_seconds, offline_horizon_days]
+      properties:
+        version: {type: string, const: '1.0.5'}
+        state: {type: string, enum: [available, disabled, consent_required, restricted, withdrawal_pending]}
+        server_id: {type: string, format: uuid}
+        project_id: {type: string, maxLength: 256}
+        viewer_id: {type: string, format: uuid}
+        cohort: {type: string, enum: [live, synthetic]}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        current_revision: {$ref: '#/components/schemas/UnsignedSafeInt'}
+        max_page_size: {type: integer, const: 100}
+        max_distinct_subjects: {type: integer, const: 1000}
+        max_read_leases: {type: integer, const: 4}
+        max_pinned_logical_bytes: {type: integer, const: 2097152}
+        max_retained_history_logical_bytes: {type: integer, const: 16777216}
+        max_normal_edits_90d: {type: integer, const: 10000}
+        max_protected_unfollows_90d: {type: integer, const: 1000}
+        read_lease_seconds: {type: integer, const: 900}
+        offline_horizon_days: {type: integer, const: 30}
+    BrowserConsentState:
+      type: object
+      additionalProperties: false
+      required: [state, owner_generation]
+      properties:
+        state: {type: string, enum: [available, disabled, consent_required, withdrawal_pending]}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+    ConsentRequest:
+      type: object
+      additionalProperties: false
+      required: [consent, owner_generation, consent_id]
+      properties:
+        consent: {type: boolean, const: true}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        consent_id: {type: string, format: uuid}
+    ConsentState:
+      type: object
+      additionalProperties: false
+      required: [state, owner_generation]
+      properties:
+        state: {type: string, const: available}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+    WithdrawRequest:
+      type: object
+      additionalProperties: false
+      required: [confirm, owner_generation, withdrawal_id]
+      properties:
+        confirm: {type: boolean, const: true}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        withdrawal_id: {type: string, format: uuid, description: "Caller-generated idempotency key for ambiguous 202."}
+    WithdrawalState:
+      type: object
+      additionalProperties: false
+      required: [withdrawal_id, owner_generation, state, recovery_mode]
+      properties:
+        withdrawal_id: {type: string, format: uuid}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        state: {type: string, enum: [pending, needs_operator, completed]}
+        recovery_mode: {type: string, enum: [nonce_lookup_90d, state_only]}
+    WriteApprovalChallenge:
+      type: object
+      additionalProperties: false
+      required: [user_code, verification_uri, verification_origins, expires_in, owner_generation]
+      properties:
+        user_code: {type: string, minLength: 6, maxLength: 32}
+        verification_uri: {type: string, format: uri, pattern: '^https://', maxLength: 2048}
+        verification_origins: {type: array, minItems: 1, maxItems: 1, items: {type: string, format: uri, pattern: '^https://', maxLength: 512}}
+        expires_in: {type: integer, minimum: 1, maximum: 600}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+    WriteApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [user_code, approve]
+      properties:
+        user_code: {type: string, minLength: 6, maxLength: 32}
+        approve: {type: boolean, const: true}
+    WriteApprovalState:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties: {state: {type: string, const: approved}}
+    WriteGrant:
+      type: object
+      additionalProperties: false
+      required: [token_type, access_token, expires_in, client_id, audience, scope, owner_generation]
+      properties:
+        token_type: {type: string, const: bearer}
+        access_token: {type: string, minLength: 32, maxLength: 8192}
+        expires_in: {type: integer, minimum: 1, maximum: 300}
+        client_id: {type: string, const: observal-mobile}
+        audience: {type: string, const: observal-mobile-follow-sync-v1}
+        scope: {type: string, const: 'mobile:follow-write'}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+    Bookmark:
+      type: object
+      additionalProperties: false
+      required: [subject_id, person_revision]
+      properties:
+        subject_id: {type: string, format: uuid}
+        person_revision: {$ref: '#/components/schemas/PositiveSafeInt'}
+    SnapshotPage:
+      type: object
+      additionalProperties: false
+      required: [server_id, project_id, viewer_id, cohort, owner_generation, revision, read_lease_id, erasure_floor, items, next_cursor, complete]
+      properties:
+        server_id: {type: string, format: uuid}
+        project_id: {type: string, maxLength: 256}
+        viewer_id: {type: string, format: uuid}
+        cohort: {type: string, enum: [live, synthetic]}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        revision: {$ref: '#/components/schemas/UnsignedSafeInt'}
+        read_lease_id: {type: string, format: uuid, description: "Stable durable owner-scoped read lease on every page, never a bearer credential."}
+        erasure_floor: {$ref: '#/components/schemas/UnsignedSafeInt'}
+        items: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/Bookmark'}}
+        next_cursor: {type: [string, 'null'], maxLength: 1300, pattern: '^[A-Za-z0-9_.~-]+$'}
+        complete: {type: boolean}
+      if: {properties: {complete: {const: true}}, required: [complete]}
+      then: {properties: {next_cursor: {type: 'null'}}}
+      else: {properties: {next_cursor: {type: string, minLength: 1}, items: {type: array, minItems: 100, maxItems: 100}}}
+    Change:
+      type: object
+      additionalProperties: false
+      required: [subject_id, action, person_revision, revision, change_ordinal]
+      properties:
+        subject_id: {type: string, format: uuid}
+        action: {type: string, enum: [follow, unfollow]}
+        person_revision: {$ref: '#/components/schemas/PositiveSafeInt'}
+        revision: {$ref: '#/components/schemas/PositiveSafeInt'}
+        change_ordinal: {$ref: '#/components/schemas/UnsignedSafeInt'}
+    ChangesPage:
+      description: Fixed upper revision on first page; preserve starting generation/revision until complete, including same-revision ordinals.
+      type: object
+      additionalProperties: false
+      required: [owner_generation, revision, read_lease_id, erasure_floor, changes, next_cursor, complete]
+      properties:
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        revision: {$ref: '#/components/schemas/UnsignedSafeInt'}
+        read_lease_id: {type: string, format: uuid, description: "Same fixed-upper durable lease across all pages, not an authorization token."}
+        erasure_floor: {$ref: '#/components/schemas/UnsignedSafeInt'}
+        changes: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/Change'}}
+        next_cursor: {type: [string, 'null'], maxLength: 1300, pattern: '^[A-Za-z0-9_.~-]+$'}
+        complete: {type: boolean}
+      if: {properties: {complete: {const: true}}, required: [complete]}
+      then: {properties: {next_cursor: {type: 'null'}}}
+      else: {properties: {next_cursor: {type: string, minLength: 1}, changes: {type: array, minItems: 100, maxItems: 100}}}
+    FollowOperation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, subject_id, owner_generation, base_person_revision, action]
+      properties:
+        operation_id: {type: string, format: uuid}
+        subject_id: {type: string, format: uuid}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        base_person_revision: {$ref: '#/components/schemas/UnsignedSafeInt'}
+        action: {type: string, enum: [follow, unfollow]}
+    AppliedOperation:
+      type: object
+      additionalProperties: false
+      required: [operation_id, subject_id, owner_generation, revision, person_revision, status]
+      properties:
+        operation_id: {type: string, format: uuid}
+        subject_id: {type: string, format: uuid}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        revision: {$ref: '#/components/schemas/PositiveSafeInt'}
+        person_revision: {$ref: '#/components/schemas/PositiveSafeInt'}
+        status: {type: string, const: applied}
+    OperationConflict:
+      oneOf:
+        - {$ref: '#/components/schemas/PersonConflict'}
+        - {$ref: '#/components/schemas/RedactedOperationConflict'}
+    PersonConflict:
+      type: object
+      additionalProperties: false
+      required: [error, operation_id, owner_generation, revision, person_revision, current_following]
+      properties:
+        error: {type: string, const: person_conflict}
+        operation_id: {type: string, format: uuid}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        revision: {$ref: '#/components/schemas/UnsignedSafeInt'}
+        person_revision: {$ref: '#/components/schemas/UnsignedSafeInt'}
+        current_following: {type: boolean}
+    RedactedOperationConflict:
+      type: object
+      additionalProperties: false
+      required: [error, operation_id, owner_generation]
+      properties:
+        error: {type: string, enum: [generation_conflict, subject_erased, operation_id_reused, capacity_reached, history_capacity_reached, revision_exhausted]}
+        operation_id: {type: string, format: uuid}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+    SupersededOperation:
+      type: object
+      additionalProperties: false
+      required: [status, reason, original_owner_generation, owner_generation]
+      properties:
+        status: {type: string, const: superseded}
+        reason: {type: string, enum: [owner_reset, subject_erased]}
+        original_owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+    OperationOutcome:
+      description: >-
+        Inseparable discriminator: effective true + original_http_status 200 iff
+        AppliedOperation; effective true + 409 iff OperationConflict. On owner reset
+        or erasure effective false permits either original status but ONLY redacted
+        SupersededOperation. Even effective 200/applied is HISTORICAL, not current
+        Following until a later complete authoritative checkpoint proves state.
+        Strict clients ALSO compare top-level operation_id to
+        requested GET path ID, effective result.operation_id to that path ID,
+        result.owner_generation to top-level owner_generation,
+        owner_reset original generation < current, subject_erased original generation
+        = current (otherwise owner_reset), and reject any contradiction before UI.
+      type: object
+      additionalProperties: false
+      required: [operation_id, original_http_status, effective, owner_generation, result]
+      properties:
+        operation_id: {type: string, format: uuid}
+        original_http_status: {type: integer, enum: [200, 409]}
+        effective: {type: boolean}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        result: {oneOf: [{$ref: '#/components/schemas/AppliedOperation'}, {$ref: '#/components/schemas/OperationConflict'}, {$ref: '#/components/schemas/SupersededOperation'}]}
+      oneOf:
+        - required: [effective, original_http_status, result]
+          properties: {effective: {const: true}, original_http_status: {const: 200}, result: {$ref: '#/components/schemas/AppliedOperation'}}
+        - required: [effective, original_http_status, result]
+          properties: {effective: {const: true}, original_http_status: {const: 409}, result: {$ref: '#/components/schemas/OperationConflict'}}
+        - required: [effective, original_http_status, result]
+          properties: {effective: {const: false}, original_http_status: {enum: [200, 409]}, result: {$ref: '#/components/schemas/SupersededOperation'}}
+    RemovalChallenge:
+      type: object
+      additionalProperties: false
+      required: [nonce, expires_in, server_id, project_id, viewer_id, cohort, owner_generation]
+      properties:
+        nonce: {type: string, minLength: 24, maxLength: 256}
+        expires_in: {type: integer, minimum: 1, maximum: 120}
+        server_id: {type: string, format: uuid}
+        project_id: {type: string, maxLength: 256}
+        viewer_id: {type: string, format: uuid}
+        cohort: {type: string, enum: [live, synthetic]}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+    RemovalRequest:
+      type: object
+      additionalProperties: false
+      required: [nonce, confirm, owner_generation]
+      properties:
+        nonce: {type: string, minLength: 24, maxLength: 256}
+        confirm: {type: boolean, const: true}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+    RemovalLookup:
+      type: object
+      additionalProperties: false
+      required: [nonce, original_owner_generation]
+      properties:
+        nonce: {type: string, minLength: 24, maxLength: 256}
+        original_owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+    RemovalState:
+      type: object
+      additionalProperties: false
+      required: [removal_id, state, owner_generation, revision, recovery_mode]
+      properties:
+        removal_id: {type: string, format: uuid}
+        state: {type: string, enum: [pending, needs_operator, completed]}
+        owner_generation: {$ref: '#/components/schemas/PositiveSafeInt'}
+        revision: {$ref: '#/components/schemas/UnsignedSafeInt'}
+        recovery_mode: {type: string, enum: [nonce_lookup_90d, state_only]}
+    PageRetry:
+      type: object
+      additionalProperties: false
+      required: [error, read_lease_id, retry_cursor]
+      properties:
+        error: {type: string, const: rate_limited}
+        read_lease_id: {type: string, format: uuid}
+        retry_cursor: {type: string, minLength: 1, maxLength: 1300, pattern: '^[A-Za-z0-9_.~-]+$'}
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: {type: string, maxLength: 64, enum: [invalid_request, unauthorized, restricted, stale_snapshot, snapshot_required, generation_conflict, consent_already_available, consent_capacity_reached, subject_erased, revision_exhausted, history_capacity_reached, unknown_operation, dedup_expired, unknown_removal, unknown_withdrawal, removal_pending, withdrawal_pending, unsupported_project, unavailable, rate_limited, too_large]}
+  responses:
+    Invalid: {description: "Strict malformed/overflow/noncanonical number; no private IDs", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unauthorized: {description: "Wrong/expired/revoked audience", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Restricted: {description: "Wrong owner/cohort/consent or unsupported project ID >256 chars; no echo", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Conflict: {description: "Generation/snapshot/consent state conflict; no private ID", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    TooLarge: {description: "Body >4096 UTF-8 bytes before parsing", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    RateLimited: {description: "Fair account/device rate on non-paged routes", headers: {Retry-After: {required: true, schema: {type: integer, minimum: 1, maximum: 60}}}, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    LeasedRateLimited: {description: "First request reserves durable lease BEFORE 429 and returns retry_cursor for SAME pinned lease. Later 429 returns same cursor; at most one 429 per keyset; no renewal of fixed 15-minute lease.", headers: {Retry-After: {required: true, schema: {type: integer, minimum: 1, maximum: 60}}}, content: {application/json: {schema: {$ref: '#/components/schemas/PageRetry'}}}}
+    Unavailable: {description: "Stale min_revision image, temporary reservation shortage, barrier, Redis, offline or pending erasure. Retry-After is a bounded hint, NOT authority; retry may fail closed again. Stale shared image expires in <=15 minutes, not indefinite 429.", headers: {Retry-After: {required: true, schema: {type: integer, minimum: 1, maximum: 60}}}, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unknown: {description: "Unknown owned ID only", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
