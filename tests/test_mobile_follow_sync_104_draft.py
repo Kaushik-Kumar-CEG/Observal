@@ -176,7 +176,9 @@ def test_bounded_owner_wide_lease_reuse_and_historical_ack_draft():
         == snap["body"]["read_lease_id"]
     )
     assert by["capacity_page_at_899_seconds_remains_valid"]["status"] == 200
+    assert by["capacity_page_at_899_seconds_remains_valid"]["lease_age_seconds"] == 899
     assert by["capacity_lease_at_900_seconds_never_promotes_partial"]["status"] == 409
+    assert by["capacity_lease_at_900_seconds_never_promotes_partial"]["lease_age_seconds"] == 900
     assert (
         by["third_device_after_two_distinct_change_slots_uses_snapshot_fallback"]["body"]["error"]
         == "snapshot_required"
@@ -228,6 +230,18 @@ def test_bounded_owner_wide_lease_reuse_and_historical_ack_draft():
     assert by["current_slot_202_lost_lookup_while_pending"]["body"]["state"] == "pending"
     assert by["state_only_removal_superseded_lost_202_lookup_unknown"]["status"] == 404
     assert by["withdrawal_receipts_full_still_revokes_and_erases"]["body"]["recovery_mode"] == "state_only"
+    withdrawal_unknown = by["state_only_withdrawal_superseded_lost_202_status_unknown"]
+    assert withdrawal_unknown["status"] == 404 and withdrawal_unknown["body"]["error"] == "unknown_withdrawal"
+    assert "Needs_review" in withdrawal_unknown["client_result"]
+    for path, method in (
+        ("/mobile-follow-sync/v1/removals/lookup", "post"),
+        ("/mobile-follow-sync/v1/removals/{removal_id}", "get"),
+        ("/mobile-follow-sync/v1/consent/withdrawals/{withdrawal_id}", "get"),
+    ):
+        description = SPEC["paths"][path][method]["description"]
+        assert "nonce_lookup_90d" in description and "state_only" in description
+        assert ("90 days" in description or "90-day" in description) and "404 UNKNOWN" in description
+        assert "ONE current slot" in description and "audited operator reconciliation" in description
     local = by["local_1001_follow_entries_never_trimmed"]
     assert (local["local_encrypted_count"], local["explicitly_selected_import_count"], local["local_only_count"]) == (
         1001,

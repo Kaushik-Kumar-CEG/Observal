@@ -5460,7 +5460,8 @@
         "error": "snapshot_required"
       },
       "client_result": "discard_partial_stage;new_full_snapshot;never_empty_or_committed",
-      "lease_age_seconds": 900
+      "lease_age_seconds": 900,
+      "fixture": "Exactly 900 seconds since original FIRST admission, regardless of intervening 429/restart; fixed lease expired, partial stage discarded."
     },
     {
       "name": "capacity_lease_subject_erasure_revokes_all_versions",
@@ -10277,7 +10278,9 @@
       },
       "page_number": 10,
       "elapsed_seconds": 899,
-      "client_result": "complete_within_fixed_900s_lease_may_commit_only_if_full_page_valid"
+      "client_result": "complete_within_fixed_900s_lease_may_commit_only_if_full_page_valid",
+      "lease_age_seconds": 899,
+      "fixture": "Exactly 899 seconds since FIRST admission, despite first-429/restart; the same fixed 900-second lease can still return a verified complete final page. Retries never extend admission time."
     },
     {
       "name": "phone_b_cursorless_after_phone_a_lost_first_429_reuses_exact_image",
@@ -10745,6 +10748,18 @@
       },
       "fixture": "1000 accepted re-consent IDs in last 90d following 1000 separately allowed protected withdrawals; 1001st NEW ID gets no grant/new binding/generation advance. Old accepted identical same-generation replay uses original binding, never allocates new slot.",
       "client_result": "local_only_until_90day_gc_or_audited_owner_capacity_repair;withdrawal_not_blocked"
+    },
+    {
+      "name": "state_only_withdrawal_superseded_lost_202_status_unknown",
+      "method": "GET",
+      "path": "/mobile-follow-sync/v1/consent/withdrawals/59595959-5959-4959-8959-595959595959",
+      "credential": "browserBearer_same_owner",
+      "status": 404,
+      "body": {
+        "error": "unknown_withdrawal"
+      },
+      "fixture": "After receipt budget full, state_only withdrawal 202 was lost; this action reached terminal then a later separately confirmed privacy action reused the one current slot. The old state-only ID is not retained for 90 days (indexed 1000 prior IDs still are).",
+      "client_result": "UNKNOWN_not_no_commit_or_completed;preserve_encrypted_local_nonce_and_receipt;Needs_review_audited_operator_reconciliation;never_implicit_replay_or_reconsent"
     }
   ]
 }

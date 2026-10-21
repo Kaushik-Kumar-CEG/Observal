@@ -109,6 +109,12 @@ paths:
     get:
       operationId: getAccountConsentWithdrawalStatus
       security: [{mobileRead: []}, {browserBearer: []}]
+      description: >-
+        Only nonce_lookup_90d mode keeps this ID/status for 90 days. state_only
+        uses ONE current slot; after a later terminal privacy action supersedes
+        it, this ID can be 404 UNKNOWN inside 90 days. Unknown is NOT no commit
+        or completed erasure: preserve local evidence, show Needs review and
+        seek audited operator reconciliation, never auto-replay/re-consent.
       parameters: [{$ref: '#/components/parameters/WithdrawalId'}]
       responses:
         '200': {description: "Redacted durable removal state", content: {application/json: {schema: {$ref: '#/components/schemas/WithdrawalState'}}}}
@@ -257,7 +263,14 @@ paths:
     post:
       operationId: locateRemovalByOriginalNonce
       security: [{mobileRead: []}]
-      description: Same owner/device only; 90-day minimal nonce digest/status without subject IDs, including after the submitting write JWT was revoked. Unknown does NOT prove no commit.
+      description: >-
+        Same owner/device only; 90-day minimal nonce digest/status applies ONLY
+        to durably indexed nonce_lookup_90d receipts, including after write JWT
+        revocation. state_only uses ONE current slot: after a later terminal
+        action supersedes it, lookup may return 404 UNKNOWN before 90 days.
+        Unknown does NOT prove no commit or completed erasure; retain local
+        nonce, show Needs review and seek audited operator reconciliation.
+        Never replay an old write grant or delete the only local evidence.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RemovalLookup'}}}}
       responses:
         '200': {description: "Existing removal state", content: {application/json: {schema: {$ref: '#/components/schemas/RemovalState'}}}}
@@ -272,6 +285,12 @@ paths:
     get:
       operationId: getRemoveAllStatus
       security: [{mobileRead: []}]
+      description: >-
+        Indexed nonce_lookup_90d ID/status retains 90-day recovery; state_only
+        ID/status exists only while its ONE current slot is not superseded.
+        A later terminal privacy action can make it 404 UNKNOWN before 90 days.
+        Unknown is NOT no commit or completed erasure: preserve local evidence,
+        show Needs review and require audited operator reconciliation.
       parameters: [{$ref: '#/components/parameters/RemovalId'}]
       responses:
         '200': {description: "Fenced pending/needs_operator/completed state", content: {application/json: {schema: {$ref: '#/components/schemas/RemovalState'}}}}
