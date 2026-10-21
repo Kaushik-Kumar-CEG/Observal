@@ -1,7 +1,9 @@
 <!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Operator-only read-only Flare candidate receipt — NOT Android READY
+# ARCHIVED pre-071 operator-only Flare receipt — NOT current deployment instructions
+
+**STOP: this historical file embeds superseded 068 and `ba7101` deployment examples and a public 062 inventory. Do not execute its commands or substitute a public hostname for an instance receipt.** For the current runtime `c8c63a3e4179dbc3c8ee897858795e0cbe7f0bf4` and new isolated candidate, use `NEW_ISOLATED_FLARE_QUALIFICATION_CHECKLIST.md`, `ACCOUNTABLE_WHOLE_BRANCH_REVIEW_REQUEST.md` and `PRODUCTION_MOBILE_HANDOFF.md`. No instance bound receipt, access, deployment or Android READY has occurred.
 
 **Current lifecycle override for every deployment instruction below:** `PRE_FLARE_SESSION_LIFECYCLE_RECEIPT.md` records tested pre-069 source `3df29663a902779a812d6171e53e5a780a23693f`, but new privacy findings produced locally tested 069 successor `ba7101abd601a5447c31e14683cfeedfcfa7278f`. This source is **not human reviewed, deployed or READY**; a separately approved **NEW isolated** candidate is required after instance-specific authorization. Older 068 `2e91bef22a60200520d4f8436c0af7b59342f441`, 067 and old 062 are **not** lifecycle deployment pins. `069_mobile_publication_clock` changes history qualification and requires PostgreSQL `track_commit_timestamp=on` before positive event-time approval evidence; disabled or unavailable commit history is Not recorded. Only after whole-branch human review, this candidate-only read-only inventory and a separate new-instance owner authorization may an immutable digest be proposed. No cohort or Android READY is authorized by this document.
 
