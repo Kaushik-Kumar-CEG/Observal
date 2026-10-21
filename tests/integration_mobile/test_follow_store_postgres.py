@@ -169,7 +169,7 @@ async def test_two_owners_devices_race_dedup_and_privacy(scratch):
         assert (await operation_status(db, a, loser[0]))["effective"] is False
         with pytest.raises(StoreFenceError, match="snapshot_required"):
             await lease_page(db, a, image, kind="image")
-        with pytest.raises(StoreFenceError, match="generation_conflict"):
+        with pytest.raises(StoreFenceError, match="generation_conflict") as conflict:
             await admit_operation(
                 db,
                 a,
@@ -180,10 +180,83 @@ async def test_two_owners_devices_race_dedup_and_privacy(scratch):
                 action="follow",
                 body_digest=bytes(32),
             )
+        assert conflict.value.owner_generation == 2
         assert (await locked_partition(db, b))["subject_count"] == 1
     async with sessions.begin() as db:
         await db.execute(text("DELETE FROM users WHERE id=:subject"), {"subject": subject})
         assert (await locked_partition(db, b))["erasure_floor"] == 1
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_subject_delete_races_admission_without_deadlock_or_resurrection(scratch):
+    sessions = scratch
+    server, owner, subject = (uuid.uuid4() for _ in range(3))
+    key = Partition(server, "delete-race", owner, "real")
+    await _users(sessions, owner, subject)
+    await _ready(sessions, key)
+
+    # Deletion already owns the subject row and awaits the owner lock. An
+    # admission must wait for subject erasure, NOT hold owner while waiting.
+    async with sessions.begin() as blocker:
+        await locked_partition(blocker, key)
+        delete_started = asyncio.Event()
+
+        async def erase():
+            async with sessions.begin() as db:
+                await db.execute(text("SELECT id FROM users WHERE id=:id FOR UPDATE"), {"id": subject})
+                delete_started.set()
+                await db.execute(text("DELETE FROM users WHERE id=:id"), {"id": subject})
+
+        delete_task = asyncio.create_task(erase())
+        await asyncio.wait_for(delete_started.wait(), 5)
+        edit_task = asyncio.create_task(_edit(sessions, key, subject, 0, "follow"))
+        await asyncio.sleep(0.1)
+    await asyncio.wait_for(delete_task, 10)
+    with pytest.raises(StoreFenceError, match="subject_unavailable"):
+        await asyncio.wait_for(edit_task, 10)
+    async with sessions.begin() as db:
+        assert (await locked_partition(db, key))["subject_count"] == 0
+        assert (
+            await db.scalar(text("SELECT count(*) FROM mobile_follow_subjects WHERE subject_id=:id"), {"id": subject})
+            == 0
+        )
+
+    # Opposite order: once KEY SHARE is held the DELETE trigger can only
+    # redact a committed edit; it cannot let a deleted subject reappear.
+    later = uuid.uuid4()
+    await _users(sessions, later)
+    async with sessions.begin() as db:
+        await db.execute(text("SELECT id FROM users WHERE id=:id FOR KEY SHARE"), {"id": later})
+
+        async def erase_later():
+            async with sessions.begin() as other:
+                await other.execute(text("DELETE FROM users WHERE id=:id"), {"id": later})
+
+        delete_task = asyncio.create_task(erase_later())
+        await asyncio.sleep(0.1)
+        status, _ = await admit_operation(
+            db,
+            key,
+            operation_id=uuid.uuid4(),
+            subject_id=later,
+            owner_generation=1,
+            base_person_revision=0,
+            action="follow",
+            body_digest=bytes(32),
+        )
+        assert status == 200
+    await asyncio.wait_for(delete_task, 10)
+    async with sessions.begin() as db:
+        row = await locked_partition(db, key)
+        assert row["subject_count"] == 0 and row["erasure_floor"] == 1
+        assert (
+            await db.scalar(text("SELECT count(*) FROM mobile_follow_subjects WHERE subject_id=:id"), {"id": later})
+            == 0
+        )
+        assert (
+            await db.scalar(text("SELECT count(*) FROM mobile_follow_operations WHERE subject_id=:id"), {"id": later})
+            == 0
+        )
 
 
 @pytest.mark.asyncio(loop_scope="module")

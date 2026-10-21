@@ -35,8 +35,9 @@ class Partition:
 class StoreFenceError(Exception):
     """Typed internal refusal; never expose exception text directly to clients."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, *, owner_generation: int | None = None):
         self.reason = reason
+        self.owner_generation = owner_generation
         super().__init__(reason)
 
 
@@ -103,10 +104,17 @@ async def admit_operation(
     """
     if action not in ("follow", "unfollow") or len(body_digest) != 32 or not 0 <= base_person_revision <= SAFE:
         raise StoreFenceError("invalid_request")
+    # The users DELETE trigger holds the subject row before locking affected
+    # partitions. Take the subject KEY SHARE lock first, or owner -> subject
+    # against DELETE's subject -> owner order can deadlock. Callers that already
+    # locked the owner must release and re-prove authority after this lock.
+    provider = await db.scalar(
+        text("SELECT auth_provider FROM users WHERE id=:subject FOR KEY SHARE"), {"subject": subject_id}
+    )
     row = await locked_partition(db, key)
     p = key.params()
     if owner_generation != row["owner_generation"]:
-        raise StoreFenceError("generation_conflict")
+        raise StoreFenceError("generation_conflict", owner_generation=row["owner_generation"])
     if row["consent_state"] != "available" or row["removal_state"] != "none":
         raise StoreFenceError("restricted")
     now = await _clock(db)
@@ -129,11 +137,8 @@ async def admit_operation(
         if old["body_digest"] != body_digest or old["subject_id"] != subject_id:
             raise StoreFenceError("operation_id_reused")
         return old["original_http_status"], old["outcome"]
-    # KEY SHARE blocks concurrent subject deletion until this transaction commits;
-    # the BEFORE DELETE trigger then redacts our committed result and invalidates leases.
-    provider = await db.scalar(
-        text("SELECT auth_provider FROM users WHERE id=:subject FOR KEY SHARE"), {"subject": subject_id}
-    )
+    # KEY SHARE blocks deletion through commit; the DELETE trigger subsequently
+    # redacts the committed result and invalidates leases.
     if provider is None:
         raise StoreFenceError("subject_unavailable")
     subject = (

@@ -37,6 +37,17 @@ MAX_TOKEN_SECONDS = 300
 CHALLENGE_SECONDS = 600
 PROJECT = str(DEFAULT_PROJECT_ID)
 ROOT = "/api/v1/mobile-follow-sync/v1/"
+
+
+def wire_cohort(cohort: str) -> str:
+    """Keep distinct synthetic storage partitions; expose only agreed public cohort enum."""
+    if cohort in ("synthetic-author", "synthetic-user"):
+        return "synthetic"
+    if cohort == "live":
+        return "live"
+    _deny(403, "Follow cohort unavailable")
+
+
 READ_PATHS = frozenset(
     {
         ("GET", "availability"),
@@ -141,8 +152,22 @@ async def _account(payload: dict, db: AsyncSession, *, device_id: str | None) ->
 
 
 async def _partition(
-    db: AsyncSession, user: User, server: uuid.UUID, cohort: str, *, exclusive: bool = False
+    db: AsyncSession, user: User, server: uuid.UUID, cohort: str, *, exclusive: bool = False, create: bool = False
 ) -> MobileFollowPartition:
+    if create:
+        # The cohort barrier has already been checked. Serialize first admission
+        # against concurrent owner admission/deletion before inserting the default-
+        # closed consent_required partition; never create from a write credential.
+        owner = await db.scalar(select(User.id).where(User.id == user.id).with_for_update())
+        if owner is None:
+            _deny()
+        await db.execute(
+            text(
+                "INSERT INTO mobile_follow_partitions (server_id, project_id, owner_id, cohort) "
+                "VALUES (:server, :project, :owner, :cohort) ON CONFLICT DO NOTHING"
+            ),
+            {"server": server, "project": PROJECT, "owner": user.id, "cohort": cohort},
+        )
     row = await db.scalar(
         select(MobileFollowPartition)
         .where(
@@ -249,6 +274,16 @@ async def authorize_browser_approval(
         payload = decode_access_token(_bearer(authorization))
     except jwt.InvalidTokenError:
         _deny()
+    # A long-lived desktop token or one silently refreshed from storage is not
+    # proof of a fresh browser verification session. Force interactive sign-in
+    # again rather than accepting an old bearer merely because it is valid.
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    try:
+        issued_us = token_issued_us(payload)
+    except (TypeError, ValueError, OverflowError):
+        _deny()
+    if not isinstance(issued_us, int) or not 0 <= now_us - issued_us <= 300_000_000:
+        _deny(403, "Recent browser verification required")
     user = await _account(payload, db, device_id=None)
     server = await _identity(db)
     cohort = await _cohort(db, user, server)

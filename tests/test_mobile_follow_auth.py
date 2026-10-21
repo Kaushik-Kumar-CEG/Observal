@@ -238,6 +238,54 @@ async def no_cohort():
 
 
 @pytest.mark.asyncio
+async def test_fresh_read_state_requires_barrier_and_owner_lock(env, monkeypatch):
+    db, _ = env
+    db.partition = None
+    events = []
+    original_scalar = db.scalar
+
+    async def scalar(stmt):
+        sql = str(stmt)
+        if "FROM users" in sql and "FOR UPDATE" in sql:
+            events.append("owner_lock")
+            return OWNER
+        return await original_scalar(stmt)
+
+    async def execute(stmt, params):
+        assert "ON CONFLICT DO NOTHING" in str(stmt)
+        assert events == ["cohort", "owner_lock"]
+        assert params["owner"] == OWNER and params["cohort"] == "live"
+        events.append("insert")
+        db.partition = SimpleNamespace(owner_generation=1, consent_state="consent_required", removal_state="none")
+
+    async def active(*args, **kwargs):
+        events.append("cohort")
+        return "live"
+
+    db.scalar = scalar
+    db.execute = execute
+    monkeypatch.setattr(F, "active_mobile_cohort", active)
+    # A normal read must not create missing consent or widen write authority.
+    with pytest.raises(HTTPException) as denied:
+        await F.authorize_follow_read(request("GET", "snapshot"), "Bearer " + read_claims(), db)
+    assert denied.value.status_code == 403 and events == ["cohort"]
+    events.clear()
+    await F._cohort(db, db.user, SERVER)
+    row = await F._partition(db, db.user, SERVER, "live", exclusive=True, create=True)
+    assert row.consent_state == "consent_required" and events == ["cohort", "owner_lock", "insert"]
+    events.clear()
+    db.partition = None
+
+    async def closed(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(F, "active_mobile_cohort", closed)
+    with pytest.raises(HTTPException):
+        await F.authorize_follow_read(request("GET", "availability"), "Bearer " + read_claims(), db)
+    assert events == []
+
+
+@pytest.mark.asyncio
 async def test_browser_same_owner_challenge_approval_and_one_use_grant(env):
     db, _ = env
     read = await F.authorize_follow_read(request("POST", "write-authorization"), "Bearer " + read_claims(), db)
@@ -252,6 +300,12 @@ async def test_browser_same_owner_challenge_approval_and_one_use_grant(env):
         }
     )
     browser = await F.authorize_browser_approval(request("POST", "write-approval"), "Bearer " + browser_token, db)
+    old_claims = verified(browser_token)
+    old_claims["iat"] -= 301
+    old_claims["iat_us"] -= 301_000_000
+    with pytest.raises(HTTPException) as old_error:
+        await F.authorize_browser_approval(request("POST", "write-approval"), "Bearer " + signed(old_claims), db)
+    assert old_error.value.status_code == 403
     admin_other = signed({**verified(browser_token), "sub": str(uuid.uuid4()), "role": "super_admin"})
     with pytest.raises(HTTPException):
         await F.authorize_browser_approval(request("POST", "write-approval"), "Bearer " + admin_other, db)
