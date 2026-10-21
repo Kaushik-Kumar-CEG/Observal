@@ -342,6 +342,10 @@ async def test_seventeen_routes_two_real_http_processes(scratch):
             assert (await expect(await second.get(ROOT + "/operations/" + op, headers=bearer(phone_a)), 200))[
                 "effective"
             ]
+            old_image = await expect(
+                await first.get(ROOT + "/snapshot", headers=bearer(phone_a), params={"min_revision": 1}), 429
+            )
+            old_lease = old_image["read_lease_id"]  # Fixed revision 1 still held by phone A.
             # A separately approved device races on the same subject across processes.
             challenge_b = await expect(await second.post(ROOT + "/write-authorization", headers=bearer(phone_b)), 200)
             await expect(
@@ -384,11 +388,26 @@ async def test_seventeen_routes_two_real_http_processes(scratch):
                 ROOT + "/operations", headers=bearer(grant_b), json={**competing[1], "action": "follow"}
             )
             assert (await expect(reused, 409))["error"] == "operation_id_reused"
+            fresh_image = await expect(
+                await second.get(ROOT + "/snapshot", headers=bearer(phone_b), params={"min_revision": 2}), 429
+            )
+            assert fresh_image["read_lease_id"] != old_lease
+            fresh_page = await expect(
+                await first.get(
+                    ROOT + "/snapshot",
+                    headers=bearer(phone_b),
+                    params={"min_revision": 2, "cursor": fresh_image["retry_cursor"]},
+                ),
+                200,
+            )
+            assert fresh_page["revision"] == 2 and fresh_page["complete"]
             for route, key in (("snapshot", "items"), ("export", "items"), ("changes", "changes")):
                 params = {"after_revision": 0, "owner_generation": 2} if route == "changes" else {}
                 initial = await second.get(ROOT + "/" + route, headers=bearer(phone_b), params=params)
-                if route == "export":  # snapshot and export share the same throttled image lease
+                if route in ("snapshot", "export"):  # Existing image leases already consumed first-page 429.
                     page = await expect(initial, 200)
+                    if route == "snapshot":
+                        old_cursor = fresh_image["retry_cursor"]  # phone B's cursor, invalidated by later erasure.
                 else:
                     retry = await expect(initial, 429)
                     assert retry["error"] == "rate_limited" and retry["retry_cursor"]

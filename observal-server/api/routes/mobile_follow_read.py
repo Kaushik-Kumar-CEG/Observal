@@ -218,9 +218,7 @@ async def _page(request: Request, authorization: str | None, db: AsyncSession, p
             if not _available(row):
                 return error("restricted", 403)
             position = 0
-            if purpose != "changes" and (
-                row.current_revision < minimum or await _stale_image(db, key_for(p), minimum, row.owner_generation)
-            ):
+            if purpose != "changes" and row.current_revision < minimum:
                 return error("unavailable", 503, retry=True)
             lease_id = await admit_lease(
                 db,
@@ -318,22 +316,6 @@ async def _page(request: Request, authorization: str | None, db: AsyncSession, p
         ]
     await db.commit()
     return result
-
-
-async def _stale_image(db: AsyncSession, key: Partition, minimum: int, generation: int) -> bool:
-    if not minimum:
-        return False
-    # Do not take another image slot when an existing shared image is too old.
-    return bool(
-        await db.scalar(
-            text(
-                f"SELECT EXISTS (SELECT 1 FROM mobile_follow_leases WHERE {STORE_KEY} "
-                "AND kind='image' AND owner_generation=:generation AND pinned_revision<:minimum "
-                "AND expires_at>clock_timestamp())"
-            ),
-            {**key.params(), "generation": generation, "minimum": minimum},
-        )
-    )
 
 
 async def _lease_expiry(db: AsyncSession, key: Partition, lease_id: uuid.UUID):

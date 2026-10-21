@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import jsonschema
 import pytest
@@ -374,14 +375,32 @@ def test_incomplete_page_exactly_one_hundred(monkeypatch, setup):
     assert len(result["items"]) == 100 and result["next_cursor"] == "signed.page"
 
 
-def test_stale_shared_image_precondition(monkeypatch, setup):
-    async def stale(*args):
-        return True
-
-    monkeypatch.setattr(read, "_stale_image", stale)
-    result = asyncio.run(read._page(request("snapshot", "min_revision=100"), "bearer", None, "snapshot"))
+def test_uncommitted_minimum_revision_is_unavailable(setup):
+    result = asyncio.run(read._page(request("snapshot", "min_revision=101"), "bearer", None, "snapshot"))
     assert result.status_code == 503 and result.headers["retry-after"] == "1"
     validate("Error", json.loads(result.body))
+
+
+def test_older_shared_image_does_not_block_new_minimum_with_free_slot(monkeypatch, setup):
+    _principal, row = setup
+    row.current_revision = 101
+    seen = []
+
+    async def admit(*args, **kwargs):
+        seen.append(kwargs["min_revision"])
+        return LEASE
+
+    async def page(*args, **kwargs):
+        return dict(owner_generation=1, revision=101, erasure_floor=0, complete=True, last_row=0, items=[])
+
+    monkeypatch.setattr(read, "admit_lease", admit)
+    monkeypatch.setattr(read, "lease_page", page)
+    result = asyncio.run(
+        read._page(request("snapshot", "min_revision=101"), "bearer", SimpleNamespace(commit=AsyncMock()), "snapshot")
+    )
+    assert seen == [101]
+    assert result["revision"] == 101 and result["complete"] is True
+    validate("SnapshotPage", result)
 
 
 def test_stale_signed_cursor_route_is_conflict(monkeypatch, setup):
