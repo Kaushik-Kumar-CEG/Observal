@@ -45,6 +45,7 @@ import { Route as AuthedAdminReviewPolicyRouteImport } from './routes/_authed/_a
 import { Route as AuthedAdminDiagnosticsRouteImport } from './routes/_authed/_admin/diagnostics'
 import { Route as AuthedAdminDashboardRouteImport } from './routes/_authed/_admin/dashboard'
 import { Route as AuthedAdminAuditLogRouteImport } from './routes/_authed/_admin/audit-log'
+import { Route as authFollowConsentRouteImport } from './routes/(auth)/follow/consent'
 import { Route as authFollowApproveRouteImport } from './routes/(auth)/follow/approve'
 import { Route as AuthedUserTracesIndexRouteImport } from './routes/_authed/_user/traces/index'
 import { Route as AuthedAgentsNamespaceSlugRouteImport } from './routes/_authed/agents/$namespace.$slug'
@@ -217,6 +218,11 @@ const AuthedAdminAuditLogRoute = AuthedAdminAuditLogRouteImport.update({
   path: '/audit-log',
   getParentRoute: () => AuthedAdminRoute,
 } as any)
+const authFollowConsentRoute = authFollowConsentRouteImport.update({
+  id: '/(auth)/follow/consent',
+  path: '/follow/consent',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const authFollowApproveRoute = authFollowApproveRouteImport.update({
   id: '/(auth)/follow/approve',
   path: '/follow/approve',
@@ -267,6 +273,7 @@ export interface FileRoutesByFullPath {
   '/review': typeof AuthedReviewRoute
   '/teamspaces': typeof AuthedTeamspacesRouteWithChildren
   '/follow/approve': typeof authFollowApproveRoute
+  '/follow/consent': typeof authFollowConsentRoute
   '/audit-log': typeof AuthedAdminAuditLogRoute
   '/dashboard': typeof AuthedAdminDashboardRoute
   '/diagnostics': typeof AuthedAdminDiagnosticsRoute
@@ -306,6 +313,7 @@ export interface FileRoutesByTo {
   '/review': typeof AuthedReviewRoute
   '/teamspaces': typeof AuthedTeamspacesRouteWithChildren
   '/follow/approve': typeof authFollowApproveRoute
+  '/follow/consent': typeof authFollowConsentRoute
   '/audit-log': typeof AuthedAdminAuditLogRoute
   '/dashboard': typeof AuthedAdminDashboardRoute
   '/diagnostics': typeof AuthedAdminDiagnosticsRoute
@@ -349,6 +357,7 @@ export interface FileRoutesById {
   '/_authed/teamspaces': typeof AuthedTeamspacesRouteWithChildren
   '/_authed/': typeof AuthedIndexRoute
   '/(auth)/follow/approve': typeof authFollowApproveRoute
+  '/(auth)/follow/consent': typeof authFollowConsentRoute
   '/_authed/_admin/audit-log': typeof AuthedAdminAuditLogRoute
   '/_authed/_admin/dashboard': typeof AuthedAdminDashboardRoute
   '/_authed/_admin/diagnostics': typeof AuthedAdminDiagnosticsRoute
@@ -390,6 +399,7 @@ export interface FileRouteTypes {
     | '/review'
     | '/teamspaces'
     | '/follow/approve'
+    | '/follow/consent'
     | '/audit-log'
     | '/dashboard'
     | '/diagnostics'
@@ -429,6 +439,7 @@ export interface FileRouteTypes {
     | '/review'
     | '/teamspaces'
     | '/follow/approve'
+    | '/follow/consent'
     | '/audit-log'
     | '/dashboard'
     | '/diagnostics'
@@ -471,6 +482,7 @@ export interface FileRouteTypes {
     | '/_authed/teamspaces'
     | '/_authed/'
     | '/(auth)/follow/approve'
+    | '/(auth)/follow/consent'
     | '/_authed/_admin/audit-log'
     | '/_authed/_admin/dashboard'
     | '/_authed/_admin/diagnostics'
@@ -507,6 +519,7 @@ export interface RootRouteChildren {
   authLoginRoute: typeof authLoginRoute
   authRegisterRoute: typeof authRegisterRoute
   authFollowApproveRoute: typeof authFollowApproveRoute
+  authFollowConsentRoute: typeof authFollowConsentRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -742,6 +755,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedAdminAuditLogRouteImport
       parentRoute: typeof AuthedAdminRoute
     }
+    '/(auth)/follow/consent': {
+      id: '/(auth)/follow/consent'
+      path: '/follow/consent'
+      fullPath: '/follow/consent'
+      preLoaderRoute: typeof authFollowConsentRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/(auth)/follow/approve': {
       id: '/(auth)/follow/approve'
       path: '/follow/approve'
@@ -919,6 +939,7 @@ const rootRouteChildren: RootRouteChildren = {
   authLoginRoute: authLoginRoute,
   authRegisterRoute: authRegisterRoute,
   authFollowApproveRoute: authFollowApproveRoute,
+  authFollowConsentRoute: authFollowConsentRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

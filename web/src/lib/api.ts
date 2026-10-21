@@ -117,6 +117,9 @@ import type {
 	InboxState,
 	FollowWriteApprovalRequest,
 	FollowWriteApprovalResponse,
+	FollowConsentState,
+	FollowConsentRequest,
+	FollowConsentResponse,
 } from "./types";
 import { sessionExpiredLoginUrl } from "./safe-next";
 
@@ -458,6 +461,9 @@ export const auth = {
 export const mobileFollow = {
 	approveWrite: (body: FollowWriteApprovalRequest) =>
 		post<FollowWriteApprovalResponse>("/mobile-follow-sync/v1/write-approval", body),
+	consentState: () => get<FollowConsentState>("/mobile-follow-sync/v1/consent/state"),
+	acceptConsent: (body: FollowConsentRequest) =>
+		post<FollowConsentResponse>("/mobile-follow-sync/v1/consent", body),
 };
 
 // ── Registry (all 8 types) ─────────────────────────────────────────
