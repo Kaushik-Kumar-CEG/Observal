@@ -55,6 +55,28 @@ def test_explicit_install_registers_exactly_seventeen_as_one_gated_set(monkeypat
     assert all(
         any(dependency.dependency is gate.require_operator_approval for dependency in r.dependencies) for r in routes
     )
+    browser_routes = [
+        r for r in routes if r.path.rsplit("/", 1)[-1] in {"write-authorization", "write-approval", "write-grant"}
+    ]
+    assert len(browser_routes) == 3
+    assert all(
+        any(d.dependency is gate.require_user_verifying_approval for d in r.dependencies) for r in browser_routes
+    )
+    assert all(
+        not any(d.dependency is gate.require_user_verifying_approval for d in r.dependencies)
+        for r in routes
+        if r not in browser_routes
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_approval_remains_closed_without_human_verification_even_after_operator_acceptance():
+    db = Database({gate.ACK_KEY: gate.ACK_VALUE, gate.ENABLE_KEY: "true", gate.WORKER_KEY: "running"})
+    await gate.require_operator_approval(db)
+    with pytest.raises(HTTPException) as denied:
+        await gate.require_user_verifying_approval()
+    assert denied.value.status_code == 403
+    assert db.queries == 1
 
 
 @pytest.mark.asyncio

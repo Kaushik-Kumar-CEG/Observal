@@ -29,6 +29,17 @@ def routes_installed() -> bool:
     return os.environ.get(ROUTE_INSTALL_ENV) == "1"
 
 
+async def require_user_verifying_approval() -> None:
+    """Do not issue phone write challenges until a reviewed step-up exists.
+
+    A password-recency claim and an Origin header do not attest a human
+    browser click; SSO-only accounts have no fresh IdP step-up. The operator
+    switch cannot waive this independent security requirement. The disposable
+    loopback synthetic QA app intentionally does not mount this dependency.
+    """
+    raise HTTPException(403, "user-verifying follow approval unavailable")
+
+
 async def require_operator_approval(db: AsyncSession = Depends(get_db)) -> None:
     try:
         entries = dict(
