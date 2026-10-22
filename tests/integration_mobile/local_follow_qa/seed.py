@@ -30,9 +30,9 @@ async def schema():
 async def fixture():
     password = os.environ["QA_PASSWORD"]
     issuer_port = int(os.environ.get("MOBILE_FOLLOW_QA_PORT", "18443"))
-    assert issuer_port in (18443, 18444, 18446, 18448), "disposable QA issuer only"
+    assert issuer_port in (18443, 18444, 18446, 18448, 18449), "disposable QA issuer only"
     window = int(os.environ.get("MOBILE_FOLLOW_QA_WINDOW_MINUTES", "60"))
-    assert 1 <= window <= (240 if issuer_port == 18448 else 120), "synthetic QA window must remain bounded"
+    assert 1 <= window <= (240 if issuer_port in (18448, 18449) else 120), "synthetic QA window must remain bounded"
     owner = User(
         id=uuid.uuid4(),
         email="owner@follow-qa.invalid",

@@ -22,6 +22,7 @@ async def main():
         or (re.fullmatch(r"\.runtime-scratch-[0-9a-f]{6,12}", state_name) and issuer_port == 18444)
         or (re.fullmatch(r"\.runtime-android-[0-9a-f]{6,12}", state_name) and issuer_port == 18446)
         or (re.fullmatch(r"\.runtime-android-next-[0-9a-f]{6,12}", state_name) and issuer_port == 18448)
+        or (re.fullmatch(r"\.runtime-android-diagnostic-[0-9a-f]{6,12}", state_name) and issuer_port == 18449)
     ), "refusing unrelated QA state or port"
     state = qa / state_name
     assert (state / "issuer-port").read_text().strip() == str(issuer_port)
