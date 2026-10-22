@@ -28,6 +28,31 @@ For every row below the responsible named human owner must record one explicit o
 | F12 | `observal-server/tests/test_component_versions_api.py::test_factory_creates_router[sandbox-models.sandbox.SandboxListing-models.sandbox.SandboxVersion]` | Review/version owner: same; verify separate route | **PENDING** |
 | F13 | `observal_cli/tests/test_cmd_component_submit_flags.py::test_every_cli_help_screen_has_copyable_examples` | CLI owner: `registry mcp sync` has 4 examples vs convention ≤3; keep skills/help syntax aligned | **PENDING** |
 
+## Case-by-case engineering disposition at `020d177d`, 2026-10-22 03:20 UTC
+
+The **entire** separately invoked server+CLI suite concluded **13 failed, 482 passed, 5 errors, 1 warning in 465.72 s** (`/tmp/mobile-follow-excluded-020d-full.log`, exit 1). The E/F IDs above exactly match that complete run. This table is an engineering **BLOCK**, not a human-approved exception or a claim that a stale test is harmless. The human-decision column above remains PENDING until each owner proves the live route behavior or supplies a reviewed exception.
+
+| Case | Current engineering disposition (each is BLOCKED, no waiver) | Required evidence to clear |
+| --- | --- | --- |
+| E1 | BLOCK: removed `inbox` fixture prevents happy-path version creation assertion | Current review/version creation and notification on real disposable DB |
+| E2 | BLOCK: same setup error hides co-author authorization | Allowed co-author and denied non-co-author current routes |
+| E3 | BLOCK: same setup error hides multiple-pending state | Current pending-version warning and durable state |
+| E4 | BLOCK: same setup error hides review approval/latest pointer | Reviewer-only approval, latest pointer, audit and rollback on DB |
+| E5 | BLOCK: same setup error hides reject reason | Reviewer-only rejection and stored reason, author visibility |
+| F1 | BLOCK: test calls removed `_review_agent_version` | Current `/reviews` non-pending 422 and no mutation |
+| F2 | BLOCK: same removed helper | Current `/reviews` nonexistent-version 404, count-free response |
+| F3 | BLOCK: mocked publish notification expects unavailable reload | Disposable DB publish with notification subject/version reload and authorization |
+| F4 | BLOCK: test calls removed component `_review_version` | Current `/reviews` component approval, latest pointer and reviewer authorization |
+| F5 | BLOCK: same removed helper | Current component rejection, reason persistence and visibility |
+| F6 | BLOCK: same removed helper | Current component non-pending 422 without transition |
+| F7 | BLOCK: same removed helper | Current component missing version 404 without data leak |
+| F8 | BLOCK: legacy MCP factory expects fifth route formerly moved | MCP review route separation and request permission |
+| F9 | BLOCK: legacy Skill factory expects fifth route formerly moved | Skill review route separation and request permission |
+| F10 | BLOCK: legacy Hook factory expects fifth route formerly moved | Hook review route separation and request permission |
+| F11 | BLOCK: legacy Prompt factory expects fifth route formerly moved | Prompt review route separation and request permission |
+| F12 | BLOCK: legacy Sandbox factory expects fifth route formerly moved | Sandbox review route separation and request permission |
+| F13 | BLOCK: CLI help exceeds three examples at `registry mcp sync`; fixing that reveals ~30 review/mobile-admin help cases missing examples | Accurate copyable examples on whole CLI tree **and** corresponding skills syntax; rerun unchanged test |
+
 **Route/version review remains mandatory even if tests are fixed:** the five setup errors never executed their assertions; converting obsolete imports without checking owner scope, review decisions and latest-version state is insufficient. Do not skip, mark xfail or lower assertion counts merely to suppress red. Backend security reviewer must separately accept any time-bounded exception; this manifest author cannot self-disposition.
 
 **Named decision requested:** review/version owner, CLI owner and accountable whole-branch reviewer identities; exact SHA and UTC; outcomes per E1–E5/F1–F13; supporting passing logs or blocking issue links; explicit whether these results block a PR/Flare request. **No response = BLOCKED**, and neither this manifest nor an agent can grant the waiver.
