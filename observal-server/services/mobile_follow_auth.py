@@ -25,6 +25,7 @@ from api.deps import get_db
 from models.mobile_follow_sync import MobileFollowApproval, MobileFollowPartition
 from models.user import User
 from observal_shared.migration.constants import DEFAULT_PROJECT_ID
+from services import dynamic_settings
 from services.crypto import sign_token, verify_token
 from services.jwt_service import MOBILE_AUDIENCE, MOBILE_CLIENT_ID, MOBILE_SCOPE, decode_access_token
 from services.mobile_read_control import active_mobile_cohort
@@ -268,8 +269,13 @@ async def authorize_follow_write(
 async def authorize_browser_approval(
     request: Request, authorization: str | None = Header(None), db: AsyncSession = Depends(get_db)
 ) -> FollowPrincipal:
-    """Only a same-issuer ordinary account bearer, never a phone or write JWT."""
+    """Only an explicitly verified desktop account; SSO needs a separate reviewed step-up."""
     _route(request, frozenset({("POST", "write-approval")}))
+    # Direct password proof is not an IdP authentication event. In SSO-only
+    # deployments no refresh, legacy password JWT or merely forgeable Origin
+    # header may stand in for reviewed IdP auth_time / step-up evidence.
+    if await dynamic_settings.get_bool("deployment.sso_only"):
+        _deny(403, "SSO step-up approval unavailable")
     try:
         payload = decode_access_token(_bearer(authorization))
     except jwt.InvalidTokenError:

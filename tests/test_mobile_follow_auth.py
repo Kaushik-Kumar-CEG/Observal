@@ -115,6 +115,12 @@ class DB:
 def env(monkeypatch):
     db, redis = DB(), Redis()
     monkeypatch.setattr(F, "get_redis", lambda: redis)
+
+    async def password_tenant(key):
+        assert key == "deployment.sso_only"
+        return False
+
+    monkeypatch.setattr(F.dynamic_settings, "get_bool", password_tenant)
     monkeypatch.setattr(F, "verify_token", verified)
     monkeypatch.setattr(F, "sign_token", signed)
     original_decode = F.decode_access_token
@@ -294,6 +300,27 @@ def test_password_login_proof_is_desktop_only_and_not_on_refresh_style_token(env
     assert "browser_verified_at_us" not in verified(silent_refresh)
     with pytest.raises(ValueError, match="Only directly authenticated desktop"):
         create_access_token(OWNER, UserRole.user, client_id=MOBILE_CLIENT_ID, device_id=DEVICE, browser_verified=True)
+
+
+@pytest.mark.asyncio
+async def test_sso_only_denies_password_verified_desktop_bearer_until_reviewed_idp_step_up(env, monkeypatch):
+    db, _ = env
+    browser_claims = {
+        key: value
+        for key, value in claims("access").items()
+        if key
+        not in ("aud", "scope", "device_id", "client_id", "owner_generation", "server_id", "project_id", "cohort")
+    }
+    browser_claims["browser_verified_at_us"] = browser_claims["iat_us"]
+
+    async def sso_tenant(key):
+        assert key == "deployment.sso_only"
+        return True
+
+    monkeypatch.setattr(F.dynamic_settings, "get_bool", sso_tenant)
+    with pytest.raises(HTTPException) as denied:
+        await F.authorize_browser_approval(request("POST", "write-approval"), "Bearer " + signed(browser_claims), db)
+    assert denied.value.status_code == 403
 
 
 @pytest.mark.asyncio
