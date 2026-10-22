@@ -28,6 +28,10 @@ For every row below the responsible named human owner must record one explicit o
 | F12 | `observal-server/tests/test_component_versions_api.py::test_factory_creates_router[sandbox-models.sandbox.SandboxListing-models.sandbox.SandboxVersion]` | Review/version owner: same; verify separate route | **PENDING** |
 | F13 | `observal_cli/tests/test_cmd_component_submit_flags.py::test_every_cli_help_screen_has_copyable_examples` | CLI owner: `registry mcp sync` has 4 examples vs convention ≤3; keep skills/help syntax aligned | **PENDING** |
 
+## Current rerun — 2026-10-22 10:29 UTC
+
+The complete separately excluded server and CLI suites were rerun against current source `27fa9567` with **13 failed, 482 passed, 5 errors, 4 warnings**, exit 1 (`/tmp/mobile-follow-27fa-excluded-suite.log`). All **same 18 E/F IDs** persist. The case-by-case engineering BLOCK table below remains applicable, **not a signed human disposition**, waiver or PASS. No excluded case was silently removed from the suite.
+
 ## Case-by-case engineering disposition at `020d177d`, 2026-10-22 03:20 UTC
 
 The **entire** separately invoked server+CLI suite concluded **13 failed, 482 passed, 5 errors, 1 warning in 465.72 s** (`/tmp/mobile-follow-excluded-020d-full.log`, exit 1). The E/F IDs above exactly match that complete run. This table is an engineering **BLOCK**, not a human-approved exception or a claim that a stale test is harmless. The human-decision column above remains PENDING until each owner proves the live route behavior or supplies a reviewed exception.
