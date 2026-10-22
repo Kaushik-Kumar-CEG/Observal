@@ -3,10 +3,13 @@
 // SPDX-FileCopyrightText: 2026 Tanvi Reddy <reddyplayer22@gmail.com>
 // SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com>
 // SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
 
 import { useState, useCallback, useSyncExternalStore } from "react";
+import { Link } from "@tanstack/react-router";
+import { useFollowConsentState } from "@/hooks/use-api";
 import { useTheme } from "@/lib/theme";
 import { AlertTriangle, Check, Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -430,6 +433,9 @@ export default function AccountPage() {
 		getAvatarSnapshot,
 		() => null as string | null,
 	);
+	// The route is absent by default. Never advertise consent when the server
+	// has not installed and enabled the follow feature for this account.
+	const followConsent = useFollowConsentState(true);
 
 	const {
 		preset,
@@ -485,6 +491,22 @@ export default function AccountPage() {
 
 				{/* ── Section 3: Change Password ───────────────────────────────── */}
 				<ChangePasswordSection />
+
+				{followConsent.isSuccess && (
+					<section className="animate-in" aria-labelledby="account-following-heading">
+						<h3 id="account-following-heading" className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+							Account following
+						</h3>
+						<Card>
+							<CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
+								<p className="text-sm text-muted-foreground">Review this account’s following consent before approving a phone.</p>
+								<Button asChild variant="outline" className="shrink-0">
+									<Link to="/follow/consent">Review consent</Link>
+								</Button>
+							</CardContent>
+						</Card>
+					</section>
+				)}
 
 				{/* ── Section 4: Appearance ──────────────────────────────────────── */}
 				<section className="animate-in stagger-1">

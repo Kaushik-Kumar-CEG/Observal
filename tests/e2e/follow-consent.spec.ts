@@ -46,6 +46,37 @@ test("owner must check explicit consent after reading account state", async ({ p
   await page.screenshot({ path: "/tmp/observal-follow-consent-mocked.png" });
 });
 
+test("account settings offers consent only when the gated server state is reachable", async ({ page }) => {
+  await page.addInitScript(() => {
+    sessionStorage.setItem("observal_access_token", "test-browser-token");
+    localStorage.setItem("observal_user_role", "user");
+  });
+  await page.route("**/api/v1/mobile-follow-sync/v1/consent/state", (route) =>
+    route.fulfill({ json: { state: "consent_required", owner_generation: 2 } }),
+  );
+  await page.goto("/account");
+  const consentLink = page.getByRole("link", { name: "Review consent" });
+  await expect(consentLink).toBeVisible();
+  await consentLink.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "/tmp/observal-follow-account-consent-entry.png" });
+  await consentLink.click();
+  await expect(page).toHaveURL(/\/follow\/consent$/);
+  await expect(page.getByRole("button", { name: "Enable account following" })).toBeDisabled();
+});
+
+test("default-closed follow route never advertises account opt-in", async ({ page }) => {
+  await page.addInitScript(() => {
+    sessionStorage.setItem("observal_access_token", "test-browser-token");
+    localStorage.setItem("observal_user_role", "user");
+  });
+  await page.route("**/api/v1/mobile-follow-sync/v1/consent/state", (route) =>
+    route.fulfill({ status: 404, json: { detail: "Not Found" } }),
+  );
+  await page.goto("/account");
+  await expect(page.getByRole("heading", { name: "Profile" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Review consent" })).toHaveCount(0);
+});
+
 test("blocked or pending state never offers opt-in", async ({ page }) => {
   await page.addInitScript(() => sessionStorage.setItem("observal_access_token", "test-browser-token"));
   await page.route("**/api/v1/mobile-follow-sync/v1/consent/state", (route) =>

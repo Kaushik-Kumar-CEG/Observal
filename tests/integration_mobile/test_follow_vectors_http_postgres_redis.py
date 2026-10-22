@@ -53,6 +53,7 @@ REPLAYED_WITHDRAWAL = (
 REPLAYED = (
     "availability_fresh_same_issuer_v12_proof",
     "denial_401_not_fallback",
+    "offline_day_30_old_mobile_proof_denied",
     "phone_a_browser_sees_consent_state_before_initial_disclosure",
     "opt_in_after_disclosure_generation_7",
     "phone_b_bound_browser_challenge",
@@ -79,7 +80,12 @@ REPLAYED = (
 # the name prevents a generic reason from hiding two different missing scenarios.
 def gap(case):
     name = case["name"]
-    if case.get("invalid_response_schema") or case.get("invalid_client_cross_field"):
+    if name == "denial_403_not_fallback":
+        barrier = (
+            "requires a scoped foreign-owner v1.2 credential fixture; a distinct user's own availability "
+            "legitimately returns 200, so that attempted HTTP response is NOT counted as replay"
+        )
+    elif case.get("invalid_response_schema") or case.get("invalid_client_cross_field"):
         barrier = "requires a deliberately malformed server reply and Android rejection, not a real-router success"
     elif case["method"] == "none" or (case.get("client_result") and "local" in name):
         barrier = "requires Android local encrypted state or offline client behavior, absent from HTTP harness"
@@ -176,6 +182,15 @@ async def test_named_vectors_replayed_over_real_http(_scratch_fixture):  # noqa:
                         device_id="phone-expired",
                     )
                     auth = bearer(expired)
+                elif name == "offline_day_30_old_mobile_proof_denied":
+                    old, _ = create_access_token(
+                        owner,
+                        UserRole.super_admin,
+                        expires_in_minutes=-30 * 24 * 60,
+                        client_id="observal-mobile",
+                        device_id="phone-old",
+                    )
+                    auth = bearer(old)
                 elif name == "phone_b_prepares_remove_all_gen7":
                     auth = bearer(grant)
                 elif name in (
