@@ -52,7 +52,9 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
                 )
         finally:
             await schema.dispose()
-        env = os.environ.copy()
+        # A failed migration's captured subprocess kwargs appear in pytest
+        # tracebacks. Never copy unrelated host tokens into the child env.
+        env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG") if key in os.environ}
         env["DATABASE_URL"] = scratch_url.render_as_string(hide_password=False)
         # The v1 baseline is intentionally empty. Match docker/entrypoint.sh;
         # stamping is permitted ONLY on this just-created scratch DB.

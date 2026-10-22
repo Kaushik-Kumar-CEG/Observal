@@ -274,15 +274,20 @@ async def authorize_browser_approval(
         payload = decode_access_token(_bearer(authorization))
     except jwt.InvalidTokenError:
         _deny()
-    # A long-lived desktop token or one silently refreshed from storage is not
-    # proof of a fresh browser verification session. Force interactive sign-in
-    # again rather than accepting an old bearer merely because it is valid.
+    # iat alone can be fresh after a silent refresh. Require a signed proof
+    # minted only by direct password authentication; refresh never copies it.
     now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
     try:
         issued_us = token_issued_us(payload)
     except (TypeError, ValueError, OverflowError):
         _deny()
-    if not isinstance(issued_us, int) or not 0 <= now_us - issued_us <= 300_000_000:
+    verified_us = payload.get("browser_verified_at_us")
+    if (
+        type(verified_us) is not int
+        or type(issued_us) is not int
+        or verified_us != issued_us
+        or not 0 <= now_us - verified_us <= 300_000_000
+    ):
         _deny(403, "Recent browser verification required")
     user = await _account(payload, db, device_id=None)
     server = await _identity(db)

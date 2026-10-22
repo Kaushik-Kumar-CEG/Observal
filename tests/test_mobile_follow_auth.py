@@ -13,7 +13,8 @@ from fastapi import HTTPException
 from redis.exceptions import ConnectionError
 from starlette.requests import Request
 
-from services.jwt_service import MOBILE_AUDIENCE, MOBILE_CLIENT_ID, MOBILE_SCOPE
+from models.user import UserRole
+from services.jwt_service import MOBILE_AUDIENCE, MOBILE_CLIENT_ID, MOBILE_SCOPE, create_access_token
 
 F = importlib.import_module("services.mobile_follow_auth")
 OWNER = uuid.uuid4()
@@ -285,24 +286,52 @@ async def test_fresh_read_state_requires_barrier_and_owner_lock(env, monkeypatch
     assert events == []
 
 
+def test_password_login_proof_is_desktop_only_and_not_on_refresh_style_token(env, monkeypatch):
+    monkeypatch.setattr("services.crypto.sign_token", signed)
+    verified_login, _ = create_access_token(OWNER, UserRole.user, browser_verified=True)
+    silent_refresh, _ = create_access_token(OWNER, UserRole.user)
+    assert verified(verified_login)["browser_verified_at_us"] == verified(verified_login)["iat_us"]
+    assert "browser_verified_at_us" not in verified(silent_refresh)
+    with pytest.raises(ValueError, match="Only directly authenticated desktop"):
+        create_access_token(OWNER, UserRole.user, client_id=MOBILE_CLIENT_ID, device_id=DEVICE, browser_verified=True)
+
+
+@pytest.mark.asyncio
+async def test_fresh_silent_refresh_style_desktop_token_cannot_approve_phone(env):
+    db, _ = env
+    # A new access JWT minted from an old refresh is recent, but no fresh
+    # password/IdP verification occurred. A short-lived iat is insufficient.
+    desktop = signed(
+        {
+            key: value
+            for key, value in claims("access").items()
+            if key
+            not in ("aud", "scope", "device_id", "client_id", "owner_generation", "server_id", "project_id", "cohort")
+        }
+    )
+    with pytest.raises(HTTPException) as denied:
+        await F.authorize_browser_approval(request("POST", "write-approval"), "Bearer " + desktop, db)
+    assert denied.value.status_code == 403
+
+
 @pytest.mark.asyncio
 async def test_browser_same_owner_challenge_approval_and_one_use_grant(env):
     db, _ = env
     read = await F.authorize_follow_read(request("POST", "write-authorization"), "Bearer " + read_claims(), db)
     code = await F.create_challenge(db, read)
     assert 20 <= len(code) <= 64
-    browser_token = signed(
-        {
-            k: v
-            for k, v in claims("access").items()
-            if k
-            not in ("aud", "scope", "device_id", "client_id", "owner_generation", "server_id", "project_id", "cohort")
-        }
-    )
+    browser_claims = {
+        k: v
+        for k, v in claims("access").items()
+        if k not in ("aud", "scope", "device_id", "client_id", "owner_generation", "server_id", "project_id", "cohort")
+    }
+    browser_claims["browser_verified_at_us"] = browser_claims["iat_us"]
+    browser_token = signed(browser_claims)
     browser = await F.authorize_browser_approval(request("POST", "write-approval"), "Bearer " + browser_token, db)
     old_claims = verified(browser_token)
     old_claims["iat"] -= 301
     old_claims["iat_us"] -= 301_000_000
+    old_claims["browser_verified_at_us"] -= 301_000_000
     with pytest.raises(HTTPException) as old_error:
         await F.authorize_browser_approval(request("POST", "write-approval"), "Bearer " + signed(old_claims), db)
     assert old_error.value.status_code == 403

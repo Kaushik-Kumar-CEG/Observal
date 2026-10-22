@@ -134,7 +134,7 @@ async def test_named_vectors_replayed_over_real_http(_scratch_fixture):  # noqa:
             phone_b, _ = create_access_token(
                 owner, UserRole.super_admin, client_id="observal-mobile", device_id="phone-b"
             )
-            desktop, _ = create_access_token(owner, UserRole.super_admin)
+            desktop, _ = create_access_token(owner, UserRole.super_admin, browser_verified=True)
             headers = {
                 "mobile:read": bearer(phone_a),
                 "mobile:read_phone_b": bearer(phone_b),
@@ -301,7 +301,7 @@ async def test_post_withdrawal_named_denials_real_http(_scratch_fixture):  # noq
             phone_b, _ = create_access_token(
                 owner, UserRole.super_admin, client_id="observal-mobile", device_id="phone-b"
             )
-            desktop, _ = create_access_token(owner, UserRole.super_admin)
+            desktop, _ = create_access_token(owner, UserRole.super_admin, browser_verified=True)
             for _ in range(100):
                 try:
                     if (await client.get(ROOT + "/consent/state", headers=browser(desktop))).status_code == 200:

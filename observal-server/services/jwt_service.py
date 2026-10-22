@@ -33,6 +33,7 @@ def create_access_token(
     client_id: str | None = None,
     device_id: str | None = None,
     expires_at: datetime | None = None,
+    browser_verified: bool = False,
 ) -> tuple[str, int]:
     """Create a short-lived asymmetrically signed access token.
 
@@ -64,6 +65,12 @@ def create_access_token(
         "iat_us": int(now.timestamp()) * 1_000_000 + now.microsecond,
         "exp": now + expires_delta,
     }
+    if browser_verified:
+        if client_id is not None:
+            raise ValueError("Only directly authenticated desktop sessions can verify a browser")
+        # Signed only after password authentication. Refresh intentionally does
+        # not carry this claim, even though it mints a new, recent access JWT.
+        payload["browser_verified_at_us"] = payload["iat_us"]
     if client_id is not None:
         if client_id != MOBILE_CLIENT_ID:
             raise ValueError("Unknown token client")

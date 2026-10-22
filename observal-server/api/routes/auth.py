@@ -252,7 +252,12 @@ async def _start_oauth_flow(
 
 
 async def _issue_tokens(
-    user: User, groups: list[str] | None = None, *, client_id: str | None = None, device_id: str | None = None
+    user: User,
+    groups: list[str] | None = None,
+    *,
+    client_id: str | None = None,
+    device_id: str | None = None,
+    browser_verified: bool = False,
 ) -> tuple[str, str, int]:
     """Issue JWT access + refresh tokens for a user, storing refresh JTI in Redis.
 
@@ -273,7 +278,13 @@ async def _issue_tokens(
                 raise HTTPException(status_code=503, detail="Mobile refresh lifetime is not configured")
         family_expiry = datetime.now(UTC) + timedelta(days=refresh_days) if client_id == MOBILE_CLIENT_ID else None
         access_token, expires_in = create_access_token(
-            user.id, user.role, groups=groups, client_id=client_id, device_id=device_id, expires_at=family_expiry
+            user.id,
+            user.role,
+            groups=groups,
+            client_id=client_id,
+            device_id=device_id,
+            expires_at=family_expiry,
+            browser_verified=browser_verified,
         )
         refresh_token, jti = create_refresh_token(
             user.id, user.role, groups=groups, client_id=client_id, device_id=device_id, expires_at=family_expiry
@@ -447,7 +458,7 @@ async def login(request: Request, req: LoginRequest, db: AsyncSession = Depends(
         )
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    access_token, refresh_token, expires_in = await _issue_tokens(user)
+    access_token, refresh_token, expires_in = await _issue_tokens(user, browser_verified=True)
     await emit_security_event(
         SecurityEvent(
             event_type=EventType.LOGIN_SUCCESS,
@@ -1726,7 +1737,7 @@ async def issue_token(request: Request, req: TokenRequest, db: AsyncSession = De
             user_agent=user_agent,
         )
     )
-    access_token, refresh_token, expires_in = await _issue_tokens(user)
+    access_token, refresh_token, expires_in = await _issue_tokens(user, browser_verified=True)
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,

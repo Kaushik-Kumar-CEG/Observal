@@ -379,7 +379,7 @@ async def test_seventeen_routes_two_real_http_processes(scratch):
             other_phone, _ = create_access_token(
                 other, UserRole.user, client_id="observal-mobile", device_id="phone-other"
             )
-            desktop, _ = create_access_token(owner, UserRole.super_admin)
+            desktop, _ = create_access_token(owner, UserRole.super_admin, browser_verified=True)
             for _ in range(100):
                 try:
                     if (await first.get(ROOT + "/availability", headers=bearer(phone_a))).status_code == 200 and (

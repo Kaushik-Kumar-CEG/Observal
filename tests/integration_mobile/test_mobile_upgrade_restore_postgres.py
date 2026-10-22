@@ -39,7 +39,10 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         async with admin.connect() as conn:
             await conn.execute(text("CREATE DATABASE " + name))
             created.append(name)
-        env = {**os.environ, "DATABASE_URL": base.set(database=name).render_as_string(hide_password=False)}
+        # Capture-only migration failures expose child kwargs in pytest logs;
+        # restrict the child to the disposable store and essential local paths.
+        env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG") if key in os.environ}
+        env["DATABASE_URL"] = base.set(database=name).render_as_string(hide_password=False)
         async with source.begin() as conn:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
             # An actual 068 backup predates follow-sync 070; current ORM models
