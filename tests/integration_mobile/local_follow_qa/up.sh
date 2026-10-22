@@ -11,8 +11,9 @@ issuer_port=${MOBILE_FOLLOW_QA_PORT:-18443}
     [[ "$state_name" =~ ^\.runtime-scratch-[0-9a-f]{6,12}$ && "$issuer_port" == 18444 ]] || \
     [[ "$state_name" =~ ^\.runtime-android-[0-9a-f]{6,12}$ && "$issuer_port" == 18446 ]] || \
     [[ "$state_name" =~ ^\.runtime-android-next-[0-9a-f]{6,12}$ && "$issuer_port" == 18448 ]] || \
-    [[ "$state_name" =~ ^\.runtime-android-diagnostic-[0-9a-f]{6,12}$ && "$issuer_port" == 18449 ]] || {
-        echo 'Only default 18443, isolated 18444 scratch, old 18446 or independent 18448/18449 Android QA are allowed' >&2; exit 1;
+    [[ "$state_name" =~ ^\.runtime-android-diagnostic-[0-9a-f]{6,12}$ && "$issuer_port" == 18449 ]] || \
+    [[ "$state_name" =~ ^\.runtime-android-verified-[0-9a-f]{6,12}$ && "$issuer_port" == 18450 ]] || {
+        echo 'Only default 18443, scratch 18444, old 18446 or independently pinned 18448-18450 Android QA are allowed' >&2; exit 1;
     }
 state="$qa/$state_name"
 [[ ! -e "$state" && ! -L "$state" ]] || { echo 'QA already running or stale state; run down.sh first' >&2; exit 1; }

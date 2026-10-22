@@ -67,6 +67,7 @@ def test_reject_wrong_docker_ownership_or_port(monkeypatch, owned, suffix):
         (".runtime-android-a1b2c3", 18446),
         (".runtime-android-next-a1b2c3", 18448),
         (".runtime-android-diagnostic-a1b2c3", 18449),
+        (".runtime-android-verified-a1b2c3", 18450),
     ),
 )
 def test_android_issuer_is_separate_from_old_states(monkeypatch, owned, state_name, issuer_port):

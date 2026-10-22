@@ -7,7 +7,8 @@ state_name=${MOBILE_FOLLOW_QA_STATE_NAME:-.runtime}
 [[ "$state_name" == .runtime || "$state_name" =~ ^\.runtime-scratch-[0-9a-f]{6,12}$ || \
    "$state_name" =~ ^\.runtime-android-[0-9a-f]{6,12}$ || \
    "$state_name" =~ ^\.runtime-android-next-[0-9a-f]{6,12}$ || \
-   "$state_name" =~ ^\.runtime-android-diagnostic-[0-9a-f]{6,12}$ ]] || {
+   "$state_name" =~ ^\.runtime-android-diagnostic-[0-9a-f]{6,12}$ || \
+   "$state_name" =~ ^\.runtime-android-verified-[0-9a-f]{6,12}$ ]] || {
     echo 'Invalid QA state name; refusing cleanup' >&2; exit 1;
 }
 state="$qa/$state_name"
@@ -21,7 +22,8 @@ issuer_port=$(<"$state/issuer-port")
     [[ "$state_name" =~ ^\.runtime-scratch- && "$issuer_port" == 18444 ]] || \
     [[ "$state_name" =~ ^\.runtime-android-[0-9a-f]{6,12}$ && "$issuer_port" == 18446 ]] || \
     [[ "$state_name" =~ ^\.runtime-android-next-[0-9a-f]{6,12}$ && "$issuer_port" == 18448 ]] || \
-    [[ "$state_name" =~ ^\.runtime-android-diagnostic-[0-9a-f]{6,12}$ && "$issuer_port" == 18449 ]] || {
+    [[ "$state_name" =~ ^\.runtime-android-diagnostic-[0-9a-f]{6,12}$ && "$issuer_port" == 18449 ]] || \
+    [[ "$state_name" =~ ^\.runtime-android-verified-[0-9a-f]{6,12}$ && "$issuer_port" == 18450 ]] || {
         echo 'QA state/issuer mismatch; refusing cleanup' >&2; exit 1;
     }
 docker info >/dev/null || { echo 'Docker unavailable; preserving QA state' >&2; exit 1; }

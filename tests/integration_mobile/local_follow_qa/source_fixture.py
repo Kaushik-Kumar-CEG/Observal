@@ -51,6 +51,8 @@ def require_disposable_environment() -> Path:
         if re.fullmatch(r"\.runtime-android-next-[0-9a-f]{6,12}", state_name)
         else 18449
         if re.fullmatch(r"\.runtime-android-diagnostic-[0-9a-f]{6,12}", state_name)
+        else 18450
+        if re.fullmatch(r"\.runtime-android-verified-[0-9a-f]{6,12}", state_name)
         else 18444
     )
     if not (
@@ -59,6 +61,7 @@ def require_disposable_environment() -> Path:
         or re.fullmatch(r"\.runtime-android-[0-9a-f]{6,12}", state_name)
         or re.fullmatch(r"\.runtime-android-next-[0-9a-f]{6,12}", state_name)
         or re.fullmatch(r"\.runtime-android-diagnostic-[0-9a-f]{6,12}", state_name)
+        or re.fullmatch(r"\.runtime-android-verified-[0-9a-f]{6,12}", state_name)
     ):
         raise RuntimeError("Invalid disposable QA state name")
     state = qa / state_name
