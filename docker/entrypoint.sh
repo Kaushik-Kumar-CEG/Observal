@@ -88,7 +88,13 @@ async def init():
     try:
         async with engine.begin() as conn:
             await conn.execute(text('CREATE EXTENSION IF NOT EXISTS pg_trgm'))
-            await conn.run_sync(Base.metadata.create_all)
+            # Follow-sync's complete CHECKs, FK actions and partial indexes live
+            # in migration 070, not in the declarative baseline. Creating its
+            # ORM tables here would both collide with 070 and weaken a fresh DB.
+            await conn.run_sync(lambda sync: Base.metadata.create_all(
+                sync, tables=[table for table in Base.metadata.sorted_tables
+                              if not table.name.startswith('mobile_follow_')]
+            ))
     finally:
         await engine.dispose()
 

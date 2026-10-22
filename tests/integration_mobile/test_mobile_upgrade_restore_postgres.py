@@ -42,7 +42,17 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         env = {**os.environ, "DATABASE_URL": base.set(database=name).render_as_string(hide_password=False)}
         async with source.begin() as conn:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
-            await conn.run_sync(Base.metadata.create_all)
+            # An actual 068 backup predates follow-sync 070; current ORM models
+            # must not pre-create 070 tables in the historical source database.
+            await conn.run_sync(
+                lambda sync: Base.metadata.create_all(
+                    sync,
+                    tables=[
+                        table for table in Base.metadata.sorted_tables if not table.name.startswith("mobile_follow_")
+                    ],
+                )
+            )
+            assert await conn.scalar(text("SELECT to_regclass('mobile_follow_partitions')")) is None
         for action in (("stamp", "044_review_orphan_authors"), ("upgrade", "068_mobile_erasure_epoch_guard")):
             subprocess.run(
                 [sys.executable, "-m", "alembic", *action], env=env, check=True, capture_output=True, timeout=150

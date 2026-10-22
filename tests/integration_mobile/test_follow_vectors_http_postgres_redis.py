@@ -43,6 +43,7 @@ BY_NAME = {case["name"]: case for case in VECTORS}
 REPLAYED_WITHDRAWAL = (
     "phone_a_withdraw_without_write_grant_denied",
     "phone_b_mobile_read_cannot_restore_opt_in_after_withdrawal",
+    "phone_b_stale_opt_in_during_withdrawal_fenced",
     "phone_b_cannot_mint_new_grant_during_opt_out",
     "withdrawal_denies_snapshot_not_empty",
     "withdrawal_denies_changes_not_empty",
@@ -51,6 +52,7 @@ REPLAYED_WITHDRAWAL = (
 
 REPLAYED = (
     "availability_fresh_same_issuer_v12_proof",
+    "denial_401_not_fallback",
     "phone_a_browser_sees_consent_state_before_initial_disclosure",
     "opt_in_after_disclosure_generation_7",
     "phone_b_bound_browser_challenge",
@@ -165,7 +167,16 @@ async def test_named_vectors_replayed_over_real_http(_scratch_fixture):  # noqa:
                     .replace("owner_generation=10", "owner_generation=2")
                     .replace("owner_generation=7", "owner_generation=2")
                 )
-                if name == "phone_b_prepares_remove_all_gen7":
+                if name == "denial_401_not_fallback":
+                    expired, _ = create_access_token(
+                        owner,
+                        UserRole.super_admin,
+                        expires_in_minutes=-1,
+                        client_id="observal-mobile",
+                        device_id="phone-expired",
+                    )
+                    auth = bearer(expired)
+                elif name == "phone_b_prepares_remove_all_gen7":
                     auth = bearer(grant)
                 elif name in (
                     "phone_b_remove_all_atomically_advances_to_8",
@@ -323,11 +334,11 @@ async def test_post_withdrawal_named_denials_real_http(_scratch_fixture):  # noq
                 case = BY_NAME[name]
                 body = dict(case.get("request") or {})
                 if "owner_generation" in body:
-                    body["owner_generation"] = 3
+                    body["owner_generation"] = 2 if name == "phone_b_stale_opt_in_during_withdrawal_fenced" else 3
                 path = case["path"].removeprefix("/mobile-follow-sync/v1")
                 # Frozen synthetic generations 8/9 correspond to this fresh DB's 2/3.
                 path = path.replace("owner_generation=9", "owner_generation=3")
-                auth = bearer(phone_b)
+                auth = browser(desktop) if name == "phone_b_stale_opt_in_during_withdrawal_fenced" else bearer(phone_b)
                 response = await client.request(
                     case["method"],
                     ROOT + path,

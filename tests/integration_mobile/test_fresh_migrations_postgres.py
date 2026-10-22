@@ -40,7 +40,16 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
         try:
             async with schema.begin() as conn:
                 await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
-                await conn.run_sync(Base.metadata.create_all)
+                await conn.run_sync(
+                    lambda sync: Base.metadata.create_all(
+                        sync,
+                        tables=[
+                            table
+                            for table in Base.metadata.sorted_tables
+                            if not table.name.startswith("mobile_follow_")
+                        ],
+                    )
+                )
         finally:
             await schema.dispose()
         env = os.environ.copy()
@@ -78,6 +87,14 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
                 assert (
                     await conn.execute(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'"))
                 ).scalar_one() is True
+                assert (
+                    await conn.scalar(
+                        text(
+                            "SELECT count(*) FROM pg_constraint WHERE conrelid='mobile_follow_partitions'::regclass "
+                            "AND contype='c' AND pg_get_constraintdef(oid) LIKE '%indexed_receipts%'"
+                        )
+                    )
+                ) == 1, "fresh follow storage must get migration 070's receipt quota CHECK"
                 assert (await conn.execute(text("SELECT count(*) FROM mobile_operator_audit"))).scalar_one() == 0
                 assert (await conn.execute(text("SELECT count(*) FROM first_admin_provision_audit"))).scalar_one() == 0
                 assert (await conn.execute(text("SELECT count(*) FROM mobile_author_actor_links"))).scalar_one() == 0
