@@ -61,14 +61,18 @@ def test_reject_wrong_docker_ownership_or_port(monkeypatch, owned, suffix):
         source.require_disposable_environment()
 
 
-def test_android_18446_issuer_is_separate_from_default_18443(monkeypatch, owned):
+@pytest.mark.parametrize(
+    ("state_name", "issuer_port"),
+    ((".runtime-android-a1b2c3", 18446), (".runtime-android-next-a1b2c3", 18448)),
+)
+def test_android_issuer_is_separate_from_old_states(monkeypatch, owned, state_name, issuer_port):
     qa = Path(source.__file__).resolve().parent
-    (qa / ".runtime").rename(qa / ".runtime-android-a1b2c3")
-    state = qa / ".runtime-android-a1b2c3"
-    (state / "issuer-port").write_text("18446\n")
-    monkeypatch.setenv("MOBILE_FOLLOW_QA_STATE_NAME", ".runtime-android-a1b2c3")
-    monkeypatch.setenv("MOBILE_FOLLOW_QA_PORT", "18446")
-    monkeypatch.setattr(source, "ISSUER_PORT", 18446)
+    (qa / ".runtime").rename(qa / state_name)
+    state = qa / state_name
+    (state / "issuer-port").write_text(f"{issuer_port}\n")
+    monkeypatch.setenv("MOBILE_FOLLOW_QA_STATE_NAME", state_name)
+    monkeypatch.setenv("MOBILE_FOLLOW_QA_PORT", str(issuer_port))
+    monkeypatch.setattr(source, "ISSUER_PORT", issuer_port)
 
     def docker(args, **_kwargs):
         if args[1] == "inspect":

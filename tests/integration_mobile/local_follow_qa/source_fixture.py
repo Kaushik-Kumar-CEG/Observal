@@ -43,12 +43,19 @@ def require_disposable_environment() -> Path:
     qa = Path(__file__).resolve().parent
     state_name = os.environ.get("MOBILE_FOLLOW_QA_STATE_NAME", ".runtime")
     expected_port = (
-        18443 if state_name == ".runtime" else 18446 if state_name.startswith(".runtime-android-") else 18444
+        18443
+        if state_name == ".runtime"
+        else 18446
+        if re.fullmatch(r"\.runtime-android-[0-9a-f]{6,12}", state_name)
+        else 18448
+        if re.fullmatch(r"\.runtime-android-next-[0-9a-f]{6,12}", state_name)
+        else 18444
     )
     if not (
         state_name == ".runtime"
         or re.fullmatch(r"\.runtime-scratch-[0-9a-f]{6,12}", state_name)
         or re.fullmatch(r"\.runtime-android-[0-9a-f]{6,12}", state_name)
+        or re.fullmatch(r"\.runtime-android-next-[0-9a-f]{6,12}", state_name)
     ):
         raise RuntimeError("Invalid disposable QA state name")
     state = qa / state_name
