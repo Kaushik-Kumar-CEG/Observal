@@ -10,7 +10,7 @@ continues after an operator disables new follow activity.
 
 import os
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,20 @@ async def require_user_verifying_approval() -> None:
     loopback synthetic QA app intentionally does not mount this dependency.
     """
     raise HTTPException(403, "user-verifying follow approval unavailable")
+
+
+async def require_user_verifying_mutation(request: Request) -> None:
+    """Block consent and follow edits, including previously minted write JWTs.
+
+    Keep privacy withdrawal/removal and receipt recovery independently callable
+    behind the operator gate. The local synthetic QA app is not mounted here.
+    """
+    if request.method == "POST" and request.url.path in {
+        "/api/v1/mobile-follow-sync/v1/operations",
+        "/api/v1/mobile-follow-sync/v1/consent",
+    }:
+        # StrictErrorRoute preserves frozen errors only for a typed envelope.
+        raise HTTPException(403, {"error": "restricted"})
 
 
 async def require_operator_approval(db: AsyncSession = Depends(get_db)) -> None:

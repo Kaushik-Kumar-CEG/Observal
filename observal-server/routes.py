@@ -61,6 +61,7 @@ from api.routes.users import router as users_router
 from services.mobile_follow_enablement import (
     require_operator_approval,
     require_user_verifying_approval,
+    require_user_verifying_mutation,
     routes_installed,
 )
 from services.saml_health import register_saml_health_probe
@@ -132,8 +133,11 @@ def include_rest_routes(app: FastAPI) -> None:
         from api.routes.mobile_follow_read import router as follow_read_router
         from api.routes.mobile_follow_write import router as follow_write_router
 
-        for router in (follow_read_router, follow_write_router):
-            app.include_router(router, dependencies=[Depends(require_operator_approval)])
+        app.include_router(follow_read_router, dependencies=[Depends(require_operator_approval)])
+        app.include_router(
+            follow_write_router,
+            dependencies=[Depends(require_operator_approval), Depends(require_user_verifying_mutation)],
+        )
         # Browser Origin and password recency do not establish human presence.
         # The local-only synthetic QA app mounts its own router without this
         # production dependency; operator acknowledgement never overrides it.

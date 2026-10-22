@@ -67,6 +67,27 @@ def test_explicit_install_registers_exactly_seventeen_as_one_gated_set(monkeypat
         for r in routes
         if r not in browser_routes
     )
+    assert all(
+        any(d.dependency is gate.require_user_verifying_mutation for d in r.dependencies)
+        for r in routes
+        if r.path.endswith(("/operations", "/consent", "/consent/withdraw", "/removals"))
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ("operations", "consent"))
+async def test_old_grants_and_unreviewed_browser_consent_cannot_bypass_mutation_gate(path):
+    request = SimpleNamespace(method="POST", url=SimpleNamespace(path="/api/v1/mobile-follow-sync/v1/" + path))
+    with pytest.raises(HTTPException) as denied:
+        await gate.require_user_verifying_mutation(request)
+    assert denied.value.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ("consent/withdraw", "removals", "removals/lookup"))
+async def test_accepted_privacy_actions_not_blocked_by_pending_approval_gate(path):
+    request = SimpleNamespace(method="POST", url=SimpleNamespace(path="/api/v1/mobile-follow-sync/v1/" + path))
+    await gate.require_user_verifying_mutation(request)
 
 
 @pytest.mark.asyncio

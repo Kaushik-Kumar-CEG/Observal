@@ -291,8 +291,8 @@ async def test_production_route_install_stays_closed_until_fresh_owner_and_opera
                     assert result.status_code == 200, (result.status_code, result.text[:200])
                     # A real owner/operator DB gate does not provide user-verifying
                     # browser approval. No normal write challenge or grant can issue.
-                    for action in ("write-authorization", "write-approval", "write-grant"):
-                        header = browser(desktop) if action == "write-approval" else bearer(phone)
+                    for action in ("write-authorization", "write-approval", "write-grant", "operations", "consent"):
+                        header = browser(desktop) if action in {"write-approval", "consent"} else bearer(phone)
                         denied = await client.post(ROOT + "/" + action, headers=header)
                         assert denied.status_code == 403, (action, denied.status_code)
                         assert denied.json() == {"error": "restricted"}
