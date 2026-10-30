@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+"""Opt-in fresh Docker-style Alembic bootstrap in a UNIQUE disposable PostgreSQL DB.
+
+Never run against a shared or production PostgreSQL host. Scratch DB is
+created on the loopback-only mobile probe cluster and dropped even on failure.
+"""
+
+import os
+import subprocess
+import sys
+import uuid
+
+import pytest
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import create_async_engine
+
+pytestmark = pytest.mark.skipif(os.getenv("MOBILE_MIGRATION_SCRATCH") != "1", reason="disposable PostgreSQL only")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
+    from models import Base
+
+    base = make_url(os.environ["DATABASE_URL"])
+    assert (base.host, base.port, base.database) in {
+        ("127.0.0.1", 15438, "observal"),
+        ("127.0.0.1", 15440, "observal"),
+    }
+    name = "mobile_migration_scratch_" + uuid.uuid4().hex[:12]
+    admin = create_async_engine(base, isolation_level="AUTOCOMMIT")
+    created = False
+    try:
+        async with admin.connect() as conn:
+            await conn.execute(text("CREATE DATABASE " + name))
+            created = True
+        scratch_url = base.set(database=name)
+        schema = create_async_engine(scratch_url)
+        try:
+            async with schema.begin() as conn:
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+                await conn.run_sync(
+                    lambda sync: Base.metadata.create_all(
+                        sync,
+                        tables=[
+                            table
+                            for table in Base.metadata.sorted_tables
+                            if not table.name.startswith("mobile_follow_")
+                        ],
+                    )
+                )
+        finally:
+            await schema.dispose()
+        # A failed migration's captured subprocess kwargs appear in pytest
+        # tracebacks. Never copy unrelated host tokens into the child env.
+        env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG") if key in os.environ}
+        env["DATABASE_URL"] = scratch_url.render_as_string(hide_password=False)
+        # The v1 baseline is intentionally empty. Match docker/entrypoint.sh;
+        # stamping is permitted ONLY on this just-created scratch DB.
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "stamp", "053_mcp_webhook_sync_timestamps"],
+            env=env,
+            check=True,
+            capture_output=True,
+            timeout=45,
+        )
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "079_mobile_follow_sync_state"],
+            env=env,
+            check=True,
+            capture_output=True,
+            timeout=105,
+        )
+        old_head = subprocess.run(
+            [sys.executable, "-m", "services.mobile_boot_preflight", "--require-schema"],
+            env=env,
+            capture_output=True,
+            timeout=30,
+        )
+        assert old_head.returncode == 2 and b"OLD_OR_INCOMPATIBLE_SCHEMA" in old_head.stdout
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            env=env,
+            check=True,
+            capture_output=True,
+            timeout=105,
+        )
+        verify = create_async_engine(scratch_url)
+        try:
+            async with verify.connect() as conn:
+                assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == (
+                    "080_mobile_follow_browser_proof"
+                )
+                assert (
+                    await conn.execute(
+                        text(
+                            "SELECT source_policy_ready,source_policy_epoch FROM mobile_read_controls "
+                            "WHERE project_id='default'"
+                        )
+                    )
+                ).one() == (False, 1)
+                assert (
+                    await conn.execute(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'"))
+                ).scalar_one() is True
+                assert (
+                    await conn.scalar(
+                        text(
+                            "SELECT count(*) FROM pg_constraint WHERE conrelid='mobile_follow_partitions'::regclass "
+                            "AND contype='c' AND pg_get_constraintdef(oid) LIKE '%indexed_receipts%'"
+                        )
+                    )
+                ) == 1, "fresh follow storage must get migration 070's receipt quota CHECK"
+                assert (await conn.execute(text("SELECT count(*) FROM mobile_operator_audit"))).scalar_one() == 0
+                assert (await conn.execute(text("SELECT count(*) FROM first_admin_provision_audit"))).scalar_one() == 0
+                assert (await conn.execute(text("SELECT count(*) FROM mobile_author_actor_links"))).scalar_one() == 0
+                assert (
+                    await conn.execute(
+                        text(
+                            "SELECT count(*) FROM information_schema.columns WHERE table_name='mobile_session_publications' "
+                            "AND column_name='source_retained_until'"
+                        )
+                    )
+                ).scalar_one() == 1
+                assert (
+                    await conn.execute(
+                        text(
+                            "SELECT count(*) FROM enterprise_config WHERE key IN ('usage_ping.enabled', 'usage_ping.frequency')"
+                        )
+                    )
+                ).scalar_one() == 0
+        finally:
+            await verify.dispose()
+        preflight = subprocess.run(
+            [sys.executable, "-m", "services.mobile_boot_preflight", "--require-schema"],
+            env=env,
+            capture_output=True,
+            timeout=30,
+        )
+        assert preflight.returncode == 0, preflight.stdout[-400:] + preflight.stderr[-400:]
+        # The 070 privacy fences cannot be downgraded, including through 069;
+        # a restore from an isolated backup is required.
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "076_mobile_short_retention_fence"],
+            env=env,
+            capture_output=True,
+            timeout=105,
+        )
+        assert downgrade.returncode != 0
+        assert b"Cannot discard follow-sync consent, privacy receipts or erasure fences" in downgrade.stderr
+        verify = create_async_engine(scratch_url)
+        try:
+            async with verify.connect() as conn:
+                # PostgreSQL rolls back the entire multi-revision downgrade when
+                # 070's irreversible privacy fence refuses the final step.
+                assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == (
+                    "080_mobile_follow_browser_proof"
+                )
+        finally:
+            await verify.dispose()
+    finally:
+        if created:
+            async with admin.connect() as conn:
+                await conn.execute(text("DROP DATABASE " + name + " WITH (FORCE)"))
+        await admin.dispose()

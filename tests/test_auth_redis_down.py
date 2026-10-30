@@ -43,6 +43,7 @@ def _make_broken_redis():
     r = MagicMock()
     r.setex = AsyncMock(side_effect=RedisConnectionError("Connection refused"))
     r.get = AsyncMock(side_effect=RedisConnectionError("Connection refused"))
+    r.getdel = AsyncMock(side_effect=RedisConnectionError("Connection refused"))
     r.delete = AsyncMock(side_effect=RedisConnectionError("Connection refused"))
     return r
 

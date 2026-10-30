@@ -14,3 +14,9 @@ export * from "./types/admin";
 export * from "./types/team";
 export * from "./types/inbox";
 export * from "./types/review";
+export * from "./types/mobile-follow";
+
+export interface DeviceCodePreview {
+	client_kind: "phone" | "terminal";
+	device_id_suffix: string | null;
+}

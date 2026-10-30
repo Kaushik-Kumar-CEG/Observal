@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Ravi Chopra <shivamchopra1234567890@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Asymmetric JWT signing, verification, JWKS publication, and key rotation."""
@@ -237,7 +238,9 @@ class KeyManager:
         expected_algorithm = _algorithm_for_key(pub)
         if header.get("alg") != expected_algorithm:
             raise jwt.InvalidAlgorithmError("Token algorithm does not match its signing key")
-        return jwt.decode(token, pub, algorithms=[expected_algorithm])
+        # Typed access/refresh decoders validate audience: legacy CLI tokens have
+        # none, while mobile tokens require their specific audience.
+        return jwt.decode(token, pub, algorithms=[expected_algorithm], options={"verify_aud": False})
 
     def _encryption_args(self) -> serialization.KeySerializationEncryption:
         if self._key_password:

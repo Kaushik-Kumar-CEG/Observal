@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Observal Contributors
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Fresh and versioned entrypoint paths must never stamp an unverified schema."""
@@ -111,11 +112,14 @@ def test_entrypoint_fresh_path_initializes_then_stamps_before_clickhouse(tmp_pat
     result, calls = _entrypoint_with_stub(tmp_path, "fresh")
     assert result.returncode == 0, result.stderr
     assert calls == [
+        "-m services.mobile_pg_clock_preflight",
         "-m services.schema_bootstrap state",
         "-m services.schema_bootstrap init",
-        "-m alembic stamp head",
+        "-m alembic stamp 053_mcp_webhook_sync_timestamps",
+        "-m alembic upgrade head",
         "-m jobs.review_backfill",
         "-m services.clickhouse.migrations",
+        "-m services.mobile_source_policy_init",
     ]
 
 
@@ -123,30 +127,40 @@ def test_entrypoint_existing_path_upgrades_without_creating_or_stamping(tmp_path
     result, calls = _entrypoint_with_stub(tmp_path, "existing")
     assert result.returncode == 0, result.stderr
     assert calls == [
+        "-m services.mobile_pg_clock_preflight",
         "-m services.schema_bootstrap state",
         "-m alembic upgrade head",
         "-m jobs.review_backfill",
         "-m services.clickhouse.migrations",
+        "-m services.mobile_source_policy_init",
     ]
 
 
 def test_entrypoint_does_not_stamp_when_existing_upgrade_fails(tmp_path):
     result, calls = _entrypoint_with_stub(tmp_path, "existing", fail="upgrade")
     assert result.returncode != 0
-    assert calls == ["-m services.schema_bootstrap state", "-m alembic upgrade head"]
+    assert calls == [
+        "-m services.mobile_pg_clock_preflight",
+        "-m services.schema_bootstrap state",
+        "-m alembic upgrade head",
+    ]
 
 
 def test_entrypoint_refuses_unversioned_database_without_ddl(tmp_path):
     result, calls = _entrypoint_with_stub(tmp_path, "unversioned")
     assert result.returncode != 0
-    assert calls == ["-m services.schema_bootstrap state"]
+    assert calls == ["-m services.mobile_pg_clock_preflight", "-m services.schema_bootstrap state"]
     assert "refusing to stamp" in result.stderr
 
 
 def test_entrypoint_does_not_stamp_if_fresh_init_fails(tmp_path):
     result, calls = _entrypoint_with_stub(tmp_path, "fresh", fail="init")
     assert result.returncode != 0
-    assert calls == ["-m services.schema_bootstrap state", "-m services.schema_bootstrap init"]
+    assert calls == [
+        "-m services.mobile_pg_clock_preflight",
+        "-m services.schema_bootstrap state",
+        "-m services.schema_bootstrap init",
+    ]
 
 
 _PG_URL = os.environ.get("OBSERVAL_TEST_POSTGRES_URL")

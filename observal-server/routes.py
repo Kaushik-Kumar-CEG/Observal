@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 amogh-dongre <amoghdongre16@gmail.com>
 # SPDX-FileCopyrightText: 2026 Lokesh <lokeshselvam7025@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from strawberry.fastapi import GraphQLRouter
 
 from api.graphql import get_context_dep, schema
@@ -38,6 +39,8 @@ from api.routes.logs_stream import router as logs_stream_router
 from api.routes.mcp import router as mcp_router
 from api.routes.mcp_webhook_sync import router as mcp_webhook_sync_router
 from api.routes.mcp_webhook_sync import webhook_router as mcp_webhook_receiver_router
+from api.routes.mobile_activity import router as mobile_activity_router
+from api.routes.mobile_evidence import router as mobile_evidence_router
 from api.routes.preview import router as preview_router
 from api.routes.prompt import router as prompt_router
 from api.routes.recommendations import router as recommendations_router
@@ -56,6 +59,13 @@ from api.routes.support import router as support_router
 from api.routes.teams import router as teams_router
 from api.routes.telemetry import router as telemetry_router
 from api.routes.users import router as users_router
+from services.mobile_follow_enablement import (
+    require_activity_or_recovery,
+    require_operator_approval,
+    require_user_verifying_approval,
+    require_user_verifying_mutation,
+    routes_installed,
+)
 from services.saml_health import register_saml_health_probe
 
 REST_ROUTERS = (
@@ -94,6 +104,8 @@ REST_ROUTERS = (
     teams_router,
     inbox_router,
     layer_snapshot_router,
+    mobile_activity_router,
+    mobile_evidence_router,
     logs_stream_router,
     audit_router,
     users_router,
@@ -117,6 +129,25 @@ def include_graphql_routes(app: FastAPI) -> None:
 def include_rest_routes(app: FastAPI) -> None:
     for router in REST_ROUTERS:
         app.include_router(router)
+    # All follow paths install together only on explicit operator startup.
+    # The fresh DB decision gate runs before new activity; recovery remains available.
+    if routes_installed():
+        from api.routes.mobile_follow_browser import router as follow_browser_router
+        from api.routes.mobile_follow_read import router as follow_read_router
+        from api.routes.mobile_follow_write import router as follow_write_router
+
+        app.include_router(follow_read_router, dependencies=[Depends(require_operator_approval)])
+        app.include_router(
+            follow_write_router,
+            dependencies=[Depends(require_activity_or_recovery), Depends(require_user_verifying_mutation)],
+        )
+        # Browser Origin and password recency do not establish human presence.
+        # The local-only synthetic QA app mounts its own router without this
+        # production dependency; operator acknowledgement never overrides it.
+        app.include_router(
+            follow_browser_router,
+            dependencies=[Depends(require_activity_or_recovery), Depends(require_user_verifying_approval)],
+        )
 
 
 def configure_routes(app: FastAPI) -> None:

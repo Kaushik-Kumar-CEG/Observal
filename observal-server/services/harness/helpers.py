@@ -586,6 +586,10 @@ def _build_hook_configs(
             "handler_type": getattr(listing, "handler_type", "command"),
             "handler_config": getattr(listing, "handler_config", {}) or {},
             "name": local_names[comp.component_id],
+            "registry_id": str(comp.component_id) if getattr(comp, "resolved_version_id", None) else None,
+            "registry_version": getattr(comp, "resolved_version", None)
+            if getattr(comp, "resolved_version_id", None)
+            else None,
             "script_filename": getattr(listing, "script_filename", None),
             "script_content": getattr(listing, "script_content", None),
             "tool_filter": getattr(listing, "tool_filter", None),

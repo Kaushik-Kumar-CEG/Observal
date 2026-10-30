@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """SCIM 2.0 provisioning endpoints."""
@@ -13,7 +14,8 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from redis.exceptions import RedisError
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 if TYPE_CHECKING:
@@ -24,6 +26,7 @@ from models.scim_token import ScimToken
 from models.user import User, UserRole, live_users
 from services.auth_header import bearer_token
 from services.events import UserCreated, UserDeleted, bus
+from services.redis import get_redis
 from services.scim_service import (
     SCIM_PATCH_SCHEMA,
     SCIM_USER_SCHEMA,
@@ -41,6 +44,7 @@ from services.security_events import (
     Severity,
     emit_security_event,
 )
+from services.token_revocation import revoke_user_tokens
 from services.user_deletion import LastAdminError, delete_user_account, revoke_deleted_user_tokens
 from services.username_generator import generate_unique_username
 
@@ -50,6 +54,17 @@ logger = logging.getLogger("observal.scim")
 router = APIRouter(prefix="/api/v1/scim", tags=["scim"])
 
 SCIM_CONTENT_TYPE = "application/scim+json"
+
+
+async def _fence_account_transition(db: AsyncSession, user_id: _uuid.UUID) -> None:
+    """Stop old grants on both deactivation and subsequent reactivation."""
+    with db.no_autoflush:
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+    try:
+        await revoke_user_tokens(get_redis(), user_id)
+    except RedisError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="Account revocation temporarily unavailable") from exc
 
 
 async def _get_scoped_user(user_id: str, db: AsyncSession) -> User | None:
@@ -258,6 +273,7 @@ async def update_user(
 
     body = await request.json()
     parsed = parse_scim_user(body)
+    prior_provider = user.auth_provider
 
     if parsed["email"] and parsed["email"] != user.email:
         user.email = parsed["email"]
@@ -270,6 +286,8 @@ async def update_user(
     elif parsed["active"] and user.auth_provider == "deactivated":
         user.auth_provider = "scim"
 
+    if (prior_provider == "deactivated") != (user.auth_provider == "deactivated"):
+        await _fence_account_transition(db, user.id)
     await db.commit()
 
     base_url = str(request.base_url).rstrip("/") + "/api/v1/scim"
@@ -295,6 +313,9 @@ async def delete_user(
 
     email = user.email
     user_id_str = str(user.id)
+    # Match the project/read -> scanner -> user lock order before shell deletion.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+    await db.execute(text("SELECT singleton FROM mobile_backfill_cursor WHERE singleton=true FOR UPDATE"))
     # Same account deletion as the admin route: the row becomes a scrubbed
     # shell so authored records and telemetry keep resolving.
     try:
@@ -398,6 +419,7 @@ async def patch_user(
             media_type=SCIM_CONTENT_TYPE,
         )
 
+    prior_provider = user.auth_provider
     for operation in operations:
         op = operation.get("op", "")
         path = operation.get("path")
@@ -410,6 +432,8 @@ async def patch_user(
                 media_type=SCIM_CONTENT_TYPE,
             )
 
+    if (prior_provider == "deactivated") != (user.auth_provider == "deactivated"):
+        await _fence_account_transition(db, user.id)
     await db.commit()
 
     base_url = str(request.base_url).rstrip("/") + "/api/v1/scim"

@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, EmailStr, field_validator
 
@@ -106,6 +108,21 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int  # seconds
+    # Only populated for a centrally verified/issued mobile refresh pair.
+    client_id: Literal["observal-mobile"] | None = None
+    audience: Literal["observal-mobile-activity-v1"] | None = None
+    scope: Literal["mobile:read"] | None = None
+
+
+class MobileCredentialProof(BaseModel):
+    """Proof from the authenticated server, never from an unverified JWT decode."""
+
+    token_type: Literal["bearer"] = "bearer"
+    client_id: Literal["observal-mobile"] = "observal-mobile"
+    audience: Literal["observal-mobile-activity-v1"] = "observal-mobile-activity-v1"
+    scope: Literal["mobile:read"] = "mobile:read"
+    subject_id: uuid.UUID
+    device_id: str
 
 
 class RefreshRequest(BaseModel):
@@ -154,6 +171,8 @@ class DeviceAuthResponse(BaseModel):
     user_code: str
     verification_uri: str
     verification_uri_complete: str
+    # Server-approved initial browser origin; never an IdP redirect allowlist.
+    verification_origins: list[str] | None = None
     expires_in: int
     interval: int
 

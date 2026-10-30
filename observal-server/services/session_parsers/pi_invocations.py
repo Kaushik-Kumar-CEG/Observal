@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Naraen Rammoorthi
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Pi MCP activity facts from canonical session JSONL source records only.
@@ -52,20 +53,18 @@ def _name(value: object) -> str:
 
 
 def _event_time(record: dict, row: Mapping[str, object]) -> datetime | None:
-    for value in (record.get("timestamp"), row.get("timestamp")):
-        if isinstance(value, datetime):
-            parsed = value
-        elif isinstance(value, str):
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-        else:
-            continue
-        if parsed.year == 1970:
-            continue
-        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
-    return None
+    # Do not infer a source event's time from a neighbouring ClickHouse row.
+    del row
+    value = record.get("timestamp")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or not 1971 <= parsed.year < 2100:
+        return None
+    return parsed.astimezone(UTC)
 
 
 class _Result:

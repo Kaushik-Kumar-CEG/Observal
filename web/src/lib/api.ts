@@ -116,6 +116,13 @@ import type {
 	InboxCountOptions,
 	InboxCounts,
 	InboxFilters,
+	InboxState,
+	FollowBrowserActionChallenge,
+	FollowWriteApprovalRequest,
+	FollowWriteApprovalResponse,
+	FollowConsentState,
+	FollowConsentRequest,
+	FollowConsentResponse,
 } from "./types";
 import { sessionExpiredLoginUrl } from "./safe-next";
 
@@ -123,6 +130,7 @@ const API = "/api/v1";
 
 const STORAGE_KEY_ACCESS_TOKEN = "observal_access_token";
 const STORAGE_KEY_REFRESH_TOKEN = "observal_refresh_token";
+const STORAGE_KEY_REFRESH_REJECTED = "observal_refresh_rejected";
 const STORAGE_KEY_USER_ROLE = "observal_user_role";
 const STORAGE_KEY_USER_NAME = "observal_user_name";
 const STORAGE_KEY_USER_EMAIL = "observal_user_email";
@@ -166,12 +174,14 @@ export function refreshIsForAnotherAccount(): boolean {
 export function setTokens(accessToken: string, refreshToken: string) {
 	const actor = tokenSubject(accessToken);
 	if (actor) sessionStorage.setItem(STORAGE_KEY_TAB_ACTOR, actor);
+	sessionStorage.removeItem(STORAGE_KEY_REFRESH_REJECTED);
 	sessionStorage.setItem(STORAGE_KEY_ACCESS_TOKEN, accessToken);
 	localStorage.setItem(STORAGE_KEY_REFRESH_TOKEN, refreshToken);
 	window.dispatchEvent(new Event("storage"));
 }
 
 export function clearSession() {
+	sessionStorage.removeItem(STORAGE_KEY_REFRESH_REJECTED);
 	sessionStorage.removeItem(STORAGE_KEY_ACCESS_TOKEN);
 	sessionStorage.removeItem(STORAGE_KEY_TAB_ACTOR);
 	localStorage.removeItem(STORAGE_KEY_REFRESH_TOKEN);
@@ -239,38 +249,87 @@ let _refreshPromise: Promise<RefreshResult> | null = null;
 
 type RefreshResult = "ok" | "rejected" | "network_error" | "account_changed";
 
+// Without Web Locks a 401 cannot prove the shared token is invalid: another
+// tab may still be finishing its rotation. Fail closed in THIS tab only.
+function rejectTabRefresh() {
+	sessionStorage.removeItem(STORAGE_KEY_ACCESS_TOKEN);
+	sessionStorage.setItem(STORAGE_KEY_REFRESH_REJECTED, "1");
+	window.dispatchEvent(new Event("storage"));
+}
+
 async function _tryRefreshToken(): Promise<RefreshResult> {
-	const refreshToken = getRefreshToken();
-	if (!refreshToken) return "rejected";
-
-	if (refreshIsForAnotherAccount()) {
-		// Another tab signed in as a different account. Drop only this tab's bearer: the shared
-		// refresh token belongs to that account, and this tab must not replay as them.
-		sessionStorage.removeItem(STORAGE_KEY_ACCESS_TOKEN);
-		window.dispatchEvent(new Event("observal:session-cleared"));
-		window.dispatchEvent(new Event("storage"));
-		return "account_changed";
-	}
-
-	try {
-		const res = await fetch(`${API}/auth/token/refresh`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ refresh_token: refreshToken }),
-		});
-
-		if (!res.ok) return "rejected";
-
-		const data = await res.json();
-		// Sign-out here or in another tab clears the stored refresh token while this request is in
-		// flight. Writing the response back would restore the session, so drop it. "network_error"
-		// makes the caller retry with whatever token is stored now, if any.
-		if (getRefreshToken() !== refreshToken) return "network_error";
-		setTokens(data.access_token, data.refresh_token);
-		return "ok";
-	} catch {
+	if (typeof window === "undefined") return "rejected";
+	if (sessionStorage.getItem(STORAGE_KEY_REFRESH_REJECTED)) return "rejected";
+	const locked = !!navigator.locks?.request;
+	const rotate = async (): Promise<RefreshResult> => {
+		// Read immediately before each attempt. With Web Locks, this happens
+		// after acquiring the lock and sees a previous tab's rotation.
+		for (let attempt = 0; attempt < 2; attempt++) {
+			// Shared localStorage can belong to a different account after another
+			// tab signs in. Never use its refresh token for this tab's actor.
+			if (refreshIsForAnotherAccount()) {
+				rejectTabRefresh();
+				return "account_changed";
+			}
+			const refreshToken = getRefreshToken();
+			if (!refreshToken) {
+				if (locked) clearSession();
+				else rejectTabRefresh();
+				return "rejected";
+			}
+			const controller = new AbortController();
+			const timeout = window.setTimeout(() => controller.abort(), 10_000);
+			try {
+				const res = await fetch(`${API}/auth/token/refresh`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ refresh_token: refreshToken }),
+					signal: controller.signal,
+				});
+				if (res.ok) {
+					const data = await res.json();
+					// Do not overwrite a newer login or rotation from another tab.
+					if (getRefreshToken() !== refreshToken) continue;
+					const actor = sessionStorage.getItem(STORAGE_KEY_TAB_ACTOR);
+					if (actor && tokenSubject(data.access_token) !== actor) {
+						rejectTabRefresh();
+						return "account_changed";
+					}
+					setTokens(data.access_token, data.refresh_token);
+					return "ok";
+				}
+				// Rate limits and server failures are not evidence of an invalid session.
+				if (![400, 401, 403].includes(res.status)) return "network_error";
+				if (getRefreshToken() !== refreshToken) continue;
+				// Only a Web Lock makes rejection authoritative across tabs. On the
+				// fallback path no bounded wait can rule out an in-flight winner.
+				if (locked) clearSession();
+				else rejectTabRefresh();
+				return "rejected";
+			} catch {
+				return "network_error";
+			} finally {
+				window.clearTimeout(timeout);
+			}
+		}
+		// A newer token appeared during a rejection; leave it intact and retry later.
 		return "network_error";
+	};
+
+	if (locked) {
+		try {
+			const controller = new AbortController();
+			const timeout = window.setTimeout(() => controller.abort(), 15_000);
+			try {
+				return await navigator.locks.request("observal-refresh-token", { signal: controller.signal }, rotate);
+			} finally {
+				window.clearTimeout(timeout);
+			}
+		} catch {
+			return "network_error";
+		}
 	}
+	return rotate();
 }
 
 /**
@@ -278,12 +337,16 @@ async function _tryRefreshToken(): Promise<RefreshResult> {
  * Returns true if the access token was restored successfully.
  */
 export async function refreshAccessToken(): Promise<boolean> {
-	const result = await _tryRefreshToken();
+	const result = await refreshAccessTokenWithReason();
 	return result === "ok";
 }
 
 export async function refreshAccessTokenWithReason(): Promise<RefreshResult> {
-	return _tryRefreshToken();
+	// Share the rotation with the request wrapper and other tabs' mounted guards.
+	if (!_refreshPromise) {
+		_refreshPromise = _tryRefreshToken().finally(() => { _refreshPromise = null; });
+	}
+	return _refreshPromise;
 }
 
 async function decodeResponse<T>(response: Response, fileResponse: boolean): Promise<T> {
@@ -298,12 +361,15 @@ async function request<T = unknown>(
 	path: string,
 	body?: unknown,
 	fileResponse = false,
+	browserAction?: { nonce: string; token: string },
+	pinnedToken?: string,
 ): Promise<T> {
 	const headers: Record<string, string> = {
 		"Content-Type": "application/json",
 	};
-	const token = getAccessToken();
+	const token = pinnedToken ?? browserAction?.token ?? getAccessToken();
 	if (token) headers["Authorization"] = `Bearer ${token}`;
+	if (browserAction) headers["X-Observal-Browser-Action"] = browserAction.nonce;
 
 	let res: Response | undefined;
 	for (let attempt = 0; attempt < 2; attempt++) {
@@ -313,7 +379,7 @@ async function request<T = unknown>(
 			body: body !== undefined ? JSON.stringify(body) : undefined,
 			cache: "no-store",
 		});
-		if (res.status < 500) break;
+		if (res.status < 500 || browserAction) break;
 		// Brief pause before retry on 5xx
 		if (attempt === 0) await new Promise((r) => setTimeout(r, 500));
 	}
@@ -321,14 +387,8 @@ async function request<T = unknown>(
 
 	if (!response.ok) {
 		// Auto-refresh on 401 (except for auth endpoints where 401 means bad credentials)
-		if (response.status === 401 && !path.startsWith("/auth/")) {
-			// Deduplicate concurrent refresh attempts
-			if (!_refreshPromise) {
-				_refreshPromise = _tryRefreshToken().finally(() => {
-					_refreshPromise = null;
-				});
-			}
-			const refreshResult = await _refreshPromise;
+		if (response.status === 401 && !path.startsWith("/auth/") && !browserAction && !pinnedToken) {
+			const refreshResult = await refreshAccessTokenWithReason();
 
 			if (refreshResult === "ok") {
 				// Retry the original request with new token
@@ -354,9 +414,8 @@ async function request<T = unknown>(
 				throw new Error("Network unavailable");
 			}
 
-			// Real rejection: session is truly expired. An account switch in another tab leaves
-			// the shared login alone.
-			if (refreshResult !== "account_changed") clearSession();
+			// Rejection already cleared the locked session or isolated this tab;
+			// account switches must never clear the other tab's shared login.
 			if (typeof window !== "undefined") {
 				window.location.href = sessionExpiredLoginUrl();
 				return new Promise<T>(() => {});
@@ -477,8 +536,16 @@ export const auth = {
 		}>("/auth/whoami"),
 	exchangeCode: (body: { code: string }) =>
 		post<AuthResponse>("/auth/exchange", body),
-	deviceConfirm: (userCode: string) =>
-		post<{ message: string }>("/auth/device/confirm", { user_code: userCode }),
+	devicePreview: (userCode: string) =>
+		get<import("./types").DeviceCodePreview>(`/auth/device/preview?code=${encodeURIComponent(userCode)}`),
+	deviceConfirm: async (userCode: string, clientKind: "phone" | "terminal") => {
+		if (clientKind === "terminal") return post<{ message: string }>("/auth/device/confirm", { user_code: userCode });
+		const token = getAccessToken();
+		if (!token) throw new Error("Browser session unavailable");
+		const intent = await request<{ nonce: string }>("POST", "/auth/device/intent", { user_code: userCode }, false, undefined, token);
+		if (!intent.nonce) throw new Error("Phone sign-in action unavailable");
+		return request<{ message: string }>("POST", "/auth/device/confirm", { user_code: userCode }, false, { nonce: intent.nonce, token });
+	},
 	changePassword: (body: { current_password: string; new_password: string }) =>
 		put<{ message: string; exchange_code: string }>("/auth/profile/password", body),
 	uploadAvatar: (body: { avatar_url: string }) =>
@@ -488,6 +555,62 @@ export const auth = {
 		get<E2eStatusResult>(
 			`/auth/sso/diagnostics/${encodeURIComponent(corrId)}`,
 		),
+};
+
+// Treat an expired JWT as unusable before requesting proof. Opaque tokens in local
+// development are left to the server; a challenge 401 may refresh once below.
+function accessTokenExpired(token: string): boolean {
+	try {
+		const payload = token.split(".")[1];
+		const expiry = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))).exp;
+		return typeof expiry === "number" && expiry * 1000 <= Date.now() + 30_000;
+	} catch {
+		return false;
+	}
+}
+
+function browserSessionError(): Error & { status: number } {
+	return Object.assign(new Error("Browser session unavailable"), { status: 401 });
+}
+
+// Action proof lives only in this call stack, never in storage, URL, or shared query cache.
+async function followBrowserAction<T>(action: FollowBrowserActionChallenge["action"], body: unknown, path: string): Promise<T> {
+	let token = getAccessToken();
+	if (!token || accessTokenExpired(token)) {
+		const result = await refreshAccessTokenWithReason();
+		if (result === "rejected") throw browserSessionError();
+		if (result === "network_error") throw new Error("Network unavailable");
+		token = getAccessToken();
+	}
+	if (!token) throw browserSessionError();
+	let challenge: FollowBrowserActionChallenge;
+	try {
+		challenge = await request<FollowBrowserActionChallenge>(
+			"GET", `/mobile-follow-sync/v1/browser-action-challenge?action=${action}`, undefined, false, undefined, token,
+		);
+	} catch (error) {
+		// A server-rejected JWT can be stale even if its client-side expiry is not.
+		// Only retry the nonce request; never replay a write after a failed POST.
+		if ((error as Error & { status?: number }).status !== 401) throw error;
+		const result = await refreshAccessTokenWithReason();
+		if (result === "rejected") throw browserSessionError();
+		if (result === "network_error") throw new Error("Network unavailable");
+		token = getAccessToken();
+		if (!token) throw browserSessionError();
+		challenge = await request<FollowBrowserActionChallenge>(
+			"GET", `/mobile-follow-sync/v1/browser-action-challenge?action=${action}`, undefined, false, undefined, token,
+		);
+	}
+	if (challenge.action !== action || !challenge.nonce) throw new Error("Browser action challenge unavailable");
+	return request<T>("POST", path, body, false, { nonce: challenge.nonce, token });
+}
+
+export const mobileFollow = {
+	approveWrite: (body: FollowWriteApprovalRequest) =>
+		followBrowserAction<FollowWriteApprovalResponse>("write-approval", body, "/mobile-follow-sync/v1/write-approval"),
+	consentState: () => get<FollowConsentState>("/mobile-follow-sync/v1/consent/state"),
+	acceptConsent: (body: FollowConsentRequest) =>
+		followBrowserAction<FollowConsentResponse>("consent", body, "/mobile-follow-sync/v1/consent"),
 };
 
 // ── Registry (all 8 types) ─────────────────────────────────────────

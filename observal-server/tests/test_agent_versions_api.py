@@ -5,9 +5,8 @@
 
 """Tests for the agent versioning API endpoints.
 
-Uses MagicMock for AsyncSession — no real database required.
-Calls standalone async functions directly (same pattern as
-test_component_versions_api.py).
+Standalone version handlers use MagicMock for AsyncSession; review decisions
+use the supported HTTP API backed by an isolated SQLite database.
 """
 
 from __future__ import annotations
@@ -319,9 +318,10 @@ def create_release_dependencies():
         patch(
             "services.model_resolver.resolve_model_for_harness", new=AsyncMock(return_value=("claude-3-5-sonnet", []))
         ),
-        patch("api.routes.agent_versions.inbox.on_publish", new=AsyncMock(return_value=0)) as notification,
+        patch("api.routes.agent_versions.submit_for_review", new=AsyncMock()) as review,
     ):
-        yield pins, lock, notification
+        review.return_value.number = 42
+        yield pins, lock, review
 
 
 @pytest.mark.asyncio
@@ -375,6 +375,9 @@ async def test_create_version_happy_path(create_release_dependencies):
 
     assert result["version"] == SEMVER_VALID
     assert result["status"] == AgentStatus.pending.value
+    assert result["review_number"] == 42
+    assert result["review_url"] == "/review/42"
+    assert create_release_dependencies[2].await_args.args[1:4] == ("agent", agent, db.add.call_args.args[0])
     db.add.assert_called()
     db.commit.assert_called_once()
     for dependency in create_release_dependencies:
@@ -588,150 +591,59 @@ async def test_create_version_warns_multiple_pending(create_release_dependencies
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def review_notification():
-    # The inbox service's nested transaction is tested independently.
-    with patch("api.routes.agent_versions.inbox.on_review_decided", new=AsyncMock(return_value=0)) as notify:
-        yield notify
+@pytest.mark.asyncio
+async def test_review_version_approve_updates_latest(version_review_api):
+    """Approval and publication through the review API promote the agent release."""
+    from models.agent import Agent, AgentVersion
+
+    client, reviews, factory = version_review_api
+    number, agent_id, version_id = reviews["agent"]
+    verdict = await client.post(f"/api/v1/reviews/{number}/submissions", json={"verdict": "approve"})
+    assert verdict.status_code == 201, verdict.text
+    published = await client.post(f"/api/v1/reviews/{number}/publish", json={})
+    assert published.status_code == 200, published.text
+    assert published.json()["state"] == "published"
+    async with factory() as db:
+        version = await db.get(AgentVersion, version_id)
+        assert version.status == AgentStatus.approved
+        assert version.reviewed_by is not None
+        assert (await db.get(Agent, agent_id)).latest_version_id == version_id
 
 
 @pytest.mark.asyncio
-async def test_review_version_approve_updates_latest(review_notification):
-    """Approving a pending version sets agent.latest_version_id."""
-    from api.routes.agent_versions import _review_agent_version
-    from schemas.agent import AgentVersionReviewRequest
+async def test_review_version_reject_stores_reason(version_review_api):
+    """Closing a review rejects the agent release and persists the reason."""
+    from models.agent import AgentVersion
 
-    owner_id = uuid.uuid4()
-    agent = _make_agent(owner_id)
-    ver = _make_version(agent.id, status=AgentStatus.pending)
-    agent.latest_version = ver
-    agent.latest_version_id = ver.id
-
-    reviewer = _make_user("reviewer")
-    req = AgentVersionReviewRequest(action="approve", reason=None)
-
-    db = AsyncMock()
-    ver_result = MagicMock()
-    ver_result.scalar_one_or_none.return_value = ver
-    db.execute = AsyncMock(return_value=ver_result)
-    db.commit = AsyncMock()
-
-    with (
-        patch("api.routes.agent_versions._load_agent", new=AsyncMock(return_value=agent)),
-        patch("api.routes.agent_versions.audit", new=AsyncMock()),
-    ):
-        result = await _review_agent_version(
-            agent_id=str(agent.id),
-            version=SEMVER_VALID,
-            req=req,
-            db=db,
-            current_user=reviewer,
-        )
-
-    assert result["new_status"] == AgentStatus.approved.value
-    review_notification.assert_awaited_once()
-    db.commit.assert_called_once()
+    client, reviews, factory = version_review_api
+    number, _, version_id = reviews["agent"]
+    result = await client.post(f"/api/v1/reviews/{number}/close", json={"reason": "Prompt violates policy"})
+    assert result.status_code == 200, result.text
+    assert result.json()["state"] == "closed"
+    async with factory() as db:
+        version = await db.get(AgentVersion, version_id)
+        assert version.status == AgentStatus.rejected
+        assert version.rejection_reason == "Prompt violates policy"
 
 
 @pytest.mark.asyncio
-async def test_review_version_reject_stores_reason(review_notification):
-    """Rejecting a pending version stores the rejection reason."""
-    from api.routes.agent_versions import _review_agent_version
-    from schemas.agent import AgentVersionReviewRequest
-
-    owner_id = uuid.uuid4()
-    agent = _make_agent(owner_id)
-    ver = _make_version(agent.id, status=AgentStatus.pending)
-
-    reviewer = _make_user("reviewer")
-    req = AgentVersionReviewRequest(action="reject", reason="Prompt violates policy")
-
-    db = AsyncMock()
-    ver_result = MagicMock()
-    ver_result.scalar_one_or_none.return_value = ver
-    db.execute = AsyncMock(return_value=ver_result)
-    db.commit = AsyncMock()
-
-    with (
-        patch("api.routes.agent_versions._load_agent", new=AsyncMock(return_value=agent)),
-        patch("api.routes.agent_versions.audit", new=AsyncMock()),
-    ):
-        result = await _review_agent_version(
-            agent_id=str(agent.id),
-            version=SEMVER_VALID,
-            req=req,
-            db=db,
-            current_user=reviewer,
-        )
-
-    assert result["new_status"] == AgentStatus.rejected.value
-    assert ver.rejection_reason == "Prompt violates policy"
-    review_notification.assert_awaited_once()
-    db.commit.assert_called_once()
+async def test_closed_agent_review_cannot_publish_409(version_review_api):
+    """A closed review cannot be published again (409 under the review API)."""
+    client, reviews, _ = version_review_api
+    number, _, _ = reviews["agent"]
+    closed = await client.post(f"/api/v1/reviews/{number}/close", json={"reason": "Not ready"})
+    assert closed.status_code == 200, closed.text
+    result = await client.post(f"/api/v1/reviews/{number}/publish", json={})
+    assert result.status_code == 409, result.text
 
 
 @pytest.mark.asyncio
-async def test_review_version_non_pending_422():
-    """Reviewing a non-pending version raises 422."""
-    from fastapi import HTTPException
-
-    from api.routes.agent_versions import _review_agent_version
-    from schemas.agent import AgentVersionReviewRequest
-
-    owner_id = uuid.uuid4()
-    agent = _make_agent(owner_id)
-    ver = _make_version(agent.id, status=AgentStatus.approved)  # already approved
-
-    reviewer = _make_user("reviewer")
-    req = AgentVersionReviewRequest(action="approve", reason=None)
-
-    db = AsyncMock()
-    ver_result = MagicMock()
-    ver_result.scalar_one_or_none.return_value = ver
-    db.execute = AsyncMock(return_value=ver_result)
-
-    with (
-        patch("api.routes.agent_versions._load_agent", new=AsyncMock(return_value=agent)),
-        pytest.raises(HTTPException) as exc,
-    ):
-        await _review_agent_version(
-            agent_id=str(agent.id),
-            version=SEMVER_VALID,
-            req=req,
-            db=db,
-            current_user=reviewer,
-        )
-
-    assert exc.value.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_review_version_not_found_404():
-    """Reviewing a non-existent version raises 404."""
-    from fastapi import HTTPException
-
-    from api.routes.agent_versions import _review_agent_version
-    from schemas.agent import AgentVersionReviewRequest
-
-    agent = _make_agent()
-    reviewer = _make_user("reviewer")
-    req = AgentVersionReviewRequest(action="approve", reason=None)
-
-    db = _db_returning_one(None)
-
-    with (
-        patch("api.routes.agent_versions._load_agent", new=AsyncMock(return_value=agent)),
-        pytest.raises(HTTPException) as exc,
-    ):
-        await _review_agent_version(
-            agent_id=str(agent.id),
-            version="9.9.9",
-            req=req,
-            db=db,
-            current_user=reviewer,
-        )
-
-    assert exc.value.status_code == 404
+async def test_review_version_not_found_404(version_review_api):
+    """A missing review number cannot be approved via the public review API."""
+    client, reviews, _ = version_review_api
+    number, _, _ = reviews["agent"]
+    response = await client.post(f"/api/v1/reviews/{number + 100}/submissions", json={"verdict": "approve"})
+    assert response.status_code == 404, response.text
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Yash Gadgil <yashgadgil08@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Audit middleware: captures every request lifecycle via loguru."""
@@ -26,8 +27,6 @@ class AuditMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         start = time.perf_counter()
         event_id = str(uuid.uuid4())
-        request_id = getattr(request.state, "request_id", "")
-
         sensitivity = classify_route(request.method, request.url.path)
         if sensitivity == "skip":
             return await call_next(request)
@@ -35,8 +34,29 @@ class AuditMiddleware(BaseHTTPMiddleware):
         # Real IP is resolved by TrustedProxyMiddleware into request.scope["client"]
         ip = request.client.host if request.client else "127.0.0.1"
 
+        capability = request.url.path == "/api/v1/mobile-activity/v1/capabilities" and request.method == "GET"
         response = await call_next(request)
+        # RequestIDMiddleware is inside AuditMiddleware in production, so it sets
+        # request.state.request_id only while call_next runs.
+        request_id = getattr(request.state, "request_id", "")
         duration_ms = (time.perf_counter() - start) * 1000
+        if capability:
+            # call_next returning means the response is prepared, NOT that the
+            # client received the body. Route cancellation may be swallowed by
+            # BaseHTTPMiddleware; do not infer a caller abort here.
+            # Never log credentials, challenge codes, response bodies or query strings.
+            ingress = (
+                "unauthorized"
+                if response.status_code == 401
+                else getattr(request.state, "mobile_capability_ingress", "closed")
+                if response.status_code == 200
+                else "denied"
+                if response.status_code in (403, 503)
+                else "error"
+            )
+            optic.info(
+                "mobile_capability_ingress: request_id={} stage=response_prepared outcome={}", request_id, ingress
+            )
 
         user = getattr(request.state, "audit_user", None)
 

@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Focused coverage for deployment-wide admin user management routes."""
@@ -66,7 +67,17 @@ def _many(values):
 
 def _db(*results):
     database = MagicMock()
-    database.execute = AsyncMock(side_effect=list(results)) if results else AsyncMock()
+    pending = iter(results)
+
+    async def execute(statement):
+        if "pg_advisory_xact_lock" in str(statement) or "mobile_backfill_cursor" in str(statement):
+            return MagicMock()
+        result = next(pending)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    database.execute = AsyncMock(side_effect=execute) if results else AsyncMock()
     database.scalar = AsyncMock()
     database.commit = AsyncMock()
     database.rollback = AsyncMock()
@@ -1021,7 +1032,11 @@ async def test_delete_user_scrubs_shell_commits_then_revokes_and_records_event(m
         database.execute.await_args_list[0].args[0], select(User).where(User.id == TARGET_ID, live_users())
     )
     # Rows the database used to cascade-delete with the user are removed.
-    executed = [call.args[0] for call in database.execute.await_args_list[1:]]
+    executed = [
+        call.args[0]
+        for call in database.execute.await_args_list[1:]
+        if "pg_advisory_xact_lock" not in str(call.args[0]) and "mobile_backfill_cursor" not in str(call.args[0])
+    ]
     if is_admin:
         lock = executed.pop(0)
         assert lock._for_update_arg is not None

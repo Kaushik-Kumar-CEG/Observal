@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+"""Opt-in 060→061 disposable PostgreSQL upgrade leaves old facts fail-closed."""
+
+import os
+import subprocess
+import sys
+import uuid
+
+import pytest
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import create_async_engine
+
+pytestmark = pytest.mark.skipif(os.getenv("MOBILE_MIGRATION_SCRATCH") != "1", reason="disposable loopback PG only")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_existing_publication_gets_null_retained_floor_on_upgrade():
+    from models import Base
+
+    base = make_url(os.environ["DATABASE_URL"])
+    assert (base.host, base.database) == ("127.0.0.1", "observal")
+    assert 15000 <= base.port < 16000 and base.port == int(os.environ["MOBILE_MIGRATION_SCRATCH_PORT"])
+    name = "mobile_061_upgrade_scratch_" + uuid.uuid4().hex[:12]
+    admin = create_async_engine(base, isolation_level="AUTOCOMMIT")
+    created = False
+    try:
+        async with admin.connect() as conn:
+            if await conn.scalar(text("SELECT to_regclass('public.users')")) is not None:
+                # Never run this scratch fixture against a populated or open
+                # base database, even though it creates its own child DB.
+                assert (
+                    await conn.scalar(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'"))
+                    is True
+                )
+                assert await conn.scalar(text("SELECT count(*) FROM users WHERE email NOT LIKE '%@demo.example'")) == 0
+            await conn.execute(text("CREATE DATABASE " + name))
+            created = True
+        target = base.set(database=name)
+        schema = create_async_engine(target)
+        try:
+            async with schema.begin() as conn:
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+                await conn.run_sync(Base.metadata.create_all)
+        finally:
+            await schema.dispose()
+        env = os.environ.copy()
+        env["DATABASE_URL"] = target.render_as_string(hide_password=False)
+        for arguments in (
+            ("stamp", "053_mcp_webhook_sync_timestamps"),
+            ("upgrade", "069_mobile_pi_hook_facts"),
+        ):
+            subprocess.run(
+                [sys.executable, "-m", "alembic", *arguments], env=env, check=True, capture_output=True, timeout=110
+            )
+        target_db = create_async_engine(target)
+        try:
+            async with target_db.begin() as db:
+                actor = uuid.uuid4()
+                await db.execute(
+                    text(
+                        "INSERT INTO users(id,email,username,name,role,created_at) "
+                        "VALUES (:id,:email,:username,'Synthetic', 'user'::userrole,now())"
+                    ),
+                    {
+                        "id": actor,
+                        "email": "upgrade-" + actor.hex + "@example.invalid",
+                        "username": "upgrade_" + actor.hex[:12],
+                    },
+                )
+                await db.execute(
+                    text(
+                        "INSERT INTO mobile_session_publications(project_id,user_id,harness,session_id,"
+                        "source_revision,status) VALUES ('default',:id,'pi','synthetic-no-source',:revision,'complete')"
+                    ),
+                    {"id": actor, "revision": "a" * 64},
+                )
+        finally:
+            await target_db.dispose()
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "076_mobile_short_retention_fence"],
+            env=env,
+            check=True,
+            capture_output=True,
+            timeout=90,
+        )
+        orphan = uuid.uuid4()
+        pre_068 = create_async_engine(target)
+        try:
+            async with pre_068.begin() as db:
+                await db.execute(
+                    text(
+                        "INSERT INTO users(id,email,username,name,role,created_at) "
+                        "VALUES (:id,:email,:username,'Orphan', 'user'::userrole,now())"
+                    ),
+                    {
+                        "id": orphan,
+                        "email": f"orphan-{orphan.hex}@example.invalid",
+                        "username": f"orphan_{orphan.hex[:12]}",
+                    },
+                )
+                await db.execute(
+                    text(
+                        "INSERT INTO mobile_source_line_highwater(project_id,user_id,harness,session_id,max_line) "
+                        "VALUES ('default',:id,'pi','orphan-old-user',3)"
+                    ),
+                    {"id": orphan},
+                )
+                await db.execute(
+                    text(
+                        "INSERT INTO mobile_source_final_receipts"
+                        "(project_id,user_id,harness,session_id,final_line,source_hash) "
+                        "VALUES ('default',:id,'pi','orphan-old-user',3,:hash)"
+                    ),
+                    {"id": orphan, "hash": "a" * 64},
+                )
+                await db.execute(text("DELETE FROM users WHERE id=:id"), {"id": orphan})
+                await db.execute(
+                    text(
+                        "UPDATE mobile_backfill_cursor SET project_id='default',user_id=:orphan,"
+                        "session_id='orphan-old-user' WHERE singleton=true"
+                    ),
+                    {"orphan": str(orphan)},
+                )
+        finally:
+            await pre_068.dispose()
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"], env=env, check=True, capture_output=True, timeout=90
+        )
+        verify = create_async_engine(target)
+        try:
+            async with verify.connect() as db:
+                assert (
+                    await db.scalar(text("SELECT version_num FROM alembic_version"))
+                    == "080_mobile_follow_browser_proof"
+                )
+                assert await db.scalar(text("SELECT count(*) FROM first_admin_provision_audit")) == 0
+                for table in ("mobile_source_line_highwater", "mobile_source_final_receipts"):
+                    assert await db.scalar(text(f"SELECT count(*) FROM {table} WHERE user_id=:id"), {"id": orphan}) == 0
+                checkpoint = (
+                    await db.execute(
+                        text(
+                            "SELECT project_id,user_id,session_id,skip_count FROM mobile_backfill_cursor WHERE singleton=true"
+                        )
+                    )
+                ).one()
+                assert tuple(checkpoint) == ("", "", "", 0)
+                assert (
+                    await db.scalar(
+                        text(
+                            "SELECT source_retained_until FROM mobile_session_publications "
+                            "WHERE session_id='synthetic-no-source'"
+                        )
+                    )
+                    is None
+                )
+                assert (
+                    await db.scalar(
+                        text(
+                            "SELECT count(*) FROM mobile_session_publications "
+                            "WHERE session_id='synthetic-no-source' "
+                            "AND source_retained_until>now()"
+                        )
+                    )
+                    == 0
+                )
+                assert (
+                    await db.scalar(text("SELECT blocked FROM mobile_read_controls WHERE project_id='default'")) is True
+                )
+        finally:
+            await verify.dispose()
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "075_mobile_scope_retention_clock"],
+            env=env,
+            capture_output=True,
+            timeout=60,
+        )
+        assert downgrade.returncode != 0, "070 privacy receipts must block downgrade to 066"
+        assert b"Cannot discard follow-sync consent, privacy receipts or erasure fences" in downgrade.stderr
+    finally:
+        if created:
+            async with admin.connect() as conn:
+                await conn.execute(text("DROP DATABASE " + name + " WITH (FORCE)"))
+        await admin.dispose()

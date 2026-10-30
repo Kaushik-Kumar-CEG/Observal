@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
 
@@ -6,7 +7,8 @@ import { Suspense, useState, useEffect, useCallback } from "react";
 import { useRouter, useSearch } from "@tanstack/react-router";
 import { Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
-import { auth } from "@/lib/api";
+import { auth, refreshAccessToken } from "@/lib/api";
+import { useDevicePreview } from "@/hooks/use-device-preview";
 import { useDeploymentConfig } from "@/hooks/use-deployment-config";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,6 +21,9 @@ function DeviceContent() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [selectedCode, setSelectedCode] = useState<string | null>(null);
+  const preview = useDevicePreview(selectedCode);
   const { brandingAppName, brandingLogo, brandingWordmark } = useDeploymentConfig();
 
   const formatCode = useCallback((raw: string): string => {
@@ -30,18 +35,24 @@ function DeviceContent() {
     return limited;
   }, []);
 
-  // Redirect to login if not authenticated
+  // An SSO callback or new tab may have a refresh session but no tab-local access JWT.
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const hasToken = !!sessionStorage.getItem("observal_access_token");
-    if (!hasToken) {
-      const code = codeParam;
-      const directSso = ssoParam === "1";
-      const returnPath = code
-        ? `/device?code=${encodeURIComponent(code)}${directSso ? "&sso=1" : ""}`
-        : `/device${directSso ? "?sso=1" : ""}`;
-      router.navigate({ to: "/login", search: { next: returnPath, ...(directSso ? { sso: "1" } : {}) }, replace: true });
+    let active = true;
+    async function restore() {
+      if (!sessionStorage.getItem("observal_access_token")) await refreshAccessToken();
+      if (!active) return;
+      if (sessionStorage.getItem("observal_access_token")) {
+        setReady(true);
+      } else {
+        const directSso = ssoParam === "1";
+        const returnPath = codeParam
+          ? `/device?code=${encodeURIComponent(codeParam)}${directSso ? "&sso=1" : ""}`
+          : `/device${directSso ? "?sso=1" : ""}`;
+        router.navigate({ to: "/login", search: { next: returnPath, ...(directSso ? { sso: "1" } : {}) }, replace: true });
+      }
     }
+    void restore();
+    return () => { active = false; };
   }, [router, codeParam, ssoParam]);
 
   // Pre-fill code from query parameter
@@ -55,6 +66,7 @@ function DeviceContent() {
   function handleCodeChange(e: React.ChangeEvent<HTMLInputElement>) {
     setUserCode(formatCode(e.target.value));
     setError("");
+    setSelectedCode(null);
   }
 
   async function handleSubmit() {
@@ -65,11 +77,18 @@ function DeviceContent() {
     }
 
     setError("");
+    if (selectedCode !== userCode) {
+      setSelectedCode(userCode);
+      return;
+    }
+    const terminalFallback = preview.isError && (preview.error as Error & { status?: number }).status === 503;
+    if (!preview.data && !terminalFallback) return;
+    const kind = preview.data?.client_kind || "terminal";
     setLoading(true);
     try {
-      await auth.deviceConfirm(userCode);
+      await auth.deviceConfirm(userCode, kind);
       setSuccess(true);
-      toast.success("Device authorized successfully");
+      toast.success(kind === "phone" ? "Phone signed in" : "Terminal authorized");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to authorize device";
       setError(msg);
@@ -80,7 +99,7 @@ function DeviceContent() {
   }
 
   // Don't render form until we know user is authenticated
-  if (typeof window !== "undefined" && !sessionStorage.getItem("observal_access_token")) {
+  if (!ready) {
     return null;
   }
 
@@ -103,7 +122,7 @@ function DeviceContent() {
               </h1>
             )}
             <p className="text-sm text-muted-foreground">
-              Authorize Device
+              Sign in a device
             </p>
           </div>
 
@@ -113,7 +132,9 @@ function DeviceContent() {
               <div className="flex flex-col items-center gap-4 py-4 animate-in">
                 <CheckCircle2 className="h-12 w-12 text-success" />
                 <p className="text-center text-sm text-muted-foreground">
-                  Device authorized! You can close this tab and return to your terminal.
+                  {preview.data?.client_kind === "phone"
+                    ? "Phone sign-in approved. Return to your phone. This did not enable Following; that requires separate consent."
+                    : "Terminal authorized! You can close this tab and return to your terminal."}
                 </p>
               </div>
             ) : (
@@ -126,7 +147,7 @@ function DeviceContent() {
               >
                 <div className="space-y-2 animate-in">
                   <Label htmlFor="user-code">
-                    Enter the code shown in your terminal to authorize this device.
+                    Enter the code shown on your phone or in your terminal.
                   </Label>
                   <Input
                     id="user-code"
@@ -141,6 +162,17 @@ function DeviceContent() {
                   />
                 </div>
 
+                {preview.isPending && selectedCode && <p role="status" className="text-sm text-muted-foreground">Checking code…</p>}
+                {preview.isError && selectedCode && <p role="alert" className="text-sm text-destructive">{(preview.error as Error & { status?: number }).status === 503
+                  ? "Secure phone preview unavailable. Terminal sign-in can still be authorized; phone sign-in requires configured HTTPS."
+                  : "Code unavailable or expired. Check the code and try again."}</p>}
+                {preview.data && selectedCode === userCode && (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    {preview.data.client_kind === "phone"
+                      ? `Sign in phone ending in ${preview.data.device_id_suffix}. Following remains off until you separately consent.`
+                      : "Authorize this terminal to sign in."}
+                  </p>
+                )}
                 {/* Error */}
                 {error && (
                   <div className="flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2.5 text-sm text-destructive animate-in">
@@ -151,11 +183,15 @@ function DeviceContent() {
 
                 {/* Submit */}
                 <div className="animate-in stagger-2">
-                  <Button type="submit" disabled={loading} className="w-full">
+                  <Button type="submit" disabled={loading || (!!selectedCode && preview.isPending) || (!!selectedCode && preview.isError && (preview.error as Error & { status?: number }).status !== 503)} className="w-full">
                     {loading ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
-                      "Authorize Device"
+                      preview.data && selectedCode === userCode
+                        ? preview.data.client_kind === "phone" ? "Sign in phone" : "Authorize terminal"
+                        : preview.isError && (preview.error as Error & { status?: number }).status === 503
+                          ? "Authorize terminal"
+                          : "Check code"
                     )}
                   </Button>
                 </div>

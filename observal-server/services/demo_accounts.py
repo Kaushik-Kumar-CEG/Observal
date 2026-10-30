@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Demo account seeding and lifecycle management.
@@ -14,7 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +41,12 @@ async def seed_demo_accounts(db: AsyncSession) -> int:
     Returns the number of accounts created.  Idempotent - skips accounts
     that already exist.
     """
+    # An explicit opt-out must win even when legacy DEMO_* credentials remain configured.
+    if not settings.SEED_DEMO_ACCOUNTS:
+        return 0
+    from services.first_admin import lock_first_user
+
+    await lock_first_user(db)
     # Bail out if ANY real (non-demo) user exists
     optic.info("seeding demo accounts")
     real_count = await db.scalar(select(func.count()).select_from(User).where(User.is_demo.is_(False)))
@@ -94,6 +101,10 @@ async def cleanup_demo_accounts(db: AsyncSession, new_role: UserRole) -> int:
     else:
         stmt = delete(User).where(User.is_demo.is_(True), User.role == new_role)
 
+    # Demo deletion cascades the same Pi facts and receipt rows as admin/SCIM
+    # deletion. Keep one lock order across all supported user erasure paths.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('mobile-read:default',0))"))
+    await db.execute(text("SELECT singleton FROM mobile_backfill_cursor WHERE singleton=true FOR UPDATE"))
     result = await db.execute(stmt)
     deleted: int = result.rowcount  # type: ignore[assignment]
     if deleted:

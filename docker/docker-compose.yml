@@ -41,6 +41,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.api
     image: ghcr.io/agenticresourceregistry/observal-api:latest
+    # A successful init is not proof after restoring an older database.
+    entrypoint: ["/bin/sh", "-ec", '/app/.venv/bin/python -m services.mobile_boot_preflight --require-schema && exec "$@"', "--"]
     command:
       [
         "/app/.venv/bin/python",
@@ -60,6 +62,7 @@ services:
       - JWT_KEY_DIR=/data/keys
       - MIGRATION_ARTIFACT_ROOT=/data/migration_artifacts
       - SKIP_DDL_ON_STARTUP=true
+      - OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL=${OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL:-0}
       - DEMO_SUPER_ADMIN_EMAIL=${DEMO_SUPER_ADMIN_EMAIL:-super@demo.example}
       - DEMO_SUPER_ADMIN_PASSWORD=${DEMO_SUPER_ADMIN_PASSWORD:-super-changeme}
       - DEMO_ADMIN_EMAIL=${DEMO_ADMIN_EMAIL:-admin@demo.example}
@@ -118,6 +121,7 @@ services:
       -c effective_cache_size=384MB
       -c maintenance_work_mem=64MB
       -c random_page_cost=1.1
+      -c track_commit_timestamp=on
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:
@@ -145,7 +149,10 @@ services:
     volumes:
       - chdata:/var/lib/clickhouse
       - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
-      - ./clickhouse/users.d:/etc/clickhouse-server/users.d
+      # Keep the image's users.d writable for ClickHouse's env-driven default user.
+      # A shared host bind here persists ignored default-user.xml across stacks,
+      # letting one disposable instance replace another's password and break reads.
+      - ./clickhouse/users.d/memory.xml:/etc/clickhouse-server/users.d/memory.xml:ro
     healthcheck:
       test:
         [
@@ -167,7 +174,7 @@ services:
     image: redis:8-alpine
     ports:
       - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
-    command: redis-server --maxmemory 200mb --maxmemory-policy volatile-lru
+    command: redis-server --maxmemory 200mb --maxmemory-policy noeviction
     volumes:
       - redisdata:/data
     healthcheck:
@@ -187,6 +194,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.api
     image: ghcr.io/agenticresourceregistry/observal-api:latest
+    # Refuse a restored/old schema or mobile-enabled off-clock database.
+    entrypoint: ["/bin/sh", "-ec", '/app/.venv/bin/python -m services.mobile_boot_preflight --require-schema && exec "$@"', "--"]
     command:
       [
         "/app/.venv/bin/python",

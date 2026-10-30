@@ -1,5 +1,6 @@
 #cloud-config
 # SPDX-FileCopyrightText: 2026 Tanvi Reddy <reddyplayer22@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 package_update: true
 package_upgrade: true
@@ -45,7 +46,7 @@ write_files:
           restart: unless-stopped
           ports:
             - "6379:6379"
-          command: redis-server --maxmemory 512mb --maxmemory-policy volatile-lru --appendonly yes
+          command: redis-server --maxmemory 512mb --maxmemory-policy noeviction --appendonly yes
           volumes:
             - /data/redis:/data
           deploy:

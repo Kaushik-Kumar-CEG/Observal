@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-FileCopyrightText: 2026 Yash Gadgil <yashgadgil08@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 # Standalone Observal deployment — uses pre-built images from GHCR.
@@ -33,6 +34,8 @@ services:
 
   observal-api:
     image: ghcr.io/agenticresourceregistry/observal-api:${OBSERVAL_VERSION:-latest}
+    # Recheck physical mobile schema after a restore.
+    entrypoint: ["/bin/sh", "-ec", '/app/.venv/bin/python -m services.mobile_boot_preflight --require-schema && exec "$@"', "--"]
     command: ["/app/.venv/bin/python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
       - ./.env
@@ -41,6 +44,7 @@ services:
     environment:
       - JWT_KEY_DIR=/data/keys
       - SKIP_DDL_ON_STARTUP=true
+      - OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL=${OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL:-0}
       - DEMO_SUPER_ADMIN_EMAIL=${DEMO_SUPER_ADMIN_EMAIL:-super@demo.example}
       - DEMO_ADMIN_EMAIL=${DEMO_ADMIN_EMAIL:-admin@demo.example}
       - DEMO_REVIEWER_EMAIL=${DEMO_REVIEWER_EMAIL:-reviewer@demo.example}
@@ -76,6 +80,7 @@ services:
   observal-db:
     restart: unless-stopped
     image: postgres:18
+    command: ["postgres", "-c", "track_commit_timestamp=on"]
     group_add:
       - "${OBSERVAL_SECRET_GID:-1000}"
     ports:
@@ -152,6 +157,8 @@ services:
 
   observal-worker:
     image: ghcr.io/agenticresourceregistry/observal-api:${OBSERVAL_VERSION:-latest}
+    # Refuse old/restored mobile schema and mobile-enabled off-clock DB.
+    entrypoint: ["/bin/sh", "-ec", '/app/.venv/bin/python -m services.mobile_boot_preflight --require-schema && exec "$@"', "--"]
     command: ["/app/.venv/bin/python", "-c", "import asyncio; asyncio.set_event_loop(asyncio.new_event_loop()); from arq import run_worker; from worker import WorkerSettings; run_worker(WorkerSettings)"]
     env_file:
       - ./.env

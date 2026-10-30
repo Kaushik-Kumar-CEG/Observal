@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """OAuth 2.0 Device Authorization Grant (RFC 8628) endpoints.
@@ -35,6 +36,8 @@ from schemas.auth import (
     DeviceConfirmRequest,
     DeviceTokenRequest,
 )
+from services import device_browser_action as browser_action
+from services.jwt_service import MOBILE_AUDIENCE, MOBILE_CLIENT_ID, MOBILE_SCOPE
 from services.redis import get_redis
 
 router = APIRouter(prefix="/api/v1/auth/device", tags=["device-auth"])
@@ -44,6 +47,28 @@ _USER_CODE_ALPHABET = "BCDFGHJKMNPQRSTVWXZ23456789"
 
 _DEVICE_AUTH_TTL = 600  # 10 minutes
 _DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+
+# Redis executes this as one operation; only one poller can consume an
+# approved device grant. Pending/denied grants are left untouched.
+_CONSUME_APPROVED_GRANT = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return nil end
+local ok, grant = pcall(cjson.decode, raw)
+if not ok or grant.status ~= 'approved' then return nil end
+redis.call('DEL', KEYS[1])
+return raw
+"""
+
+_APPROVE_PENDING_GRANT = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local ok, grant = pcall(cjson.decode, raw)
+if not ok or grant.status ~= 'pending' then return 0 end
+grant.status = 'approved'
+grant.user_id = ARGV[1]
+redis.call('SET', KEYS[1], cjson.encode(grant), 'KEEPTTL')
+return 1
+"""
 
 
 def _generate_user_code() -> str:
@@ -63,7 +88,22 @@ def _is_localhost_url(url: str) -> bool:
     return parsed.hostname in ("localhost", "127.0.0.1", "::1") if parsed.hostname else True
 
 
-def _resolve_frontend_url(request: Request) -> str:
+def _explicit_loopback_https(value: str) -> bool:
+    """Only a configured HTTPS loopback with explicit port is a dev origin."""
+    try:
+        parsed = urlparse(value)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+            and parsed.port is not None
+            and parsed.path in ("", "/")
+            and not (parsed.username or parsed.password or parsed.query or parsed.fragment)
+        )
+    except ValueError:
+        return False
+
+
+async def _resolve_frontend_url(request: Request) -> tuple[str, bool]:
     """Derive the frontend base URL for verification links.
 
     Resolution order:
@@ -72,15 +112,15 @@ def _resolve_frontend_url(request: Request) -> str:
       3. Request headers (x-forwarded-proto/host, or Host)
       4. Fallback to http://localhost (local dev only)
     """
-    import services.dynamic_settings as ds
-
-    # 1. Explicitly configured frontend URL
-    configured = ds.get_sync("deployment.frontend_url")
-    if configured and not _is_localhost_url(configured):
-        return configured.rstrip("/")
+    # Read the shared settings store on every challenge. The process-local sync
+    # cache is refreshed only by the API worker that handles an admin write;
+    # other workers otherwise keep issuing stale verification origins forever.
+    configured = await ds.get("deployment.frontend_url")
+    public_url = await ds.get("deployment.public_url")
+    if configured and (not _is_localhost_url(configured) or _explicit_loopback_https(configured)):
+        return configured.rstrip("/"), True
 
     # 2. Derive from public_url if set
-    public_url = ds.get_sync("deployment.public_url")
     if public_url and not _is_localhost_url(public_url):
         parsed = urlparse(public_url)
         scheme = parsed.scheme or "https"
@@ -89,7 +129,7 @@ def _resolve_frontend_url(request: Request) -> str:
         port_suffix = ""
         if parsed.port and parsed.port not in (80, 443):
             port_suffix = f":{parsed.port}"
-        return f"{scheme}://{host}{port_suffix}"
+        return f"{scheme}://{host}{port_suffix}", True
 
     # 3. Infer from request headers (works behind any reverse proxy)
     forwarded_proto = request.headers.get("x-forwarded-proto")
@@ -108,10 +148,10 @@ def _resolve_frontend_url(request: Request) -> str:
             inferred_scheme = "http"
         scheme = forwarded_proto or inferred_scheme
         if not _is_localhost_url(f"{scheme}://{clean_host}"):
-            return f"{scheme}://{clean_host}"
+            return f"{scheme}://{clean_host}", False
 
     # 4. Local dev fallback
-    return "http://localhost"
+    return "http://localhost", False
 
 
 async def _saml_configured(db: AsyncSession) -> bool:
@@ -128,12 +168,17 @@ async def _saml_configured(db: AsyncSession) -> bool:
         return False
 
 
-@router.post("/authorize", response_model=DeviceAuthResponse)
+@router.post("/authorize", response_model=DeviceAuthResponse, response_model_exclude_none=True)
 @limiter.limit("5/minute")
 async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: AsyncSession = Depends(get_db)):
     """Create a device authorization request. Returns device_code + user_code."""
     optic.debug("initiating device auth flow")
     requested_provider = (req.provider or "").lower() if req and req.sso else ""
+    client_id = req.client_id if req else None
+    if client_id not in (None, MOBILE_CLIENT_ID):
+        raise HTTPException(status_code=400, detail="Unknown device client")
+    if client_id == MOBILE_CLIENT_ID and not await ds.get_bool("mobile.auth_enabled"):
+        raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
     if requested_provider in ("google", "github"):
         from api.routes.auth import is_github_oauth_configured, is_google_oauth_configured
 
@@ -145,6 +190,31 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
                 status_code=400,
                 detail=f"{'Google' if requested_provider == 'google' else 'GitHub'} sign-in is not configured on this server",
             )
+    frontend_url, trusted_public_origin = await _resolve_frontend_url(request)
+    verification_origins = None
+    if client_id == MOBILE_CLIENT_ID:
+        parsed = urlparse(frontend_url)
+        safe_local = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+        if (not safe_local and not trusted_public_origin) or (
+            (parsed.scheme != "https" and not safe_local)
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in ("", "/")
+        ):
+            raise HTTPException(status_code=503, detail="Mobile verification origin not configured")
+        try:
+            port = parsed.port
+            hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+        except (ValueError, UnicodeError, AttributeError) as exc:
+            raise HTTPException(status_code=503, detail="Mobile verification origin not configured") from exc
+        if ":" in hostname:
+            hostname = f"[{hostname}]"  # Canonical IPv6 authority, not a URL path.
+        suffix = f":{port}" if port and port != {"http": 80, "https": 443}[parsed.scheme] else ""
+        frontend_url = f"{parsed.scheme}://{hostname}{suffix}"
+        verification_origins = [frontend_url]
     device_code = secrets.token_urlsafe(48)
     user_code = _generate_user_code()
     normalized_code = _normalize_user_code(user_code)
@@ -153,6 +223,8 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
         {
             "user_code": user_code,
             "status": "pending",
+            "client_id": client_id,
+            "device_id": secrets.token_urlsafe(32) if client_id == MOBILE_CLIENT_ID else None,
             "created_at": time.time(),
         }
     )
@@ -167,9 +239,7 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
         optic.error("Redis unavailable during device authorize: {}", e)
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
-    frontend_url = _resolve_frontend_url(request)
-
-    optic.info("device_authorize: code issued, user_code={}", user_code)
+    optic.info("device_authorize: code issued")
     if req and req.sso:
         next_path = f"/device?code={quote(user_code)}&sso=1"
         next_param = quote(next_path, safe="")
@@ -197,6 +267,7 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
             user_code=user_code,
             verification_uri=login_url,
             verification_uri_complete=login_url,
+            verification_origins=verification_origins,
             expires_in=_DEVICE_AUTH_TTL,
             interval=5,
         )
@@ -206,6 +277,7 @@ async def device_authorize(request: Request, req: DeviceAuthRequest = None, db: 
         user_code=user_code,
         verification_uri=f"{frontend_url}/device",
         verification_uri_complete=f"{frontend_url}/device?code={user_code}",
+        verification_origins=verification_origins,
         expires_in=_DEVICE_AUTH_TTL,
         interval=5,
     )
@@ -237,7 +309,11 @@ async def device_token(request: Request, req: DeviceTokenRequest, db: AsyncSessi
     status = data.get("status")
 
     if status == "pending":
-        return JSONResponse(status_code=428, content={"error": "authorization_pending"})
+        # Mobile v1.2 advertises 400 for a pending one-use grant. Preserve
+        # the legacy CLI's 428; the client identity comes from stored
+        # server-issued challenge state, never the poll request body.
+        code = 400 if data.get("client_id") == MOBILE_CLIENT_ID else 428
+        return JSONResponse(status_code=code, content={"error": "authorization_pending"})
 
     if status == "denied":
         try:
@@ -257,25 +333,51 @@ async def device_token(request: Request, req: DeviceTokenRequest, db: AsyncSessi
         if not user or is_deleted_account(user):
             return JSONResponse(status_code=400, content={"error": "expired_token"})
 
-        # Clean up Redis keys
+        # Claim the approved grant atomically *before* issuing credentials.
+        # A concurrent poller must not redeem the same code twice.
         try:
-            normalized_code = _normalize_user_code(data.get("user_code", ""))
-            pipe = redis.pipeline()
-            pipe.delete(f"device_auth:{req.device_code}")
-            pipe.delete(f"device_code_by_user:{normalized_code}")
-            await pipe.execute()
-        except RedisError:
-            pass
+            consumed = await redis.eval(_CONSUME_APPROVED_GRANT, 1, f"device_auth:{req.device_code}")
+            if not consumed:
+                return JSONResponse(status_code=400, content={"error": "expired_token"})
+            consumed_data = json.loads(consumed)
+            if consumed_data.get("user_id") != user_id:
+                return JSONResponse(status_code=400, content={"error": "expired_token"})
+            await redis.delete(f"device_code_by_user:{_normalize_user_code(data.get('user_code', ''))}")
+        except RedisError as e:
+            optic.error("Redis unavailable during device redemption: {}", e)
+            raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
-        access_token, refresh_token, expires_in = await _issue_tokens(user)
+        client_id = consumed_data.get("client_id")
+        if client_id not in (None, MOBILE_CLIENT_ID):
+            return JSONResponse(status_code=400, content={"error": "expired_token"})
+        # The feature may have been disabled after an approved device code was
+        # created. The consumed grant stays burned; it must not mint credentials.
+        if client_id == MOBILE_CLIENT_ID:
+            from services.mobile_read_control import mobile_issue_allowed
 
-        optic.info("device_token: tokens issued for user={}", user.email)
+            if not await mobile_issue_allowed(db):
+                raise HTTPException(status_code=503, detail="Mobile activity is not enabled on this server")
+        access_token, refresh_token, expires_in = await _issue_tokens(
+            user, client_id=client_id, device_id=consumed_data.get("device_id")
+        )
+
+        optic.info("device_token: tokens issued for user_id={}", user.id)
         return JSONResponse(
             status_code=200,
             content={
                 "access_token": access_token,
                 "refresh_token": refresh_token,
                 "expires_in": expires_in,
+                **(
+                    {
+                        "token_type": "bearer",
+                        "client_id": MOBILE_CLIENT_ID,
+                        "audience": MOBILE_AUDIENCE,
+                        "scope": MOBILE_SCOPE,
+                    }
+                    if client_id == MOBILE_CLIENT_ID
+                    else {}
+                ),
                 "user": {
                     "id": str(user.id),
                     "email": user.email,
@@ -289,13 +391,69 @@ async def device_token(request: Request, req: DeviceTokenRequest, db: AsyncSessi
     return JSONResponse(status_code=400, content={"error": "expired_token"})
 
 
+async def _pending_code(code: str) -> tuple[str, dict]:
+    """Only a matching, still-pending grant may be described or approved."""
+    normalized = _normalize_user_code(code)
+    if len(normalized) != 8 or any(c not in _USER_CODE_ALPHABET for c in normalized):
+        raise HTTPException(404, "Invalid or expired device code")
+    try:
+        redis = get_redis()
+        device_code = await redis.get(f"device_code_by_user:{normalized}")
+        raw = await redis.get(f"device_auth:{device_code}") if device_code else None
+    except RedisError as exc:
+        raise HTTPException(503, "Device verification unavailable") from exc
+    if not raw:
+        raise HTTPException(404, "Invalid or expired device code")
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        raise HTTPException(404, "Invalid or expired device code") from None
+    if data.get("status") != "pending" or _normalize_user_code(data.get("user_code", "")) != normalized:
+        raise HTTPException(404, "Invalid or expired device code")
+    return device_code, data
+
+
+@router.get("/preview")
+@limiter.limit("5/minute")
+async def device_preview(request: Request, code: str, current_user: User = Depends(get_current_user)):
+    """Authenticated, bounded lookup; never disclose an owner or device credential."""
+    origin = await browser_action.browser_origin()
+    browser_action.require_preview(request, origin, current_user)
+    await browser_action.limit_preview(current_user)
+    _, data = await _pending_code(code)
+    response = JSONResponse(
+        {
+            "client_kind": "phone" if data.get("client_id") == MOBILE_CLIENT_ID else "terminal",
+            "device_id_suffix": data.get("device_id", "")[-4:] if data.get("client_id") == MOBILE_CLIENT_ID else None,
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@router.post("/intent")
+@limiter.limit("5/minute")
+async def device_intent(request: Request, req: DeviceConfirmRequest, current_user: User = Depends(get_current_user)):
+    origin = await browser_action.browser_origin()
+    token = browser_action.require_post(request, origin, current_user)
+    await browser_action.limit_preview(current_user)
+    _, data = await _pending_code(req.user_code)
+    if data.get("client_id") != MOBILE_CLIENT_ID:
+        raise HTTPException(400, "Phone sign-in action requires a phone code")
+    nonce = await browser_action.mint(current_user, _normalize_user_code(req.user_code), token)
+    response = JSONResponse({"nonce": nonce, "expires_in": browser_action.TTL})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @router.post("/confirm")
 async def device_confirm(
+    request: Request,
     req: DeviceConfirmRequest,
     current_user: User = Depends(get_current_user),
 ):
     """Browser calls this after the user logs in and enters the code."""
-    optic.trace("user={} confirming code", current_user.email)
+    optic.trace("user_id={} confirming code", current_user.id)
     normalized_code = _normalize_user_code(req.user_code)
 
     try:
@@ -325,20 +483,24 @@ async def device_confirm(
     if data.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Device code already used or expired")
 
-    # Update status to approved with the authenticated user's ID
-    data["status"] = "approved"
-    data["user_id"] = str(current_user.id)
+    if data.get("client_id") == MOBILE_CLIENT_ID:
+        # CLI grants retain their historic confirmation semantics. Phone sign-in
+        # is a different browser action, never a Following approval or consent.
+        origin = await browser_action.browser_origin()
+        token = browser_action.require_post(request, origin, current_user)
+        if _normalize_user_code(data.get("user_code", "")) != normalized_code:
+            raise HTTPException(404, detail="Invalid or expired device code")
+        await browser_action.consume(request, current_user, normalized_code, token)
 
+    # Only one confirmation may transition pending -> approved. An old
+    # confirm request must not resurrect a code already consumed by polling.
     try:
-        # Preserve existing TTL
-        ttl = await redis.ttl(f"device_auth:{device_code}")
-        if ttl and ttl > 0:
-            await redis.setex(f"device_auth:{device_code}", ttl, json.dumps(data))
-        else:
-            await redis.setex(f"device_auth:{device_code}", _DEVICE_AUTH_TTL, json.dumps(data))
+        approved = await redis.eval(_APPROVE_PENDING_GRANT, 1, f"device_auth:{device_code}", str(current_user.id))
     except RedisError as e:
         optic.error("Redis unavailable during device confirm update: {}", e)
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    if not approved:
+        raise HTTPException(status_code=400, detail="Device code already used or expired")
 
-    optic.info("device_confirm: device authorized for user={}", current_user.email)
+    optic.info("device_confirm: device authorized for user_id={}", current_user.id)
     return {"message": "Device authorized"}

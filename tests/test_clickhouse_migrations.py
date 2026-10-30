@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -42,6 +43,51 @@ def test_production_activity_migration_matches_pinned_phase0_ddl():
     assert "projection_generation, source_line_offset, source_block_key" in activity_key
     assert "component_id" not in activity_key
     assert "source_revision" in production[1] and "unknown_result_count" in production[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setting", "statement"),
+    [
+        (None, "ALTER TABLE session_events MODIFY TTL toDate(timestamp) + INTERVAL 90 DAY"),
+        ("7", "ALTER TABLE session_events MODIFY TTL toDate(timestamp) + INTERVAL 7 DAY"),
+        ("0", "SELECT 1"),
+    ],
+)
+async def test_ch012_renders_validated_pg_retention(monkeypatch, setting, statement):
+    import database
+    from services.clickhouse import migrations
+
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=setting)
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=db)
+    session.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(database, "async_session", lambda: session)
+    response = SimpleNamespace(
+        raise_for_status=lambda: None,
+        json=lambda: {"data": [{"create_table_query": "CREATE TABLE session_events ENGINE = MergeTree ORDER BY x"}]},
+    )
+    query = AsyncMock(return_value=response)
+    monkeypatch.setattr(migrations._client, "_query", query)
+
+    assert await migrations._render_retention_sql("{{SESSION_EVENTS_ROW_RETENTION}};") == statement + ";"
+    assert query.await_count == (1 if setting == "0" else 0)
+
+
+@pytest.mark.asyncio
+async def test_ch012_rejects_untrusted_retention_before_ddl(monkeypatch):
+    import database
+    from services.clickhouse import migrations
+
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value="7; DROP TABLE users")
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=db)
+    session.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(database, "async_session", lambda: session)
+    with pytest.raises(RuntimeError, match="Invalid PostgreSQL source retention"):
+        await migrations._render_retention_sql("{{SESSION_EVENTS_ROW_RETENTION}};")
 
 
 def test_split_sql_strips_spdx_and_keeps_quoted_semicolon():

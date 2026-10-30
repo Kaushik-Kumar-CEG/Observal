@@ -4,8 +4,8 @@
 
 """Tests for the component version API (factory-generated endpoints).
 
-Tests are parametrized over all 5 component types.  They use MagicMock for the
-DB session and FastAPI dependency overrides so no real database is needed.
+Router creation is parametrized over all 5 component types. Standalone version
+handlers use MagicMock; review decisions use the supported HTTP API with SQLite.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ def _make_listing(owner_id, *, is_private=False, team_id=None):
     listing = MagicMock()
     listing.id = uuid.uuid4()
     listing.name = "test-listing"
+    listing.status = ListingStatus.approved
     listing.submitted_by = owner_id
     listing.latest_version_id = None
     listing.versions = []
@@ -395,7 +396,9 @@ async def test_publish_version_happy_path():
     with (
         patch(RESOLVE_SEAM, new=AsyncMock(return_value=listing)),
         patch("api.routes.component_versions.audit", new=AsyncMock()),
+        patch("api.routes.component_versions.submit_for_review", new=AsyncMock()) as submit,
     ):
+        submit.return_value.number = 42
         result = await _publish_version(
             listing_id=str(listing.id),
             req=req,
@@ -408,6 +411,10 @@ async def test_publish_version_happy_path():
 
     assert result["version"] == SEMVER_VALID
     assert result["status"] == ListingStatus.pending.value
+    assert result["review_number"] == 42
+    assert result["review_url"] == "/review/42"
+    submit.assert_awaited_once()
+    assert submit.await_args.args[1:4] == ("mcp", listing, db.add.call_args.args[0])
     db.add.assert_called_once()
     db.commit.assert_called_once()
 
@@ -417,172 +424,59 @@ async def test_publish_version_happy_path():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def review_notification():
-    # The inbox delivery service has its own integration tests; a generic
-    # AsyncMock session cannot represent its nested SQLAlchemy transaction.
-    with patch("services.inbox.sources.on_review_decided", new=AsyncMock(return_value=0)) as notify:
-        yield notify
+@pytest.mark.asyncio
+async def test_review_version_approve_updates_latest(version_review_api):
+    """Approval and publication through the review API promote the MCP release."""
+    from models.mcp import McpListing, McpVersion
+
+    client, reviews, factory = version_review_api
+    number, listing_id, version_id = reviews["mcp"]
+    verdict = await client.post(f"/api/v1/reviews/{number}/submissions", json={"verdict": "approve"})
+    assert verdict.status_code == 201, verdict.text
+    published = await client.post(f"/api/v1/reviews/{number}/publish", json={})
+    assert published.status_code == 200, published.text
+    assert published.json()["state"] == "published"
+    async with factory() as db:
+        version = await db.get(McpVersion, version_id)
+        assert version.status == ListingStatus.approved
+        assert version.reviewed_by is not None
+        assert (await db.get(McpListing, listing_id)).latest_version_id == version_id
 
 
 @pytest.mark.asyncio
-async def test_review_version_approve_updates_latest(review_notification):
-    """Approving a pending version sets listing.latest_version_id."""
-    from api.routes.component_versions import _review_version
-    from models.mcp import McpListing, McpVersion
-    from schemas.component_version import VersionReviewRequest
+async def test_review_version_reject_stores_reason(version_review_api):
+    """Closing a review rejects the MCP release and persists the reason."""
+    from models.mcp import McpVersion
 
-    owner_id = uuid.uuid4()
-    listing = _make_listing(owner_id)
-    ver = _make_version(listing.id, status=ListingStatus.pending)
-    listing.latest_version = ver
-
-    reviewer = _make_user("reviewer")
-    req = VersionReviewRequest(action="approve", reason=None)
-
-    db = AsyncMock()
-    ver_result = MagicMock()
-    ver_result.scalar_one_or_none.return_value = ver
-    db.execute = AsyncMock(return_value=ver_result)
-    db.commit = AsyncMock()
-
-    with (
-        patch(RESOLVE_SEAM, new=AsyncMock(return_value=listing)),
-        patch("api.routes.component_versions.audit", new=AsyncMock()),
-    ):
-        result = await _review_version(
-            listing_id=str(listing.id),
-            version=SEMVER_VALID,
-            req=req,
-            listing_model=McpListing,
-            version_model=McpVersion,
-            component_type="mcp",
-            db=db,
-            current_user=reviewer,
-        )
-
-    assert result["new_status"] == ListingStatus.approved.value
-    assert listing.latest_version_id == ver.id
-    review_notification.assert_awaited_once()
-    db.commit.assert_called_once()
+    client, reviews, factory = version_review_api
+    number, _, version_id = reviews["mcp"]
+    response = await client.post(f"/api/v1/reviews/{number}/close", json={"reason": "Not acceptable"})
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "closed"
+    async with factory() as db:
+        version = await db.get(McpVersion, version_id)
+        assert version.status == ListingStatus.rejected
+        assert version.rejection_reason == "Not acceptable"
 
 
 @pytest.mark.asyncio
-async def test_review_version_reject_stores_reason(review_notification):
-    """Rejecting a pending version stores the rejection reason."""
-    from api.routes.component_versions import _review_version
-    from models.mcp import McpListing, McpVersion
-    from schemas.component_version import VersionReviewRequest
-
-    owner_id = uuid.uuid4()
-    listing = _make_listing(owner_id)
-    ver = _make_version(listing.id, status=ListingStatus.pending)
-
-    reviewer = _make_user("reviewer")
-    req = VersionReviewRequest(action="reject", reason="Not acceptable")
-
-    db = AsyncMock()
-    ver_result = MagicMock()
-    ver_result.scalar_one_or_none.return_value = ver
-    db.execute = AsyncMock(return_value=ver_result)
-    db.commit = AsyncMock()
-
-    with (
-        patch(RESOLVE_SEAM, new=AsyncMock(return_value=listing)),
-        patch("api.routes.component_versions.audit", new=AsyncMock()),
-    ):
-        result = await _review_version(
-            listing_id=str(listing.id),
-            version=SEMVER_VALID,
-            req=req,
-            listing_model=McpListing,
-            version_model=McpVersion,
-            component_type="mcp",
-            db=db,
-            current_user=reviewer,
-        )
-
-    assert result["new_status"] == ListingStatus.rejected.value
-    assert ver.rejection_reason == "Not acceptable"
-    review_notification.assert_awaited_once()
-    db.commit.assert_called_once()
+async def test_closed_component_review_cannot_publish_409(version_review_api):
+    """A closed review cannot be published again (409 under the review API)."""
+    client, reviews, _ = version_review_api
+    number, _, _ = reviews["mcp"]
+    closed = await client.post(f"/api/v1/reviews/{number}/close", json={"reason": "Not ready"})
+    assert closed.status_code == 200, closed.text
+    result = await client.post(f"/api/v1/reviews/{number}/publish", json={})
+    assert result.status_code == 409, result.text
 
 
 @pytest.mark.asyncio
-async def test_review_version_non_pending_422():
-    """Reviewing a non-pending version raises 422."""
-    from fastapi import HTTPException
-
-    from api.routes.component_versions import _review_version
-    from models.mcp import McpListing, McpVersion
-    from schemas.component_version import VersionReviewRequest
-
-    owner_id = uuid.uuid4()
-    listing = _make_listing(owner_id)
-    ver = _make_version(listing.id, status=ListingStatus.approved)  # already approved
-
-    reviewer = _make_user("reviewer")
-    req = VersionReviewRequest(action="approve", reason=None)
-
-    db = AsyncMock()
-    ver_result = MagicMock()
-    ver_result.scalar_one_or_none.return_value = ver
-    db.execute = AsyncMock(return_value=ver_result)
-
-    with (
-        patch(RESOLVE_SEAM, new=AsyncMock(return_value=listing)),
-        pytest.raises(HTTPException) as exc,
-    ):
-        await _review_version(
-            listing_id=str(listing.id),
-            version=SEMVER_VALID,
-            req=req,
-            listing_model=McpListing,
-            version_model=McpVersion,
-            component_type="mcp",
-            db=db,
-            current_user=reviewer,
-        )
-
-    assert exc.value.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_review_version_not_found_404():
-    """Reviewing a non-existent version raises 404."""
-    from fastapi import HTTPException
-
-    from api.routes.component_versions import _review_version
-    from models.mcp import McpListing, McpVersion
-    from schemas.component_version import VersionReviewRequest
-
-    owner_id = uuid.uuid4()
-    listing = _make_listing(owner_id)
-
-    reviewer = _make_user("reviewer")
-    req = VersionReviewRequest(action="approve", reason=None)
-
-    db = AsyncMock()
-    ver_result = MagicMock()
-    ver_result.scalar_one_or_none.return_value = None
-    db.execute = AsyncMock(return_value=ver_result)
-
-    with (
-        patch(RESOLVE_SEAM, new=AsyncMock(return_value=listing)),
-        pytest.raises(HTTPException) as exc,
-    ):
-        await _review_version(
-            listing_id=str(listing.id),
-            version="9.9.9",
-            req=req,
-            listing_model=McpListing,
-            version_model=McpVersion,
-            component_type="mcp",
-            db=db,
-            current_user=reviewer,
-        )
-
-    assert exc.value.status_code == 404
+async def test_review_version_not_found_404(version_review_api):
+    """A missing review number cannot be approved via the public review API."""
+    client, reviews, _ = version_review_api
+    number, _, _ = reviews["mcp"]
+    response = await client.post(f"/api/v1/reviews/{number + 100}/submissions", json={"verdict": "approve"})
+    assert response.status_code == 404, response.text
 
 
 # ---------------------------------------------------------------------------
@@ -617,9 +511,14 @@ def test_factory_creates_router(component_type, listing_cls, version_cls):
     router = create_version_router(component_type, listing_model, version_model)
     assert isinstance(router, APIRouter)
 
-    # Should have 4 routes (list, get, publish, review)
-    routes = router.routes
-    assert len(routes) == 5
+    # Review decisions now live under /api/v1/reviews/{ref}, not this router.
+    routes = {(route.path, frozenset(route.methods)) for route in router.routes}
+    assert routes == {
+        ("/{listing_id}/versions", frozenset({"GET"})),
+        ("/{listing_id}/versions/{version}", frozenset({"GET"})),
+        ("/{listing_id}/versions", frozenset({"POST"})),
+        ("/{listing_id}/version-suggestions", frozenset({"GET"})),
+    }
 
 
 def test_factory_route_paths():

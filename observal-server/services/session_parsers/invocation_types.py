@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Naraen Rammoorthi
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Safe, harness-independent source invocation facts and extractor contract."""

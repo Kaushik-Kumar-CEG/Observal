@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 
 import services.dynamic_settings as ds
 from health import configure_health_and_metrics
 from logging_config import setup_logging
 from middleware import configure_middleware
 from routes import configure_routes
+from services.mobile_read_control import MobileCohortDeniedError
 from services.optic import setup_optic
 from startup import lifespan
 
@@ -26,6 +28,11 @@ def create_app() -> FastAPI:
         redoc_url="/redoc" if expose_openapi else None,
         openapi_url="/openapi.json" if expose_openapi else None,
     )
+
+    async def deny_mobile_cohort(_request: Request, _exc: MobileCohortDeniedError) -> Response:
+        return Response(status_code=403)
+
+    app.add_exception_handler(MobileCohortDeniedError, deny_mobile_cohort)
     configure_middleware(app)
     configure_routes(app)
     configure_health_and_metrics(app)

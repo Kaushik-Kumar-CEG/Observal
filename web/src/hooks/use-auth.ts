@@ -21,6 +21,9 @@ function subscribe(cb: () => void) {
 
 function getAuthSnapshot() {
   if (typeof window === "undefined") return "";
+  // A fallback refresh rejection requires explicit sign-in in this tab, even
+  // if another tab later rotates the shared token successfully.
+  if (sessionStorage.getItem("observal_refresh_rejected")) return "";
   const key = sessionStorage.getItem("observal_access_token");
   const role = getUserRole();
   if (key) return role || "pending";
@@ -58,7 +61,6 @@ function retryUntilSettled(
       onSuccess?.();
       window.dispatchEvent(new Event("storage"));
     } else if (result === "rejected") {
-      clearSession();
       onRejected?.();
     } else if (result === "account_changed") {
       onRejected?.();
@@ -102,7 +104,9 @@ function retryWhoamiUntilSettled({
         setUserRole(user.role);
         return "ok";
       } catch (err) {
-        return isNetworkError(err) ? "network_error" : "rejected";
+        if (isNetworkError(err)) return "network_error";
+        clearSession();
+        return "rejected";
       }
     },
     { onSuccess, onRejected, onNetworkError },
@@ -145,6 +149,29 @@ export function useAuthGuard() {
   }, [isSSR, hasToken, isRefreshing, snapshot, pathname, router]);
 
   return { ready, role };
+}
+
+/** These standalone action pages need a website token, not a resolved role.
+ * Refresh a new tab before showing the form; no action is submitted by refresh.
+ */
+export function useWebsiteSessionGuard(next: "/follow/approve" | "/follow/consent") {
+  const router = useRouter();
+  const snapshot = useSyncExternalStore(subscribe, getAuthSnapshot, getServerSnapshot);
+  const refreshing = snapshot === "refreshing";
+  const ready = snapshot !== "" && snapshot !== "ssr" && !refreshing;
+
+  useEffect(() => {
+    if (refreshing) {
+      return retryRefreshUntilSettled(() => {
+        router.navigate({ to: "/login", replace: true, search: { next } });
+      });
+    }
+    if (snapshot === "") {
+      router.navigate({ to: "/login", replace: true, search: { next } });
+    }
+  }, [refreshing, snapshot, next, router]);
+
+  return ready;
 }
 
 /**

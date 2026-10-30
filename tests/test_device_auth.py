@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for OAuth 2.0 Device Authorization Grant (RFC 8628) endpoints."""
@@ -61,6 +62,28 @@ class FakeRedis:
 
     async def ttl(self, key: str) -> int:
         return self._ttls.get(key, -1)
+
+    async def eval(self, script: str, numkeys: int, key: str, *args: str):
+        assert numkeys == 1
+        raw = self._store.get(key)
+        if raw is None:
+            return None if "grant.status ~= 'approved'" in script else 0
+        try:
+            grant = json.loads(raw)
+        except ValueError:
+            return None if "grant.status ~= 'approved'" in script else 0
+        if "grant.status ~= 'approved'" in script:
+            if grant.get("status") != "approved":
+                return None
+            await self.delete(key)
+            return raw
+        assert "grant.status ~= 'pending'" in script
+        if grant.get("status") != "pending":
+            return 0
+        grant["status"] = "approved"
+        grant["user_id"] = args[0]
+        self._store[key] = json.dumps(grant)  # KEEPTTL
+        return 1
 
     def pipeline(self):
         return FakePipeline(self)
@@ -606,8 +629,9 @@ class TestResolveFrontendUrl:
         req.headers = headers or {}
         return req
 
-    @patch("services.dynamic_settings.get_sync")
-    def test_uses_configured_frontend_url(self, mock_get_sync):
+    @pytest.mark.asyncio
+    @patch("services.dynamic_settings.get", new_callable=AsyncMock)
+    async def test_uses_configured_frontend_url(self, mock_get_sync):
         """When deployment.frontend_url is a real domain, use it directly."""
         from api.routes.device_auth import _resolve_frontend_url
 
@@ -617,11 +641,12 @@ class TestResolveFrontendUrl:
         }.get(key, "")
 
         request = self._make_request()
-        result = _resolve_frontend_url(request)
-        assert result == "https://app.example.com"
+        result = await _resolve_frontend_url(request)
+        assert result == ("https://app.example.com", True)
 
-    @patch("services.dynamic_settings.get_sync")
-    def test_strips_trailing_slash(self, mock_get_sync):
+    @pytest.mark.asyncio
+    @patch("services.dynamic_settings.get", new_callable=AsyncMock)
+    async def test_strips_trailing_slash(self, mock_get_sync):
         """Trailing slash is removed from configured URL."""
         from api.routes.device_auth import _resolve_frontend_url
 
@@ -631,11 +656,12 @@ class TestResolveFrontendUrl:
         }.get(key, "")
 
         request = self._make_request()
-        result = _resolve_frontend_url(request)
-        assert result == "https://app.example.com"
+        result = await _resolve_frontend_url(request)
+        assert result == ("https://app.example.com", True)
 
-    @patch("services.dynamic_settings.get_sync")
-    def test_falls_back_to_public_url_when_frontend_is_localhost(self, mock_get_sync):
+    @pytest.mark.asyncio
+    @patch("services.dynamic_settings.get", new_callable=AsyncMock)
+    async def test_falls_back_to_public_url_when_frontend_is_localhost(self, mock_get_sync):
         """When frontend_url is localhost, derive from public_url."""
         from api.routes.device_auth import _resolve_frontend_url
 
@@ -645,11 +671,12 @@ class TestResolveFrontendUrl:
         }.get(key, "")
 
         request = self._make_request()
-        result = _resolve_frontend_url(request)
-        assert result == "https://api.example.com"
+        result = await _resolve_frontend_url(request)
+        assert result == ("https://api.example.com", True)
 
-    @patch("services.dynamic_settings.get_sync")
-    def test_falls_back_to_request_headers(self, mock_get_sync):
+    @pytest.mark.asyncio
+    @patch("services.dynamic_settings.get", new_callable=AsyncMock)
+    async def test_falls_back_to_request_headers(self, mock_get_sync):
         """When both settings are localhost, infer from request Host header."""
         from api.routes.device_auth import _resolve_frontend_url
 
@@ -664,11 +691,12 @@ class TestResolveFrontendUrl:
                 "host": "observal.company.io",
             }
         )
-        result = _resolve_frontend_url(request)
-        assert result == "https://observal.company.io"
+        result = await _resolve_frontend_url(request)
+        assert result == ("https://observal.company.io", False)
 
-    @patch("services.dynamic_settings.get_sync")
-    def test_falls_back_to_host_header_without_forwarded_proto(self, mock_get_sync):
+    @pytest.mark.asyncio
+    @patch("services.dynamic_settings.get", new_callable=AsyncMock)
+    async def test_falls_back_to_host_header_without_forwarded_proto(self, mock_get_sync):
         """Infer from Host header even without x-forwarded-proto."""
         from api.routes.device_auth import _resolve_frontend_url
 
@@ -678,11 +706,12 @@ class TestResolveFrontendUrl:
         }.get(key, "")
 
         request = self._make_request(headers={"host": "app.example.com:8080"})
-        result = _resolve_frontend_url(request)
-        assert result == "http://app.example.com:8080"
+        result = await _resolve_frontend_url(request)
+        assert result == ("http://app.example.com:8080", False)
 
-    @patch("services.dynamic_settings.get_sync")
-    def test_localhost_fallback_when_no_headers(self, mock_get_sync):
+    @pytest.mark.asyncio
+    @patch("services.dynamic_settings.get", new_callable=AsyncMock)
+    async def test_localhost_fallback_when_no_headers(self, mock_get_sync):
         """When nothing is configured and no useful headers, fall back to localhost."""
         from api.routes.device_auth import _resolve_frontend_url
 
@@ -692,11 +721,12 @@ class TestResolveFrontendUrl:
         }.get(key, "")
 
         request = self._make_request(headers={})
-        result = _resolve_frontend_url(request)
-        assert result == "http://localhost"
+        result = await _resolve_frontend_url(request)
+        assert result == ("http://localhost", False)
 
-    @patch("services.dynamic_settings.get_sync")
-    def test_localhost_with_port_treated_as_unconfigured(self, mock_get_sync):
+    @pytest.mark.asyncio
+    @patch("services.dynamic_settings.get", new_callable=AsyncMock)
+    async def test_localhost_with_port_treated_as_unconfigured(self, mock_get_sync):
         """http://localhost:3000 is also treated as unconfigured."""
         from api.routes.device_auth import _resolve_frontend_url
 
@@ -706,8 +736,8 @@ class TestResolveFrontendUrl:
         }.get(key, "")
 
         request = self._make_request()
-        result = _resolve_frontend_url(request)
-        assert result == "https://deploy.example.com:9000"
+        result = await _resolve_frontend_url(request)
+        assert result == ("https://deploy.example.com:9000", True)
 
 
 class TestCliVerificationUriRewrite:

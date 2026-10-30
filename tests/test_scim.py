@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Focused coverage for the SCIM 2.0 provisioning routes."""
@@ -65,7 +66,15 @@ def _many(values):
 
 def _db(*results):
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=list(results)) if results else AsyncMock()
+    pending = iter(results)
+
+    async def execute(statement):
+        # These physical mobile fences do not consume a mocked user query.
+        if "pg_advisory_xact_lock" in str(statement) or "mobile_backfill_cursor" in str(statement):
+            return MagicMock()
+        return next(pending)
+
+    db.execute = AsyncMock(side_effect=execute) if results else AsyncMock()
     db.flush = AsyncMock()
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
@@ -146,6 +155,12 @@ def _bind_db(app: FastAPI, db, *, authenticated: bool = True):
             return SimpleNamespace(id=TOKEN_ID, active=True)
 
         app.dependency_overrides[scim._verify_scim_token] = token_override
+
+
+@pytest.fixture(autouse=True)
+def _isolate_redis_revocation(monkeypatch):
+    monkeypatch.setattr(scim, "get_redis", lambda: MagicMock())
+    monkeypatch.setattr(scim, "revoke_user_tokens", AsyncMock())
 
 
 @pytest.fixture
@@ -999,8 +1014,8 @@ class TestUserDeletion:
         response = await client.delete(f"/api/v1/scim/Users/{USER_ID}")
 
         _assert_scim(response, 400, format_scim_error(400, "Cannot delete the last admin"))
-        assert db.execute.await_args_list[1].args[0]._for_update_arg is not None
-        assert db.execute.await_count == 2  # nothing deleted after the refusal
+        assert db.execute.await_args_list[3].args[0]._for_update_arg is not None
+        assert db.execute.await_count == 4  # two fences, then refusal without deletion
         db.rollback.assert_awaited_once()
         db.commit.assert_not_awaited()
         revoke.assert_not_awaited()

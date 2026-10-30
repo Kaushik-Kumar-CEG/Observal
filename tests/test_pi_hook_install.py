@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Observal Contributors
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Pi registry hooks: what the server's Pi adapter installs, and what it reports it cannot.
@@ -12,6 +13,7 @@ installed (docs/integrations/pi.md, "Registry hooks").
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +27,10 @@ from services.harness.pi import PI_HOOKS_SCHEMA, PiAdapter
 AGENT = "00000000-0000-4000-8000-000000000001"
 
 
+def _registry_id(name: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"observal-test-hook:{name}"))
+
+
 def _hook(name: str, event: str = "PreToolUse", **extra) -> dict:
     return {
         "event": event,
@@ -34,6 +40,8 @@ def _hook(name: str, event: str = "PreToolUse", **extra) -> dict:
         "script_filename": None,
         "script_content": None,
         "tool_filter": None,
+        "registry_id": _registry_id(name),
+        "registry_version": "1.0.0",
     } | extra
 
 
@@ -72,10 +80,28 @@ def test_supported_hooks_are_written_to_the_profile_hooks_file():
                     "type": "command",
                     "command": "./guard.sh --strict",
                     "timeout": 60,
+                    "id": _registry_id("guard"),
+                    "version": "1.0.0",
                 },
-                {"name": "audit", "event": "tool_result", "type": "command", "command": "audit", "timeout": 5},
+                {
+                    "name": "audit",
+                    "event": "tool_result",
+                    "type": "command",
+                    "command": "audit",
+                    "timeout": 5,
+                    "id": _registry_id("audit"),
+                    "version": "1.0.0",
+                },
                 # An out-of-range timeout falls back to the default rather than being trusted.
-                {"name": "slow", "event": "tool_call", "type": "command", "command": "slow", "timeout": 60},
+                {
+                    "name": "slow",
+                    "event": "tool_call",
+                    "type": "command",
+                    "command": "slow",
+                    "timeout": 60,
+                    "id": _registry_id("slow"),
+                    "version": "1.0.0",
+                },
             ],
         },
     }

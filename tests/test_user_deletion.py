@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Observal Contributors
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """A deleted account's shell row can never authenticate or be found."""
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,6 +39,9 @@ class _Redis:
 
     async def get(self, key):
         return self.values.get(key)
+
+    async def getdel(self, key):
+        return self.values.pop(key, None)
 
 
 @pytest.mark.asyncio
@@ -270,4 +275,21 @@ def test_every_cascading_user_foreign_key_is_cleared_for_a_deleted_account():
         for fk in table.foreign_keys
         if fk.column.table.name == "users" and (fk.ondelete or "").upper() == "CASCADE"
     }
-    assert cascading <= listed, f"deleted accounts would keep rows in: {sorted(cascading - listed)}"
+    # PG079's BEFORE UPDATE OF deleted_at trigger removes these four mobile
+    # relations in the same transaction, including a deleted owner's partition.
+    # The physical regression exercises that trigger on a real PG080 store.
+    migration = (
+        Path(__file__).resolve().parents[1] / "observal-server/alembic/versions/079_mobile_follow_sync_state.py"
+    ).read_text()
+    trigger_owned = {
+        ("mobile_follow_partitions", "owner_id"),
+        ("mobile_follow_subjects", "subject_id"),
+        ("mobile_follow_changes", "subject_id"),
+        ("mobile_follow_pins", "subject_id"),
+    }
+    assert "mobile_follow_erase_deleted_subject BEFORE UPDATE OF deleted_at ON users" in migration
+    assert "DELETE FROM mobile_follow_partitions WHERE owner_id=OLD.id" in migration
+    assert "DELETE FROM mobile_follow_changes WHERE subject_id=OLD.id" in migration
+    assert cascading <= listed | trigger_owned, (
+        f"deleted accounts would keep rows in: {sorted(cascading - listed - trigger_owned)}"
+    )

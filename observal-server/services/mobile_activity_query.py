@@ -1,0 +1,667 @@
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+"""Bounded, revalidated Pi MCP observations and source-verified partial zeros.
+
+Reads are source-checked on EVERY request. A missing/purged/repaired source,
+unsupported cohort, or oversized request returns unavailable, not a stale
+aggregate. The bounded initial implementation does not assert whole-window
+eligibility or complete historical coverage.
+"""
+
+import hashlib
+import json
+import uuid
+from collections import defaultdict
+from datetime import datetime
+from typing import Literal
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from services.clickhouse.client import _query
+from services.mobile_publication_clock import committed_at
+
+MAX_SESSIONS = 20
+MAX_SOURCE_LINES = 40000
+Scope = Literal["user", "author"]
+
+# This predicate is deliberately shared by candidate selection and the final
+# aggregate. No hidden/private listing can affect a count or denominator.
+_VISIBLE = f"""
+FROM mobile_evidence_events e
+JOIN mobile_layer_components map ON map.project_id=e.project_id
+ AND map.user_id=e.user_id AND map.harness=e.harness AND map.layer_hash=e.layer_hash AND map.alias=e.alias
+JOIN mcp_listings l ON l.id=e.component_id AND l.is_private=false
+JOIN mcp_versions v ON v.id=map.version_id AND v.listing_id=l.id AND v.status IN ('approved','archived')
+JOIN mobile_session_publications pub ON pub.project_id=e.project_id AND pub.user_id=e.user_id
+ AND pub.harness=e.harness AND pub.session_id=e.session_id AND pub.status IN ('complete','partial')
+ AND pub.source_retained_until>clock_timestamp() AND pub.source_highest_line IS NOT NULL
+LEFT JOIN mobile_source_line_highwater hw ON hw.project_id=pub.project_id AND hw.user_id=pub.user_id
+ AND hw.harness=pub.harness AND hw.session_id=pub.session_id
+JOIN mobile_read_controls policy ON policy.project_id=pub.project_id AND policy.source_policy_ready
+ AND policy.source_policy_epoch=pub.source_policy_epoch
+ AND (hw.max_line IS NULL OR hw.max_line<=pub.source_highest_line)
+WHERE e.project_id=:project AND e.harness='pi' AND e.event_time>=:start AND e.event_time<:end
+ AND NOT EXISTS (SELECT 1 FROM mobile_publication_events uncertain
+      WHERE uncertain.kind='mcp' AND uncertain.listing_id=l.id AND uncertain.version_id=v.id
+      AND {committed_at("uncertain")}='infinity'::timestamptz)
+ AND (SELECT pe.status FROM mobile_publication_events pe
+      WHERE pe.kind='mcp' AND pe.listing_id=l.id AND pe.version_id=v.id
+      AND {committed_at("pe")}<=e.event_time
+      ORDER BY pe.recorded_at DESC,pe.id DESC LIMIT 1)='approved'
+"""
+
+
+def _scope(scope: Scope, component: uuid.UUID | None = None) -> tuple[str, dict]:
+    predicate = (
+        " AND e.user_id=:subject"
+        if scope == "user"
+        else (
+            " AND EXISTS (SELECT 1 FROM mobile_listing_provenance author "
+            "WHERE author.kind='mcp' AND author.listing_id=l.id AND author.original_author_id=:subject)"
+        )
+    )
+    params = {}
+    if component is not None:
+        predicate += " AND l.id=:component"
+        params["component"] = component
+    return predicate, params
+
+
+async def _source_verified(rows: list, project: str) -> bool:
+    """Recheck only bound scoped source identities, with a fixed materialization budget."""
+    if not rows or len(rows) > MAX_SESSIONS:
+        return False
+    expected = {(str(user), session): (revision, first) for user, session, revision, first in rows}
+    users = sorted({user for user, _ in expected})
+    sessions = sorted({sid for _, sid in expected})
+
+    # ClickHouse Array(String) query parameters use single-quoted SQL literals,
+    # not JSON arrays. Every value remains bound, with quotes/backslashes
+    # escaped for the parameter parser (never interpolated into the SQL).
+    def array_param(items: list[str]) -> str:
+        return "[" + ",".join("'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'" for value in items) + "]"
+
+    response = await _query(
+        "SELECT user_id,session_id,line_offset,line_hash,raw_line_truncated,length(raw_line) AS raw_length "
+        "FROM session_events FINAL WHERE project_id={project:String} AND harness='pi' "
+        "AND user_id IN {users:Array(String)} AND session_id IN {sessions:Array(String)} "
+        "AND is_source_record=1 ORDER BY user_id,session_id,line_offset LIMIT 40001 FORMAT JSON",
+        {"param_project": project, "param_users": array_param(users), "param_sessions": array_param(sessions)},
+    )
+    response.raise_for_status()
+    source = response.json().get("data", [])
+    if len(source) > MAX_SOURCE_LINES:
+        return False
+    grouped = defaultdict(list)
+    for row in source:
+        key = (row["user_id"], row["session_id"])
+        if key in expected:
+            grouped[key].append(row)
+    for key, (revision, first) in expected.items():
+        lines = grouped.get(key, [])
+        if (
+            not lines
+            or len(lines) > 10000
+            or [int(r["line_offset"]) for r in lines] != list(range(first, first + len(lines)))
+        ):
+            return False
+        if any(not r.get("line_hash") or int(r["raw_line_truncated"]) or not int(r["raw_length"]) for r in lines):
+            return False
+        source_revision = hashlib.sha256(
+            json.dumps([[int(r["line_offset"]), r["line_hash"]] for r in lines], separators=(",", ":")).encode()
+        ).hexdigest()
+        if source_revision != revision:
+            return False
+    return True
+
+
+async def _trace_sources_verified(db: AsyncSession, branches: str, params: dict, project: str, where: str = "") -> bool:
+    """Recheck scoped fact sources AND every bounded Pi ancestor in ClickHouse."""
+    try:
+        facts = (
+            await db.execute(
+                text(
+                    "SELECT DISTINCT typed.user_id,typed.session_id,typed.run_incarnation "
+                    "FROM (" + branches + ") typed " + where + " LIMIT 21"
+                ),
+                params,
+            )
+        ).all()
+        if not facts:
+            return True
+        if len(facts) > MAX_SESSIONS:
+            return False
+        seeds = []
+        binds = {"trace_project": project}
+        for index, (user, session, incarnation) in enumerate(facts):
+            if incarnation is None:
+                return False
+            seeds.append(
+                f"(run.user_id=:trace_user_{index} AND run.session_id=:trace_session_{index} "
+                f"AND run.run_incarnation=:trace_run_{index})"
+            )
+            binds.update(
+                {f"trace_user_{index}": user, f"trace_session_{index}": session, f"trace_run_{index}": incarnation}
+            )
+        ancestry = (
+            await db.execute(
+                text(
+                    "WITH RECURSIVE chain AS ("
+                    " SELECT run.project_id,run.user_id,run.harness,run.session_id,run.run_incarnation,"
+                    " run.parent_session_id,run.parent_run_incarnation,run.parent_header_hash,"
+                    " run.header_hash,run.started_at,0 AS depth FROM mobile_run_instances run"
+                    " WHERE run.project_id=:trace_project AND run.harness='pi' AND (" + " OR ".join(seeds) + ")"
+                    " UNION ALL SELECT parent.project_id,parent.user_id,parent.harness,parent.session_id,"
+                    " parent.run_incarnation,parent.parent_session_id,parent.parent_run_incarnation,"
+                    " parent.parent_header_hash,parent.header_hash,parent.started_at,chain.depth+1"
+                    " FROM chain JOIN mobile_run_instances parent ON parent.project_id=chain.project_id"
+                    " AND parent.user_id=chain.user_id AND parent.harness=chain.harness"
+                    " AND parent.session_id=chain.parent_session_id AND parent.run_incarnation=chain.parent_run_incarnation"
+                    " AND parent.header_hash=chain.parent_header_hash AND parent.started_at<=chain.started_at"
+                    " WHERE chain.depth<8)"
+                    " SELECT DISTINCT chain.user_id,chain.session_id,pub.source_revision,pub.first_source_offset"
+                    " FROM chain LEFT JOIN mobile_session_publications pub ON pub.project_id=chain.project_id"
+                    " AND pub.user_id=chain.user_id AND pub.harness=chain.harness AND pub.session_id=chain.session_id"
+                    " LIMIT 21"
+                ),
+                binds,
+            )
+        ).all()
+        identities = {(str(user), session) for user, session, _revision, _first in ancestry}
+        return (
+            len(ancestry) <= MAX_SESSIONS
+            and {(str(user), session) for user, session, _incarnation in facts} <= identities
+            and len(identities) == len(ancestry)
+            and await _source_verified(ancestry, project)
+        )
+    except Exception:
+        # A missing ancestor, source, database or ClickHouse proof never becomes a stale positive.
+        return False
+
+
+async def _verified_restrict(
+    db: AsyncSession,
+    subject: uuid.UUID,
+    scope: Scope,
+    project: str,
+    start: datetime,
+    end: datetime,
+    component: uuid.UUID | None = None,
+) -> tuple[str, dict, str] | None:
+    predicate, extras = _scope(scope, component)
+    params = {"subject": subject, "project": project, "start": start, "end": end, **extras}
+    # An overflow yields unavailable instead of truncating a supposedly exact
+    # reading. Candidate and aggregate use identical visibility/author filters.
+    candidate_sql = (
+        "SELECT DISTINCT e.user_id,e.session_id,pub.source_revision,pub.first_source_offset "
+        + _VISIBLE
+        + predicate
+        + " ORDER BY e.user_id,e.session_id,pub.source_revision,pub.first_source_offset LIMIT 21"
+    )
+    candidates = (await db.execute(text(candidate_sql), params)).all()
+    if not candidates or len(candidates) > MAX_SESSIONS or not await _source_verified(candidates, project):
+        return None
+    clauses = []
+    for index, (user, session, _revision, _first) in enumerate(candidates):
+        params[f"u{index}"] = user
+        params[f"s{index}"] = session
+        clauses.append(f"(e.user_id=:u{index} AND e.session_id=:s{index})")
+    return predicate, params, " AND (" + " OR ".join(clauses) + ")"
+
+
+async def qualified_zero_subset(
+    db: AsyncSession, subject: uuid.UUID, project: str, start: datetime, end: datetime
+) -> dict | None:
+    """Self-only tool-free activity in a currently eligible uploader-bound Pi layer.
+
+    Not a general zero or a full-window measurement. Each candidate's complete
+    source is rechecked in ClickHouse, including the persisted revision; exceeding
+    the fixed verification budget returns unavailable.
+    """
+    params = {"project": project, "subject": subject, "start": start, "end": end}
+    candidates = (
+        await db.execute(
+            text(
+                "SELECT DISTINCT z.user_id,z.session_id,pub.source_revision,pub.first_source_offset "
+                "FROM mobile_eligible_event_times z JOIN mobile_session_publications pub "
+                "ON pub.project_id=z.project_id AND pub.user_id=z.user_id "
+                "AND pub.harness=z.harness AND pub.session_id=z.session_id "
+                "JOIN mobile_run_instances run ON run.project_id=z.project_id AND run.user_id=z.user_id "
+                "AND run.harness=z.harness AND run.session_id=z.session_id "
+                "WHERE z.project_id=:project AND z.user_id=:subject AND z.harness='pi' "
+                "AND z.event_time>=:start AND z.event_time<:end AND pub.status='complete' "
+                "AND pub.source_retained_until>clock_timestamp() AND pub.source_highest_line IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM mobile_source_line_highwater hw "
+                "WHERE hw.project_id=pub.project_id AND hw.user_id=pub.user_id "
+                "AND hw.harness=pub.harness AND hw.session_id=pub.session_id "
+                "AND hw.max_line>pub.source_highest_line) "
+                "AND EXISTS (SELECT 1 FROM mobile_read_controls policy WHERE policy.project_id=pub.project_id "
+                "AND policy.source_policy_ready AND policy.source_policy_epoch=pub.source_policy_epoch) "
+                "AND pub.source_revision=z.source_revision AND run.root_verified=true "
+                "AND run.run_incarnation=z.root_run_incarnation "
+                "AND EXISTS (SELECT 1 FROM mobile_layer_components map "
+                "JOIN mcp_listings l ON l.id=map.component_id AND l.is_private=false "
+                "JOIN mcp_versions v ON v.id=map.version_id AND v.listing_id=l.id "
+                "AND v.status IN ('approved','archived') "
+                "WHERE map.project_id=z.project_id AND map.user_id=z.user_id "
+                "AND map.harness=z.harness AND map.layer_hash=z.layer_hash "
+                "AND NOT EXISTS (SELECT 1 FROM mobile_publication_events uncertain "
+                "WHERE uncertain.kind='mcp' AND uncertain.listing_id=l.id AND uncertain.version_id=v.id "
+                f"AND {committed_at('uncertain')}='infinity'::timestamptz) "
+                "AND (SELECT pe.status FROM mobile_publication_events pe WHERE pe.kind='mcp' "
+                f"AND pe.listing_id=l.id AND pe.version_id=v.id AND {committed_at('pe')}<=z.event_time "
+                "ORDER BY pe.recorded_at DESC,pe.id DESC LIMIT 1)='approved') "
+                "ORDER BY z.user_id,z.session_id,pub.source_revision,pub.first_source_offset LIMIT 21"
+            ),
+            params,
+        )
+    ).all()
+    if not candidates or len(candidates) > MAX_SESSIONS or not await _source_verified(candidates, project):
+        return None
+    return {"roots": 0, "calls": 0, "days": 0, "eligible_sessions": len(candidates)}
+
+
+async def qualified_observations(
+    db: AsyncSession,
+    subject: uuid.UUID,
+    scope: Scope,
+    project: str,
+    start: datetime,
+    end: datetime,
+    component: uuid.UUID | None = None,
+) -> dict | None:
+    """Positive-only partial cohort. None means no safe reading, NOT zero."""
+    verified = await _verified_restrict(db, subject, scope, project, start, end, component)
+    if verified is None:
+        return None
+    predicate, params, restrict = verified
+    stats_sql = (
+        "SELECT count(*) AS calls, "
+        "count(DISTINCT (e.user_id, e.session_id)) AS eligible_sessions, "
+        "count(DISTINCT (e.user_id, e.root_run_incarnation)) FILTER (WHERE e.root_run_incarnation IS NOT NULL) AS roots, "
+        "count(DISTINCT (e.event_time AT TIME ZONE 'UTC')::date) AS days " + _VISIBLE + predicate + restrict
+    )
+    row = (await db.execute(text(stats_sql), params)).one()
+    if not row.calls:
+        return None
+    return {"calls": row.calls, "eligible_sessions": row.eligible_sessions, "roots": row.roots, "days": row.days}
+
+
+async def qualified_components(
+    db: AsyncSession,
+    subject: uuid.UUID,
+    scope: Scope,
+    project: str,
+    start: datetime,
+    end: datetime,
+) -> list[dict] | None:
+    verified = await _verified_restrict(db, subject, scope, project, start, end)
+    if verified is None:
+        return None
+    predicate, params, restrict = verified
+    rows = (
+        await db.execute(
+            text(
+                "SELECT l.id,l.name,count(*) AS calls,count(DISTINCT(e.user_id,e.session_id)) AS eligible_sessions,"
+                "count(DISTINCT(e.user_id,e.root_run_incarnation)) FILTER (WHERE e.root_run_incarnation IS NOT NULL) AS roots,"
+                "count(DISTINCT(e.event_time AT TIME ZONE 'UTC')::date) AS days "
+                + _VISIBLE
+                + predicate
+                + restrict
+                + " GROUP BY l.id,l.name ORDER BY l.id LIMIT 21"
+            ),
+            params,
+        )
+    ).all()
+    if len(rows) > 20:
+        return None
+    return [
+        dict(
+            id=row.id,
+            name=row.name,
+            calls=row.calls,
+            eligible_sessions=row.eligible_sessions,
+            roots=row.roots,
+            days=row.days,
+        )
+        for row in rows
+    ]
+
+
+# One root projection, with typed facts joined to their own verified pins,
+# original authors and publication transitions. Never a parallel counting API.
+# Only these static table names can enter SQL; input subjects and windows bind.
+_TRACE_TABLES = {
+    "mcp": ("mobile_evidence_events", "mobile_layer_components", "mcp_listings", "mcp_versions"),
+    "skill": ("mobile_skill_evidence_events", "mobile_skill_layer_components", "skill_listings", "skill_versions"),
+    "hook": ("mobile_hook_evidence_events", "mobile_hook_layer_components", "hook_listings", "hook_versions"),
+}
+
+# Children may be more than one hop below their root. Checking only the fact's
+# and root's publication leaves an expired/unqualified intermediate ancestor
+# readable until the asynchronous descendant reproject catches up. The bounded
+# chain is evaluated only for child facts; root-heavy batches take the short arm.
+_LINEAGE_GUARD = """
+AND CASE WHEN e.run_incarnation=e.root_run_incarnation AND e.session_id=run.session_id
+ THEN true ELSE EXISTS (
+  WITH RECURSIVE chain AS (
+   SELECT own.project_id,own.user_id,own.harness,own.session_id,own.run_incarnation,
+     own.parent_session_id,own.parent_run_incarnation,own.parent_header_hash,
+     own.header_hash,own.started_at,own.source_status,0 AS depth
+   FROM mobile_run_instances own
+   WHERE own.project_id=e.project_id AND own.user_id=e.user_id AND own.harness=e.harness
+     AND own.session_id=e.session_id AND own.run_incarnation=e.run_incarnation
+   UNION ALL
+   SELECT parent.project_id,parent.user_id,parent.harness,parent.session_id,parent.run_incarnation,
+     parent.parent_session_id,parent.parent_run_incarnation,parent.parent_header_hash,
+     parent.header_hash,parent.started_at,parent.source_status,chain.depth+1
+   FROM chain JOIN mobile_run_instances parent
+     ON parent.project_id=chain.project_id AND parent.user_id=chain.user_id AND parent.harness=chain.harness
+     AND parent.session_id=chain.parent_session_id AND parent.run_incarnation=chain.parent_run_incarnation
+     AND parent.header_hash=chain.parent_header_hash AND parent.started_at<=chain.started_at
+   WHERE chain.depth<8
+  )
+  SELECT 1 FROM chain ancestor
+  LEFT JOIN mobile_session_publications ancestor_pub
+    ON ancestor_pub.project_id=ancestor.project_id AND ancestor_pub.user_id=ancestor.user_id
+    AND ancestor_pub.harness=ancestor.harness AND ancestor_pub.session_id=ancestor.session_id
+  HAVING count(*)>1
+    AND bool_or(ancestor.run_incarnation=e.root_run_incarnation AND ancestor.parent_session_id IS NULL)
+    AND bool_and(coalesce(
+      ancestor.source_status IN ('complete','partial')
+      AND ancestor_pub.status IN ('complete','partial') AND ancestor_pub.source_retained_until>clock_timestamp()
+      AND ancestor_pub.source_highest_line IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM mobile_source_line_highwater hw
+       WHERE hw.project_id=ancestor_pub.project_id AND hw.user_id=ancestor_pub.user_id
+        AND hw.harness=ancestor_pub.harness AND hw.session_id=ancestor_pub.session_id
+        AND hw.max_line>ancestor_pub.source_highest_line)
+      AND EXISTS (SELECT 1 FROM mobile_read_controls policy WHERE policy.project_id=ancestor_pub.project_id
+       AND policy.source_policy_ready AND policy.source_policy_epoch=ancestor_pub.source_policy_epoch),false))
+ ) END
+"""
+
+
+def _trace_from(kind: Literal["mcp", "skill", "hook"]) -> str:
+    event, pins, listing, version = _TRACE_TABLES[kind]
+    revision_join = "AND pub.source_revision=e.source_revision" if kind in ("skill", "hook") else ""
+    pin_identity = "map.binding_sha256=e.binding_sha256" if kind == "hook" else "map.alias=e.alias"
+    # Own publication covers roots; the child-only lineage guard checks all
+    # ancestors (including the root), so a second root join is redundant.
+    return f"""
+FROM {event} e
+JOIN mobile_run_instances run ON run.project_id=e.project_id AND run.user_id=e.user_id
+ AND run.harness=e.harness AND run.run_incarnation=e.root_run_incarnation
+ AND run.root_verified=true AND run.source_status IN ('complete','partial')
+JOIN {pins} map ON map.project_id=e.project_id AND map.user_id=e.user_id
+ AND map.harness=e.harness AND map.layer_hash=e.layer_hash AND {pin_identity} AND map.component_id=e.component_id
+JOIN mobile_session_publications pub ON pub.project_id=e.project_id AND pub.user_id=e.user_id
+ AND pub.harness=e.harness AND pub.session_id=e.session_id AND pub.status IN ('complete','partial')
+ AND pub.source_retained_until>clock_timestamp() AND pub.source_highest_line IS NOT NULL
+LEFT JOIN mobile_source_line_highwater hw ON hw.project_id=pub.project_id AND hw.user_id=pub.user_id
+ AND hw.harness=pub.harness AND hw.session_id=pub.session_id
+JOIN mobile_read_controls policy ON policy.project_id=pub.project_id AND policy.source_policy_ready
+ AND policy.source_policy_epoch=pub.source_policy_epoch
+ AND (hw.max_line IS NULL OR hw.max_line<=pub.source_highest_line)
+ {revision_join}
+ {_LINEAGE_GUARD}
+JOIN {listing} l ON l.id=e.component_id
+JOIN mobile_listing_provenance p ON p.kind='{kind}' AND p.listing_id=l.id
+JOIN users origin ON origin.id=p.original_author_id AND origin.auth_provider!='deactivated'
+JOIN {version} v ON v.id=map.version_id AND v.listing_id=l.id
+JOIN users actor ON actor.id=e.user_id AND actor.auth_provider!='deactivated'
+LEFT JOIN (
+  SELECT pe.listing_id,pe.version_id,pe.status,{committed_at("pe")} AS recorded_at,
+   lead({committed_at("pe")}) OVER (PARTITION BY pe.listing_id,pe.version_id
+                             ORDER BY pe.recorded_at,pe.id) AS next_recorded_at
+  FROM mobile_publication_events pe WHERE pe.kind='{kind}'
+   AND NOT EXISTS (SELECT 1 FROM mobile_publication_events uncertain
+    WHERE uncertain.kind=pe.kind AND uncertain.listing_id=pe.listing_id
+     AND uncertain.version_id=pe.version_id
+     AND {committed_at("uncertain")}='infinity'::timestamptz)
+) approval ON approval.listing_id=l.id AND approval.version_id=v.id
+ AND approval.recorded_at<=e.event_time
+ AND (approval.next_recorded_at IS NULL OR approval.next_recorded_at>e.event_time)
+WHERE e.project_id=:project AND e.harness='pi' AND e.event_time>=:start AND e.event_time<:end
+ AND e.root_run_incarnation IS NOT NULL
+"""
+
+
+_TRACE_FROM = _trace_from("mcp")
+_TRACE_APPROVED = " AND approval.status='approved'"
+
+
+def _trace_scope(scope: Scope, *, viewer_self: bool) -> str:
+    public = "l.is_private=false AND v.status IN ('approved','archived')" + _TRACE_APPROVED
+    if scope == "author":
+        return " AND p.original_author_id=:subject AND " + public
+    # A private self-owned listing is visible only to the owner reading their
+    # own User scope. An admin viewing another user never inherits that access.
+    if viewer_self:
+        return " AND e.user_id=:subject AND ((" + public + ") OR (l.is_private=true AND l.submitted_by=:subject))"
+    return " AND e.user_id=:subject AND " + public
+
+
+def _trace_branches(
+    columns: str, scope: Scope, viewer_self: bool, *, kind: str | None = None, actor_ids: bool = False
+) -> str:
+    """Same visibility and original-author check independently for each type."""
+    return " UNION ALL ".join(
+        f"SELECT '{item}' AS kind,{columns} "
+        + _trace_from(item)
+        + _trace_scope(scope, viewer_self=viewer_self)
+        + (" AND e.user_id=ANY(CAST(:actor_ids AS uuid[]))" if actor_ids else "")
+        for item in _TRACE_TABLES
+        if kind is None or kind == item
+    )
+
+
+async def trace_union(
+    db: AsyncSession,
+    subject: uuid.UUID,
+    scope: Scope,
+    project: str,
+    start: datetime,
+    end: datetime,
+    *,
+    viewer_self: bool = False,
+    actor_ids: set[uuid.UUID] | None = None,
+) -> dict | None:
+    """Partial-only distinct actor/root union; no source JSONL per card.
+
+    None is *not recorded*, never a measured zero. Full-window supported zero
+    awaits an instrumented all-kind zero-positive eligibility cohort.
+    """
+    from services.mobile_read_control import readable
+
+    if not await readable(db, project):
+        return None
+    source_branches = _trace_branches(
+        "e.user_id,e.session_id,e.run_incarnation,pub.source_revision,pub.first_source_offset",
+        scope,
+        viewer_self,
+        actor_ids=actor_ids is not None,
+    )
+    sql = (
+        "SELECT count(DISTINCT (typed.user_id,typed.root_run_incarnation)) AS roots, "
+        "count(*) FILTER (WHERE typed.kind='mcp') AS calls, "
+        "count(*) FILTER (WHERE typed.kind='skill') AS skill_loads, "
+        "count(*) FILTER (WHERE typed.kind='hook') AS hook_runs, "
+        "count(DISTINCT (typed.event_time AT TIME ZONE 'UTC')::date) AS days FROM ("
+        + _trace_branches(
+            "e.user_id,e.root_run_incarnation,e.event_time", scope, viewer_self, actor_ids=actor_ids is not None
+        )
+        + ") typed"
+    )
+    # A concentrated original author otherwise provokes one nested lookup per
+    # event into run, publication and account tables (10K+ repeated lookups).
+    await db.execute(text("SET LOCAL enable_nestloop=off"))
+    # Source-policy/ancestor guards make the complex plan cross PostgreSQL's
+    # JIT cost threshold; multi-second compilation is not part of the proof.
+    await db.execute(text("SET LOCAL jit=off"))
+    params = {"project": project, "subject": subject, "start": start, "end": end}
+    if actor_ids is not None:
+        params["actor_ids"] = list(actor_ids)
+    if not await _trace_sources_verified(db, source_branches, params, project):
+        return None
+    row = (await db.execute(text(sql), params)).one()
+    return (
+        {
+            "roots": row.roots,
+            "calls": row.calls,
+            "skill_loads": row.skill_loads,
+            "hook_runs": row.hook_runs,
+            "days": row.days,
+        }
+        if row.roots
+        else None
+    )
+
+
+async def trace_pair_batch(
+    db: AsyncSession,
+    subjects: list[uuid.UUID],
+    viewer: uuid.UUID,
+    project: str,
+    start: datetime,
+    end: datetime,
+    *,
+    include_author: bool = True,
+    actor_ids: set[uuid.UUID] | None = None,
+) -> tuple[dict[uuid.UUID, dict], dict[uuid.UUID, dict]]:
+    """Materialize bounded viewer-relevant facts once, then group two independent scopes."""
+    from services.mobile_read_control import readable
+
+    if not await readable(db, project):
+        return {}, {}
+    params = {"project": project, "subjects": subjects, "viewer": viewer, "start": start, "end": end}
+    if actor_ids is not None:
+        params["actor_ids"] = list(actor_ids)
+    # The materialized CTE prevents repeated run/visibility/approval lookups
+    # when both scopes are requested in the same viewport. It contains only
+    # actors/authors on the requested 12 IDs, not the global evidence corpus.
+    branches = " UNION ALL ".join(
+        f"SELECT '{kind}' AS kind,e.user_id,e.root_run_incarnation,e.event_time,"
+        "p.original_author_id,l.is_private,l.submitted_by,v.status AS version_status,"
+        "approval.status AS publication_status,e.session_id,e.run_incarnation,"
+        "pub.source_revision,pub.first_source_offset "
+        + _trace_from(kind)
+        + (" AND e.user_id=ANY(CAST(:actor_ids AS uuid[]))" if actor_ids is not None else "")
+        + " AND ((:include_author AND p.original_author_id=ANY(CAST(:subjects AS uuid[]))) "
+        "OR e.user_id=ANY(CAST(:subjects AS uuid[])))"
+        for kind in _TRACE_TABLES
+    )
+    sql = (
+        "WITH eligible AS MATERIALIZED (" + branches + ") "
+        "SELECT 'author' AS scope_name,original_author_id AS subject,"
+        "count(DISTINCT (user_id,root_run_incarnation)) AS roots,"
+        "count(*) FILTER (WHERE kind='mcp') AS calls,count(*) FILTER (WHERE kind='skill') AS skill_loads,"
+        "count(*) FILTER (WHERE kind='hook') AS hook_runs,"
+        "count(DISTINCT (event_time AT TIME ZONE 'UTC')::date) AS days "
+        "FROM eligible WHERE :include_author AND original_author_id=ANY(CAST(:subjects AS uuid[])) "
+        "AND is_private=false AND version_status IN ('approved','archived') "
+        "AND publication_status='approved' GROUP BY original_author_id "
+        "UNION ALL SELECT 'user' AS scope_name,user_id AS subject,"
+        "count(DISTINCT (user_id,root_run_incarnation)) AS roots,"
+        "count(*) FILTER (WHERE kind='mcp') AS calls,count(*) FILTER (WHERE kind='skill') AS skill_loads,"
+        "count(*) FILTER (WHERE kind='hook') AS hook_runs,"
+        "count(DISTINCT (event_time AT TIME ZONE 'UTC')::date) AS days "
+        "FROM eligible WHERE user_id=ANY(CAST(:subjects AS uuid[])) "
+        "AND ((is_private=false AND version_status IN ('approved','archived') "
+        "AND publication_status='approved') "
+        "OR (user_id=:viewer AND is_private=true AND submitted_by=:viewer)) "
+        "GROUP BY user_id"
+    )
+    params["include_author"] = include_author
+    visible = (
+        "WHERE (:include_author AND original_author_id=ANY(CAST(:subjects AS uuid[])) "
+        "AND is_private=false AND version_status IN ('approved','archived') "
+        "AND publication_status='approved') OR (user_id=ANY(CAST(:subjects AS uuid[])) "
+        "AND ((is_private=false AND version_status IN ('approved','archived') "
+        "AND publication_status='approved') "
+        "OR (user_id=:viewer AND is_private=true AND submitted_by=:viewer)))"
+    )
+    # PostgreSQL otherwise selects 10K+ repeated per-fact nested lookups into
+    # publication, run and user tables on a concentrated original author.
+    # This is transaction-local (never a global database configuration change).
+    await db.execute(text("SET LOCAL enable_nestloop=off"))
+    await db.execute(text("SET LOCAL jit=off"))
+    if not await _trace_sources_verified(db, branches, params, project, visible):
+        return {}, {}
+    authors: dict[uuid.UUID, dict] = {}
+    users: dict[uuid.UUID, dict] = {}
+    for row in (await db.execute(text(sql), params)).all():
+        if row.roots:
+            (authors if row.scope_name == "author" else users)[row.subject] = {
+                "roots": row.roots,
+                "calls": row.calls,
+                "skill_loads": row.skill_loads,
+                "hook_runs": row.hook_runs,
+                "days": row.days,
+            }
+    return authors, users
+
+
+async def trace_component_page(
+    db: AsyncSession,
+    subject: uuid.UUID,
+    scope: Scope,
+    project: str,
+    start: datetime,
+    end: datetime,
+    *,
+    viewer_self: bool = False,
+    after: tuple[int, str, uuid.UUID] | None = None,
+    component: uuid.UUID | None = None,
+    kind: Literal["mcp", "skill", "hook"] | None = None,
+    limit: int = 20,
+    actor_ids: set[uuid.UUID] | None = None,
+) -> list[dict] | None:
+    """Indexed PG fact aggregation with stable reach/id keyset, 21-row probe."""
+    from services.mobile_read_control import readable
+
+    if not await readable(db, project):
+        return None
+    params = {"project": project, "subject": subject, "start": start, "end": end, "limit": limit + 1}
+    component_sql = ""
+    if actor_ids is not None:
+        params["actor_ids"] = list(actor_ids)
+    if component is not None:
+        component_sql = " AND l.id=:component"
+        params["component"] = component
+    after_sql = ""
+    if after:
+        after_sql = (
+            " HAVING count(DISTINCT (typed.user_id,typed.root_run_incarnation))<:after_roots OR "
+            "(count(DISTINCT (typed.user_id,typed.root_run_incarnation))=:after_roots "
+            "AND (typed.kind,typed.id)>(:after_kind,:after_id))"
+        )
+        params.update(after_roots=after[0], after_kind=after[1], after_id=after[2])
+    branches = " UNION ALL ".join(
+        f"SELECT '{item}' AS kind,l.id,l.name,p.original_author_id,origin.username AS author_username,"
+        "origin.name AS author_name,e.user_id,e.root_run_incarnation,"
+        "e.session_id,e.run_incarnation,pub.source_revision,pub.first_source_offset "
+        + _trace_from(item)
+        + _trace_scope(scope, viewer_self=viewer_self)
+        + (" AND e.user_id=ANY(CAST(:actor_ids AS uuid[]))" if actor_ids is not None else "")
+        + component_sql
+        for item in _TRACE_TABLES
+        if kind is None or item == kind
+    )
+    sql = (
+        "SELECT typed.kind,typed.id,typed.name,typed.original_author_id,"
+        "typed.author_username,typed.author_name,"
+        "count(DISTINCT (typed.user_id,typed.root_run_incarnation)) AS roots,"
+        "count(*) FILTER (WHERE typed.kind='mcp') AS calls,"
+        "count(*) FILTER (WHERE typed.kind='skill') AS skill_loads,"
+        "count(*) FILTER (WHERE typed.kind='hook') AS hook_runs "
+        "FROM (" + branches + ") typed "
+        "GROUP BY typed.kind,typed.id,typed.name,typed.original_author_id,typed.author_username,typed.author_name"
+        + after_sql
+        + " ORDER BY roots DESC,typed.kind,typed.id LIMIT :limit"
+    )
+    await db.execute(text("SET LOCAL enable_nestloop=off"))
+    await db.execute(text("SET LOCAL jit=off"))
+    if not await _trace_sources_verified(db, branches, params, project):
+        return None
+    return [dict(row._mapping) for row in (await db.execute(text(sql), params)).all()]

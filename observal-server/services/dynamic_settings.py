@@ -346,6 +346,20 @@ DEFAULTS: dict[str, str] = {
     "security.rate_limit_auth": "10/minute",
     "security.rate_limit_auth_strict": "5/minute",
     "security.trace_privacy": "false",
+    # Off until subscription isolation and the aggregate-only API are deployed
+    # and verified together. Phone credentials must not expose legacy feeds.
+    "mobile.auth_enabled": "false",
+    # Deliberately separate from production trace_headlines: explicit isolated
+    # server + viewer + human test acknowledgement only, never default on.
+    "mobile.synthetic_test_enabled": "false",
+    "mobile.synthetic_test_server_id": "",
+    "mobile.synthetic_test_viewer_id": "",
+    "mobile.synthetic_test_self_user_viewer_id": "",
+    "mobile.synthetic_test_ack": "",
+    # Explicit, server-bound owner qualification for real-person phone UI.
+    # The production switch alone never makes a cohort displayable.
+    "mobile.trace_qualification_server_id": "",
+    "mobile.trace_qualification_ack": "",
     # Registry policy
     "registry.registered_agents_only": "false",
     # Must be enabled only after all old API/worker processes are drained and

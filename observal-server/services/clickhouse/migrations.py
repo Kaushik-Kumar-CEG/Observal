@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 """Versioned ClickHouse SQL migrations."""
 
@@ -140,9 +141,44 @@ async def _stamp_baseline_if_present(applied: set[str]) -> set[str]:
     return {BASELINE_VERSION}
 
 
+async def _render_retention_sql(sql: str) -> str:
+    """Bind CH012's versioned DDL to the validated PostgreSQL retention policy."""
+    marker = "{{SESSION_EVENTS_ROW_RETENTION}}"
+    if marker not in sql:
+        return sql
+
+    from sqlalchemy import text
+
+    from database import async_session
+
+    async with async_session() as db:
+        configured = await db.scalar(text("SELECT value FROM enterprise_config WHERE key='data.retention_days'"))
+    try:
+        days = int(configured) if configured is not None else 90
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Invalid PostgreSQL source retention policy for CH012") from exc
+    if not 0 <= days <= 36500:
+        raise RuntimeError("Source retention must be between 0 and 36500 days for CH012")
+
+    if days:
+        ddl = f"ALTER TABLE session_events MODIFY TTL toDate(timestamp) + INTERVAL {days} DAY"
+    else:
+        result = await _client._query(
+            "SELECT create_table_query FROM system.tables WHERE database=currentDatabase() "
+            "AND name='session_events' FORMAT JSON"
+        )
+        result.raise_for_status()
+        rows = result.json().get("data") or []
+        if len(rows) != 1:
+            raise RuntimeError("Cannot verify source table retention for CH012")
+        engine_clause = str(rows[0].get("create_table_query") or "").split(" ENGINE =", 1)[-1]
+        ddl = "ALTER TABLE session_events REMOVE TTL" if " TTL " in engine_clause else "SELECT 1"
+    return sql.replace(marker, ddl)
+
+
 async def _run_file(path: Path) -> None:
     version = path.stem
-    statements = _split_sql(path.read_text())
+    statements = _split_sql(await _render_retention_sql(path.read_text()))
     optic.info("applying ClickHouse migration {} ({} statements)", path.name, len(statements))
     for stmt in statements:
         resp = await _client._query(stmt, {"wait_for_async_insert": "1"})

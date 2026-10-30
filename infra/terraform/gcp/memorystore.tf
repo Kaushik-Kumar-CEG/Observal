@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Lokesh Selvam <lokeshselvam7025@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 resource "google_redis_instance" "main" {
@@ -10,7 +11,7 @@ resource "google_redis_instance" "main" {
   authorized_network = google_compute_network.main.id
 
   redis_configs = {
-    maxmemory-policy = "allkeys-lru"
+    maxmemory-policy = "noeviction"
   }
 
   depends_on = [google_project_service.redis]

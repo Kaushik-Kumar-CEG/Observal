@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
 import { createRootRoute, Outlet } from "@tanstack/react-router";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/lib/theme";
 import { makeQueryClient } from "@/lib/query-client";
@@ -27,7 +28,9 @@ function RootComponent() {
   const authToken = useSyncExternalStore(subscribeToAuthChanges, getAuthTokenSnapshot, () => "");
   const previousAuthToken = useRef(authToken);
 
-  useEffect(() => {
+  // Clear the previous account before mounted pages start their first query
+  // after a silent refresh. A passive clear can discard that in-flight read.
+  useLayoutEffect(() => {
     if (previousAuthToken.current !== authToken) {
       queryClient.clear();
       previousAuthToken.current = authToken;

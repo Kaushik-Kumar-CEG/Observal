@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Generate service configuration files for embedded mode.
@@ -207,7 +208,7 @@ def generate_redis_conf() -> Path:
 
         # Memory
         maxmemory 128mb
-        maxmemory-policy allkeys-lru
+        maxmemory-policy noeviction
 
         # Logging
         logfile {log_path}
