@@ -260,6 +260,51 @@ async def test_subject_delete_races_admission_without_deadlock_or_resurrection(s
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_operation_status_serializes_subject_erasure_and_never_leaks_across_owners(scratch):
+    sessions = scratch
+    server, owner, another_owner, subject = (uuid.uuid4() for _ in range(4))
+    key = Partition(server, "status-erasure", owner, "real")
+    foreign = Partition(server, "status-erasure", another_owner, "real")
+    await _users(sessions, owner, another_owner, subject)
+    await _ready(sessions, key)
+    await _ready(sessions, foreign)
+    operation_id, _, (code, _) = await _edit(sessions, key, subject, 0, "follow")
+    assert code == 200
+
+    # The status owner lock holds until its request transaction commits. The
+    # subject-delete trigger must wait, then redact the operation atomically.
+    async with sessions.begin() as reader:
+        status = await operation_status(reader, key, operation_id)
+        assert status["effective"] and status["result"]["subject_id"] == str(subject)
+
+        async def erase():
+            async with sessions.begin() as db:
+                await db.execute(text("DELETE FROM users WHERE id=:id"), {"id": subject})
+
+        erasure = asyncio.create_task(erase())
+        await asyncio.sleep(0.1)
+        assert not erasure.done()
+    await asyncio.wait_for(erasure, 10)
+    async with sessions.begin() as db:
+        status = await operation_status(db, key, operation_id)
+        assert status["effective"] is False
+        assert "subject_id" not in status["result"]
+        with pytest.raises(StoreFenceError, match="unknown"):
+            await operation_status(db, foreign, operation_id)
+        row = (
+            await db.execute(
+                text(
+                    "SELECT subject_id, body_digest, outcome, effective FROM mobile_follow_operations "
+                    "WHERE operation_id=:id"
+                ),
+                {"id": operation_id},
+            )
+        ).one()
+        assert row.subject_id is None and row.body_digest is None and row.outcome is None
+        assert row.effective is False
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_subject_erasure_in_middle_of_deltas_requires_snapshot(scratch):
     sessions = scratch
     server, owner, first, erased, last = (uuid.uuid4() for _ in range(5))

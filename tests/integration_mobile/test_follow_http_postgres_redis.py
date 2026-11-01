@@ -612,6 +612,7 @@ async def test_normal_two_api_privacy_recovery_survives_closed_activity_gate(scr
         unapproved, _ = create_access_token(
             owner, UserRole.super_admin, client_id="observal-mobile", device_id="phone-b"
         )
+        other_phone, _ = create_access_token(other, UserRole.user, client_id="observal-mobile", device_id="other-phone")
         desktop, _ = create_access_token(owner, UserRole.super_admin)
         password, _ = create_access_token(owner, UserRole.super_admin, browser_verified=True)
         stranger, _ = create_access_token(uuid.uuid4(), UserRole.user)
@@ -693,6 +694,21 @@ async def test_normal_two_api_privacy_recovery_survives_closed_activity_gate(scr
                 grant = (await expect(await second.post(ROOT + "/write-grant", headers=bearer(phone)), 200))[
                     "access_token"
                 ]
+                operation_id = str(uuid.uuid4())
+                await expect(
+                    await first.post(
+                        ROOT + "/operations",
+                        headers=bearer(grant),
+                        json={
+                            "operation_id": operation_id,
+                            "subject_id": str(other),
+                            "owner_generation": 2,
+                            "base_person_revision": 0,
+                            "action": "follow",
+                        },
+                    ),
+                    200,
+                )
                 async with engine.begin() as db:
                     if closed_gate == "operator_off":
                         await db.execute(
@@ -713,6 +729,19 @@ async def test_normal_two_api_privacy_recovery_survives_closed_activity_gate(scr
                     "access_token"
                 ]
                 assert renewed != grant
+                for client in (first, second):
+                    status = await client.get(ROOT + "/operations/" + operation_id, headers=bearer(phone))
+                    if closed_gate == "operator_off":
+                        saved = await expect(status, 200)
+                        assert saved["effective"] is True and saved["result"]["subject_id"] == str(other)
+                        assert (
+                            await client.get(ROOT + "/operations/" + operation_id, headers=bearer(other_phone))
+                        ).status_code == 404
+                    else:
+                        assert status.status_code == 404
+                    assert (await client.get(ROOT + "/operations/" + operation_id)).status_code == (
+                        401 if closed_gate == "operator_off" else 404
+                    )
                 for client in (first, second):
                     assert (await client.post(ROOT + "/write-grant", headers=bearer(unapproved))).status_code == 403
                     assert (await client.post(ROOT + "/write-grant", headers=bearer(stranger))).status_code == 401
@@ -766,6 +795,13 @@ async def test_normal_two_api_privacy_recovery_survives_closed_activity_gate(scr
                     202,
                 )
                 assert accepted["withdrawal_id"] == withdrawal_id and accepted["state"] == "pending"
+                status = await second.get(ROOT + "/operations/" + operation_id, headers=bearer(phone))
+                if closed_gate == "operator_off":
+                    saved = await expect(status, 200)
+                    assert saved["effective"] is False
+                    assert "subject_id" not in saved["result"]
+                else:
+                    assert status.status_code == 404
                 assert (
                     await expect(
                         await second.get(
