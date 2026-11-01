@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+// SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -81,6 +82,7 @@ interface ObservalState {
   generation: number;
   layerHash: string | null;
   layerSnapshot: LayerSnapshot | null;
+  registration: Promise<void> | null;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -355,12 +357,19 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (state.config && state.layerSnapshot) {
-      uploadLayerSnapshot(state.config, state.layerSnapshot)
-        .then((ok) => {
-          if (!ok && ctx.hasUI) ctx.ui.notify("Layer snapshot upload failed", "warning");
+      const active = state;
+      active.registration = uploadLayerSnapshot(active.config, active.layerSnapshot)
+        .then(async (ok) => {
+          if (!ok) {
+            if (ctx.hasUI) ctx.ui.notify("Layer snapshot upload failed", "warning");
+            return;
+          }
+          if (!await registerMobileLayer(active.config!, active.layerSnapshot!) && ctx.hasUI) {
+            ctx.ui.notify("Verified mobile layer registration unavailable", "warning");
+          }
         })
-        .catch((err) => {
-          if (ctx.hasUI) ctx.ui.notify(`Layer snapshot upload failed: ${err.message}`, "warning");
+        .catch(() => {
+          if (ctx.hasUI) ctx.ui.notify("Layer registration failed", "warning");
         });
     }
 
@@ -936,7 +945,8 @@ export default function (pi: ExtensionAPI) {
     if (sessionId) process.env.OBSERVAL_SESSION_ID = sessionId;
     process.env.OBSERVAL_HARNESS = "pi";
 
-    return { config, sessionFile, sessionId, cwd: ctx.cwd, byteOffset, lineCount, generation: 0, layerHash, layerSnapshot };
+    return { config, sessionFile, sessionId, cwd: ctx.cwd, byteOffset, lineCount, generation: 0, layerHash, layerSnapshot,
+      registration: null };
   }
 
   // ─── Capability attribution ───────────────────────────────────────────────
@@ -1784,6 +1794,56 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
+  /** Only pins verified against the active Pi files may enter the mobile map. */
+  function mobileLayerRequest(snapshot: LayerSnapshot): Record<string, unknown> | null {
+    const pins: any = snapshot.pinned_versions;
+    const drift: any = snapshot.drift;
+    if (!/^v2_[0-9a-f]{60}$/.test(snapshot.hash) || pins?.schema_version !== 2) return null;
+    const entries = [...(Array.isArray(pins.standalone) ? pins.standalone : []),
+      ...(Array.isArray(pins.agents) ? pins.agents.flatMap((agent: any) =>
+        Array.isArray(agent.components) ? agent.components.map((item: any) => ({ ...item, parent_agent_id: agent.id })) : []) : [])];
+    const components: any[] = [], skills: any[] = [], hooks: any[] = [];
+    const files = new Map((snapshot.harnesses.pi ?? []).map((item) => [item.path, item.hash]));
+    const seen = new Set<string>();
+    for (const item of entries) {
+      if (!["mcp", "skill", "hook"].includes(item?.type)) continue;
+      const kind = item.type as "mcp" | "skill" | "hook";
+      const key = ["mcp", "skill", "hook"].indexOf(kind);
+      const verifications: any = drift?.[["mcp_verifications", "skill_verifications", "hook_verifications"][key]!];
+      const alias = item.local_name, scope = item.scope, id = uuid(item.id);
+      if (!id || !SAFE_MCP_ALIAS.test(alias ?? "") || !scope || typeof item.version !== "string"
+        || seen.has(`${kind}:${id}`) || !Array.isArray(verifications)) return null;
+      seen.add(`${kind}:${id}`);
+      const matches = verifications.filter((v: any) => v.harness === "pi" && v.component_id === id
+        && v.alias === alias && v.scope === scope && (v.parent_agent_id ?? "") === (item.parent_agent_id ?? ""));
+      if (matches.length !== 1 || matches[0].status !== "verified"
+        || !files.has({ mcp: PI_MCP_VERIFICATION_PATH, skill: PI_SKILL_VERIFICATION_PATH,
+          hook: PI_HOOK_VERIFICATION_PATH }[kind])) return null;
+      const pin = { id, version: item.version, alias };
+      if (kind === "mcp") components.push(pin);
+      else if (kind === "skill") {
+        const contentHash = files.get((scope === "user" ? "user:skills/" : "project:.pi/skills/") + alias + "/SKILL.md");
+        if (!/^sha256-[0-9a-f]{64}$/.test(contentHash ?? "")
+          || !/^[0-9a-f]{64}$/.test(matches[0].location_sha256 ?? "")) return null;
+        skills.push({ ...pin, scope, location_sha256: matches[0].location_sha256,
+          content_sha256: contentHash!.slice(7) });
+      } else {
+        if (scope !== "user" || !/^[0-9a-f]{64}$/.test(matches[0].location_sha256 ?? "")
+          || !files.has("user:observal-hooks.json")) return null;
+        hooks.push({ ...pin, scope, binding_sha256: matches[0].location_sha256 });
+      }
+    }
+    return seen.size ? { source_layer_hash: snapshot.hash, harness: "pi", components, skills, hooks } : null;
+  }
+
+  async function registerMobileLayer(config: ObservalConfig, snapshot: LayerSnapshot): Promise<boolean> {
+    const request = mobileLayerRequest(snapshot);
+    if (!request) return true; // No fully verified typed pin set: no mobile claim.
+    const result = await postJsonWithTimeout(config, "/api/v1/mobile-evidence/v1/layers", JSON.stringify(request));
+    return result?.hash === snapshot.hash && result?.mapped_components ===
+      (request.components as unknown[]).length + (request.skills as unknown[]).length + (request.hooks as unknown[]).length;
+  }
+
   function readCursor(sessionId: string): CursorEntry {
     try {
       if (!fs.existsSync(SYNC_STATE_PATH)) return { offset: 0, line_count: 0, local_valid: false };
@@ -1968,6 +2028,10 @@ export default function (pi: ExtensionAPI) {
     const gen = ++s.generation;
 
     try {
+      // A session cannot be source-qualified until the same layer is stored
+      // and its installed typed pins are registered. Failed registration still
+      // permits ordinary telemetry delivery, never a fabricated mobile fact.
+      if (s.registration) await s.registration;
       let cursor = readCursor(s.sessionId);
       const storedPending = readPending(s.sessionId);
       if (storedPending) {

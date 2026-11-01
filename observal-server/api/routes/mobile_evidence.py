@@ -48,6 +48,8 @@ class HookPin(BaseModel):
 
 class LayerRequest(BaseModel):
     harness: Literal["pi"]
+    # Bind the typed map to the same immutable layer hash carried by Pi source.
+    source_layer_hash: str | None = Field(default=None, pattern=r"^v2_[0-9a-f]{60}$")
     components: list[ComponentPin] = Field(default_factory=list, max_length=100)
     skills: list[SkillPin] = Field(default_factory=list, max_length=100)
     hooks: list[HookPin] = Field(default_factory=list, max_length=100)
@@ -194,6 +196,20 @@ async def upload_layer(
     if len(resolved_hooks) != len(hook_pins):
         raise HTTPException(status_code=422, detail="Unsupported component identity")
     digest = canonical_layer_hash(layer.components, layer.skills, layer.hooks)
+    if layer.source_layer_hash is not None:
+        from services.layer_components.extractor import _snapshot
+        from services.mobile_layer_registration import matches_verified_pi_snapshot
+
+        # A v3 identity-only digest cannot join Pi's v2 source hash. Only a
+        # same-uploader, conflict-free v2 snapshot with *all* installed pins
+        # verified may create a mapping under the Pi sender's actual hash.
+        try:
+            snapshot, conflict = await _snapshot(str(DEFAULT_PROJECT_ID), str(viewer.id), layer.source_layer_hash)
+        except Exception as error:
+            raise HTTPException(status_code=503, detail="Layer snapshot verification unavailable") from error
+        if conflict or snapshot is None or not matches_verified_pi_snapshot(snapshot, layer):
+            raise HTTPException(status_code=422, detail="Unverified Pi source layer")
+        digest = layer.source_layer_hash
     params = {"project": str(DEFAULT_PROJECT_ID), "user": viewer.id, "harness": layer.harness, "hash": digest}
     existing = (
         await db.execute(
