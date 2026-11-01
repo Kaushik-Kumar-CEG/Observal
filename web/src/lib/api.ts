@@ -156,6 +156,10 @@ function getRefreshToken(): string | null {
 	return localStorage.getItem(STORAGE_KEY_REFRESH_TOKEN);
 }
 
+export function currentWebsiteActor(): string | null {
+	return tokenSubject(getAccessToken());
+}
+
 function tokenSubject(token: string | null): string | null {
 	try {
 		const payload = JSON.parse(atob(token!.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
@@ -573,8 +577,14 @@ function browserSessionError(): Error & { status: number } {
 	return Object.assign(new Error("Browser session unavailable"), { status: 401 });
 }
 
+function browserAccountChangedError(): Error & { status: number } {
+	return Object.assign(new Error("Website account changed before browser approval"), { status: 409 });
+}
+
 // Action proof lives only in this call stack, never in storage, URL, or shared query cache.
 async function followBrowserAction<T>(action: FollowBrowserActionChallenge["action"], body: unknown, path: string): Promise<T> {
+	const actor = currentWebsiteActor();
+	if (!actor) throw browserSessionError();
 	let token = getAccessToken();
 	if (!token || accessTokenExpired(token)) {
 		const result = await refreshAccessTokenWithReason();
@@ -583,6 +593,7 @@ async function followBrowserAction<T>(action: FollowBrowserActionChallenge["acti
 		token = getAccessToken();
 	}
 	if (!token) throw browserSessionError();
+	if (currentWebsiteActor() !== actor || tokenSubject(token) !== actor) throw browserAccountChangedError();
 	let challenge: FollowBrowserActionChallenge;
 	try {
 		challenge = await request<FollowBrowserActionChallenge>(
@@ -602,6 +613,9 @@ async function followBrowserAction<T>(action: FollowBrowserActionChallenge["acti
 		);
 	}
 	if (challenge.action !== action || !challenge.nonce) throw new Error("Browser action challenge unavailable");
+	// A refresh or same-tab login can switch accounts while proof is in flight.
+	// Never submit an old generation or device code under the new actor.
+	if (currentWebsiteActor() !== actor || tokenSubject(token) !== actor) throw browserAccountChangedError();
 	return request<T>("POST", path, body, false, { nonce: challenge.nonce, token });
 }
 

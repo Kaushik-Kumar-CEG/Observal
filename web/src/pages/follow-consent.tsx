@@ -6,19 +6,24 @@ import { useRouter } from "@tanstack/react-router";
 import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
 import { clearSession } from "@/lib/api";
 import { useAcceptFollowConsent, useFollowConsentState } from "@/hooks/use-api";
-import { useWebsiteSessionGuard } from "@/hooks/use-auth";
+import { useWebsiteActor, useWebsiteSessionGuard } from "@/hooks/use-auth";
 import { useDeploymentConfig } from "@/hooks/use-deployment-config";
 import { Button } from "@/components/ui/button";
 
 export default function FollowConsentPage() {
+  const ready = useWebsiteSessionGuard("/follow/consent");
+  const actor = useWebsiteActor();
+  return ready && actor ? <FollowConsentForActor key={actor} actor={actor} /> : null;
+}
+
+function FollowConsentForActor({ actor }: { actor: string }) {
   const router = useRouter();
   const { brandingAppName, brandingLogo } = useDeploymentConfig();
-  const ready = useWebsiteSessionGuard("/follow/consent");
   const [checked, setChecked] = useState(false);
   const [error, setError] = useState("");
   const [needsLogin, setNeedsLogin] = useState(false);
   const consentId = useRef<string | null>(null);
-  const state = useFollowConsentState(ready);
+  const state = useFollowConsentState(true, actor);
   const consent = useAcceptFollowConsent();
 
   function signInAgain() {
@@ -63,7 +68,6 @@ export default function FollowConsentPage() {
     }
   }
 
-  if (!ready) return null;
   const current = state.data?.state;
   const stateError = (state.error as Error & { status?: number } | null)?.status;
 
@@ -86,7 +90,7 @@ export default function FollowConsentPage() {
               <p>Account follow state could not be verified. Check again before taking action.</p>
               {stateError === 401 ? <Button variant="outline" onClick={signInAgain}>Sign in again</Button> : <Button variant="outline" onClick={() => state.refetch()}>Retry</Button>}
             </div>
-          ) : current === "available" || consent.isSuccess ? (
+          ) : current === "available" ? (
             <div role="status" className="flex items-start gap-3 text-sm"><CheckCircle2 className="h-5 w-5 shrink-0 text-success" /><p>Account following is available. Return to your phone and request its separate write approval. This page does not approve a device.</p></div>
           ) : current === "consent_required" ? (
             <form onSubmit={accept} className="space-y-5">

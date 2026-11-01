@@ -6,20 +6,25 @@ import { useRouter } from "@tanstack/react-router";
 import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
 import { clearSession } from "@/lib/api";
 import { useApproveFollowWrite } from "@/hooks/use-api";
-import { useWebsiteSessionGuard } from "@/hooks/use-auth";
+import { useWebsiteActor, useWebsiteSessionGuard } from "@/hooks/use-auth";
 import { useDeploymentConfig } from "@/hooks/use-deployment-config";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export default function FollowApprovePage() {
+  const ready = useWebsiteSessionGuard("/follow/approve");
+  const actor = useWebsiteActor();
+  return ready && actor ? <FollowApproveForActor key={actor} /> : null;
+}
+
+function FollowApproveForActor() {
   const router = useRouter();
   const { brandingAppName, brandingLogo, brandingWordmark } = useDeploymentConfig();
   const approval = useApproveFollowWrite();
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [needsLogin, setNeedsLogin] = useState(false);
-  const ready = useWebsiteSessionGuard("/follow/approve");
 
   // Keep the one-device code only in this form. Never put it in login's `next`,
   // router history, storage, toast messages or error reporting.
@@ -66,8 +71,6 @@ export default function FollowApprovePage() {
       }
     }
   }
-
-  if (!ready) return null;
 
   return (
     <div className="flex min-h-dvh items-center justify-center bg-surface-sunken p-6">

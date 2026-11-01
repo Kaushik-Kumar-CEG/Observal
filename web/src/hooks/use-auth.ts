@@ -7,7 +7,7 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { useRouter, useLocation } from "@tanstack/react-router";
-import { auth, setUserRole, getUserRole, clearSession, refreshAccessTokenWithReason, refreshIsForAnotherAccount } from "@/lib/api";
+import { auth, setUserRole, getUserRole, clearSession, refreshAccessTokenWithReason, refreshIsForAnotherAccount, currentWebsiteActor } from "@/lib/api";
 import { currentPathAsNext } from "@/lib/safe-next";
 
 function isNetworkError(err: unknown): boolean {
@@ -149,6 +149,11 @@ export function useAuthGuard() {
   }, [isSSR, hasToken, isRefreshing, snapshot, pathname, router]);
 
   return { ready, role };
+}
+
+export function useWebsiteActor(): string | null {
+  const actor = useSyncExternalStore(subscribe, () => currentWebsiteActor() ?? "", getServerSnapshot);
+  return actor === "ssr" ? null : actor || null;
 }
 
 /** These standalone action pages need a website token, not a resolved role.

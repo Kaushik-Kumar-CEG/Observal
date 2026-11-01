@@ -8,8 +8,8 @@ export function useApproveFollowWrite() {
   return useMutation({ mutationFn: mobileFollow.approveWrite });
 }
 
-export function useFollowConsentState(enabled: boolean) {
-  return useQuery({ queryKey: ["mobile-follow", "consent-state"], queryFn: mobileFollow.consentState, enabled, retry: false });
+export function useFollowConsentState(enabled: boolean, actor?: string) {
+  return useQuery({ queryKey: ["mobile-follow", "consent-state", actor ?? "current"], queryFn: mobileFollow.consentState, enabled, retry: false });
 }
 
 export function useAcceptFollowConsent() {
