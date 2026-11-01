@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from api.deps import get_db
+from api.routes import mobile_follow_read as read
 from api.routes import mobile_follow_write as write
 from routes import include_rest_routes
 from services import mobile_follow_auth as auth
@@ -45,7 +46,7 @@ def test_installed_privacy_recovery_does_not_require_activity_gate(monkeypatch, 
         "false" if failure == "operator_off" else "stale"
     )
     db = Database(entries)
-    owner, server, withdrawal, removal, browser_withdrawal = (uuid.uuid4() for _ in range(5))
+    owner, other_owner, server, withdrawal, removal, browser_withdrawal, operation_id = (uuid.uuid4() for _ in range(7))
     now = int(datetime.now(UTC).timestamp())
     calls = []
     cohort_enabled = True
@@ -74,7 +75,7 @@ def test_installed_privacy_recovery_does_not_require_activity_gate(monkeypatch, 
         calls.append(("account", device_id))
         if not account_enabled:
             raise HTTPException(401, "Revoked credential")
-        return SimpleNamespace(id=owner)
+        return SimpleNamespace(id=other_owner if device_id == "other-device" else owner)
 
     async def identity(db):
         return server
@@ -107,6 +108,18 @@ def test_installed_privacy_recovery_does_not_require_activity_gate(monkeypatch, 
         calls.append(("lookup", key.owner_id))
         return dict(action_id=str(removal), status="pending", owner_generation=2, recovery_mode="nonce_lookup_90d")
 
+    async def historical_operation(db, key, requested_id):
+        calls.append(("historical_operation", key.owner_id))
+        if key.owner_id != owner or requested_id != operation_id:
+            raise write.store.StoreFenceError("unknown")
+        return {
+            "operation_id": str(operation_id),
+            "owner_generation": 1,
+            "original_http_status": 200,
+            "effective": True,
+            "result": {"status": "applied"},
+        }
+
     def browser_token(value, *, allow_mobile=False):
         if value == "web":
             return {"sub": str(owner), "type": "access"}
@@ -120,13 +133,18 @@ def test_installed_privacy_recovery_does_not_require_activity_gate(monkeypatch, 
     monkeypatch.setattr(write.store, "locked_partition", locked_partition)
 
     def read_token(value, *, allow_mobile=False):
-        if value != "phone-read" or not allow_mobile:
+        if value not in ("phone-read", "other-phone") or not allow_mobile:
             raise jwt.InvalidTokenError("not a phone read token")
         return dict(
-            client_id=auth.MOBILE_CLIENT_ID, aud=auth.MOBILE_AUDIENCE, scope=auth.MOBILE_SCOPE, device_id="device"
+            client_id=auth.MOBILE_CLIENT_ID,
+            aud=auth.MOBILE_AUDIENCE,
+            scope=auth.MOBILE_SCOPE,
+            device_id="other-device" if value == "other-phone" else "device",
         )
 
     monkeypatch.setattr(auth, "decode_access_token", read_token)
+    monkeypatch.setattr(read, "decode_access_token", read_token)
+    monkeypatch.setattr(read, "operation_status", historical_operation)
     monkeypatch.setattr(auth, "verify_token", token)
     monkeypatch.setattr(auth, "_account", account)
     monkeypatch.setattr(auth, "_identity", identity)
@@ -179,6 +197,9 @@ def test_installed_privacy_recovery_does_not_require_activity_gate(monkeypatch, 
         assert (
             client.get(ROOT + f"/removals/{removal}", headers={"Authorization": "Bearer phone-read"}).status_code == 403
         )
+        assert client.get(
+            ROOT + f"/operations/{operation_id}", headers={"Authorization": "Bearer phone-read"}
+        ).status_code == (403 if failure == "operator_off" else 404)
         cohort_enabled = True
         account_enabled = False
         assert (
@@ -194,6 +215,19 @@ def test_installed_privacy_recovery_does_not_require_activity_gate(monkeypatch, 
             == 401
         )
         account_enabled = True
+        assert client.get(
+            ROOT + f"/operations/{operation_id}", headers={"Authorization": "Bearer phone-read"}
+        ).status_code == (200 if failure == "operator_off" else 404)
+        assert (
+            client.get(
+                ROOT + f"/operations/{operation_id}", headers={"Authorization": "Bearer other-phone"}
+            ).status_code
+            == 404
+        )
+        assert (
+            client.get(ROOT + f"/operations/{uuid.uuid4()}", headers={"Authorization": "Bearer phone-read"}).status_code
+            == 404
+        )
         assert (
             client.get(
                 ROOT + f"/consent/withdrawals/{uuid.uuid4()}", headers={"Authorization": "Bearer phone-read"}
@@ -204,9 +238,13 @@ def test_installed_privacy_recovery_does_not_require_activity_gate(monkeypatch, 
         for path in ("/consent", "/operations", "/removals", "/removals/prepare"):
             # The frozen write error wrapper reports an unavailable error for
             # an operator 404; either way the handler must never run.
-            assert client.post(ROOT + path).status_code in (404, 503)
-        for path in ("/availability", "/snapshot", "/operations/" + str(uuid.uuid4())):
-            assert client.get(ROOT + path).status_code == 404
+            assert client.post(ROOT + path, headers={"Authorization": "Bearer phone-write"}).status_code in (404, 503)
+        for path in ("/availability", "/snapshot", "/changes", "/export"):
+            assert client.get(ROOT + path, headers={"Authorization": "Bearer phone-read"}).status_code == 404
+        assert client.get(ROOT + f"/operations/{operation_id}").status_code == (
+            401 if failure == "operator_off" else 404
+        )
+    assert (("historical_operation", owner) in calls) is (failure == "operator_off")
     assert ("browser_partition", owner) in calls
     assert ("admit", "withdrawal") in calls
     assert ("status", "withdrawal") in calls and ("status", "removal") in calls

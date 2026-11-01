@@ -54,19 +54,19 @@ def test_explicit_install_registers_exactly_eighteen_as_one_gated_set(monkeypatc
         "consent",
     }
     assert all(
-        any(
-            dependency.dependency
-            is (
-                gate.require_activity_or_recovery
-                if r.endpoint.__module__ in {"api.routes.mobile_follow_write", "api.routes.mobile_follow_browser"}
-                else gate.require_operator_approval
-            )
-            for dependency in r.dependencies
-        )
-        for r in routes
+        any(dependency.dependency is gate.require_activity_or_recovery for dependency in route.dependencies)
+        for route in routes
     )
-    assert gate.RECOVERY_ROUTES & {("POST", "/api/v1/mobile-follow-sync/v1/write-grant")}
+    assert gate.RECOVERY_ROUTES & {
+        ("POST", "/api/v1/mobile-follow-sync/v1/write-grant"),
+        ("GET", "/api/v1/mobile-follow-sync/v1/operations/{operation_id}"),
+    }
     assert not gate.RECOVERY_ROUTES & {
+        ("GET", "/api/v1/mobile-follow-sync/v1/snapshot"),
+        ("GET", "/api/v1/mobile-follow-sync/v1/export"),
+        ("GET", "/api/v1/mobile-follow-sync/v1/changes"),
+        ("GET", "/api/v1/mobile-follow-sync/v1/availability"),
+        ("GET", "/api/v1/mobile-follow-sync/v1/consent/state"),
         ("POST", "/api/v1/mobile-follow-sync/v1/write-authorization"),
         ("POST", "/api/v1/mobile-follow-sync/v1/write-approval"),
         ("POST", "/api/v1/mobile-follow-sync/v1/operations"),
@@ -91,6 +91,52 @@ def test_explicit_install_registers_exactly_eighteen_as_one_gated_set(monkeypatc
         for r in routes
         if r.path.endswith(("/operations", "/consent", "/consent/withdraw", "/removals"))
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "admitted"),
+    [
+        ("GET", "/api/v1/mobile-follow-sync/v1/operations/{operation_id}", True),
+        ("POST", "/api/v1/mobile-follow-sync/v1/operations/{operation_id}", False),
+        *[
+            ("GET", "/api/v1/mobile-follow-sync/v1/" + path, False)
+            for path in ("availability", "consent/state", "snapshot", "export", "changes")
+        ],
+    ],
+)
+async def test_operator_closure_only_admits_same_owner_status_path_to_independent_auth(method, path, admitted):
+    # The actual endpoint still independently checks the mobile credential,
+    # current cohort, owner partition and privacy/erasure fences.
+    db = Database({gate.ACK_KEY: gate.ACK_VALUE, gate.ENABLE_KEY: "false", gate.WORKER_KEY: "running"})
+    request = SimpleNamespace(method=method, scope={"route": SimpleNamespace(path=path)})
+    if admitted:
+        await gate.require_activity_or_recovery(request, db)
+        assert db.queries == 1
+    else:
+        with pytest.raises(HTTPException) as denied:
+            await gate.require_activity_or_recovery(request, db)
+        assert denied.value.status_code == 404
+        assert db.queries == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entries", "broken", "expected"),
+    [
+        ({gate.ACK_KEY: gate.ACK_VALUE, gate.ENABLE_KEY: "false", gate.WORKER_KEY: "stale"}, False, 404),
+        ({gate.ENABLE_KEY: "false", gate.WORKER_KEY: "running"}, False, 404),
+        ({gate.ACK_KEY: gate.ACK_VALUE, gate.WORKER_KEY: "running"}, False, 404),
+        ({}, True, 503),
+    ],
+)
+async def test_status_recovery_rejects_worker_loss_missing_approval_or_db_failure(entries, broken, expected):
+    db = Database(entries, broken=broken)
+    request = SimpleNamespace(method="GET", scope={"route": SimpleNamespace(path=gate.STATUS_RECOVERY_ROUTE[1])})
+    with pytest.raises(HTTPException) as denied:
+        await gate.require_activity_or_recovery(request, db)
+    assert denied.value.status_code == expected
+    assert db.queries == 1
 
 
 @pytest.mark.asyncio

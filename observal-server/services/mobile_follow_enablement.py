@@ -42,8 +42,13 @@ async def require_user_verifying_mutation(request: Request) -> None:
 # Recovery routes are still installed only by the explicit startup flag. Their
 # handlers retain independent credential, owner/cohort, and privacy-store fences;
 # the operator switch controls new activity, not an owner's ability to erase it.
+STATUS_RECOVERY_ROUTE = ("GET", "/api/v1/mobile-follow-sync/v1/operations/{operation_id}")
 RECOVERY_ROUTES = frozenset(
     {
+        # Historical status requires an intact acknowledgement and fresh worker
+        # even if the operator switch is off. The read handler checks owner,
+        # device, cohort, partition and erasure. It never returns a follow list.
+        STATUS_RECOVERY_ROUTE,
         # Only an already approved, browser-proven phone can pass the handler's
         # owner/device/generation checks. No new approval is possible here.
         ("POST", "/api/v1/mobile-follow-sync/v1/write-grant"),
@@ -58,11 +63,13 @@ RECOVERY_ROUTES = frozenset(
 async def require_activity_or_recovery(request: Request, db: AsyncSession = Depends(get_db)) -> None:
     route = request.scope.get("route")
     if route is not None and (request.method, route.path) in RECOVERY_ROUTES:
+        if (request.method, route.path) == STATUS_RECOVERY_ROUTE:
+            await require_status_recovery_approval(db)
         return
     await require_operator_approval(db)
 
 
-async def require_operator_approval(db: AsyncSession = Depends(get_db)) -> None:
+async def _gate_entries(db: AsyncSession) -> dict[str, str]:
     try:
         entries = dict(
             (
@@ -79,5 +86,20 @@ async def require_operator_approval(db: AsyncSession = Depends(get_db)) -> None:
         # Fail closed on DB loss; never let a stale in-memory/Redis setting
         # authorize an already admitted approval or operation.
         raise HTTPException(503, "follow sync approval store unavailable", headers={"Retry-After": "1"}) from exc
+    return entries
+
+
+async def require_status_recovery_approval(db: AsyncSession) -> None:
+    entries = await _gate_entries(db)
+    if (
+        entries.get(ACK_KEY) != ACK_VALUE
+        or entries.get(ENABLE_KEY) not in {"true", "false"}
+        or entries.get(WORKER_KEY) != "running"
+    ):
+        raise HTTPException(404, "follow sync status recovery not enabled")
+
+
+async def require_operator_approval(db: AsyncSession = Depends(get_db)) -> None:
+    entries = await _gate_entries(db)
     if entries.get(ACK_KEY) != ACK_VALUE or entries.get(ENABLE_KEY) != "true" or entries.get(WORKER_KEY) != "running":
         raise HTTPException(404, "follow sync not enabled")

@@ -61,7 +61,6 @@ from api.routes.telemetry import router as telemetry_router
 from api.routes.users import router as users_router
 from services.mobile_follow_enablement import (
     require_activity_or_recovery,
-    require_operator_approval,
     require_user_verifying_approval,
     require_user_verifying_mutation,
     routes_installed,
@@ -136,7 +135,10 @@ def include_rest_routes(app: FastAPI) -> None:
         from api.routes.mobile_follow_read import router as follow_read_router
         from api.routes.mobile_follow_write import router as follow_write_router
 
-        app.include_router(follow_read_router, dependencies=[Depends(require_operator_approval)])
+        # Keep the status of one historical operation recoverable for its
+        # independently authorized owner after new writes close. Every other
+        # read still requires the fresh DB operator gate.
+        app.include_router(follow_read_router, dependencies=[Depends(require_activity_or_recovery)])
         app.include_router(
             follow_write_router,
             dependencies=[Depends(require_activity_or_recovery), Depends(require_user_verifying_mutation)],
