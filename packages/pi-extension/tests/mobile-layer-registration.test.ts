@@ -79,7 +79,30 @@ try {
   assert.equal(registration.skills[0].content_sha256, sha(skill));
   assert.equal(registration.hooks[0].binding_sha256, ext.piHookBinding("tool_call", "true"));
   assert.equal(source.layer_hash, snapshot.hash, "worker joins exactly the registered source hash");
+  assert.match(source.run_incarnation, /^[0-9a-f]{8}-[0-9a-f-]{27}$/);
+  assert.equal(source.run_header_hash, sha(fs.readFileSync(session, "utf8").split("\n")[0]!));
+  assert.equal(source.run_origin, "pi_session_start_root_v1", "root requires actual session_start witness");
   assert(!JSON.stringify(registration).includes("test"), "no credential in typed pin registration");
+  const claims = fs.readdirSync(path.join(store, "pi_run_identity"));
+  assert.equal(claims.length, 1, "fresh root nonce persisted for identical retries");
+  const saved = JSON.parse(fs.readFileSync(path.join(store, "pi_run_identity", claims[0]!), "utf8"));
+  assert.equal(saved.run_incarnation, source.run_incarnation);
+  assert.equal(saved.run_header_hash, source.run_header_hash);
+
+  // An old partially-delivered Pi session cannot be retroactively promoted.
+  const legacyFile = path.join(home, "legacy.jsonl");
+  const legacyHeader = JSON.stringify({ type: "session", id: "pi-legacy", timestamp: new Date().toISOString() }) + "\n";
+  fs.writeFileSync(legacyFile, legacyHeader + JSON.stringify({ type: "message", index: 1 }) + "\n");
+  const cursors = JSON.parse(fs.readFileSync(path.join(store, "sync_state.json"), "utf8"));
+  cursors["pi-legacy"] = { offset: Buffer.byteLength(legacyHeader), line_count: 1 };
+  fs.writeFileSync(path.join(store, "sync_state.json"), JSON.stringify(cursors));
+  const legacyContext = { ...context, sessionManager: { getSessionFile: () => legacyFile, getSessionId: () => "pi-legacy" } };
+  await handlers.get("session_start")!({ reason: "resume" }, legacyContext);
+  await handlers.get("session_shutdown")!({}, legacyContext);
+  assert.equal(source.start_offset, 1);
+  assert.equal(source.run_incarnation, undefined, "prior legacy source must never gain a nonce");
+  assert.equal(source.run_origin, undefined);
+  assert.equal(fs.readdirSync(path.join(store, "pi_run_identity")).length, 1);
 } finally {
   server.close(); fs.rmSync(home, { recursive: true, force: true });
 }

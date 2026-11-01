@@ -83,6 +83,8 @@ interface ObservalState {
   layerHash: string | null;
   layerSnapshot: LayerSnapshot | null;
   registration: Promise<void> | null;
+  rootCandidate: boolean;
+  runIdentity: { run_incarnation: string; run_header_hash: string; run_origin: "pi_session_start_root_v1" } | null;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -94,6 +96,7 @@ const LAYER_SNAPSHOT_PATH = path.join(OBSERVAL_DIR, "layer_snapshot.json");
 const LAYER_UPLOADED_PATH = path.join(OBSERVAL_DIR, "pi_layer_uploaded.json");
 const LOCKFILE_PATH = path.join(OBSERVAL_DIR, "lockfile.json");
 const OUTBOX_DIR = path.join(OBSERVAL_DIR, "pi_session_outbox");
+const RUN_IDENTITY_DIR = path.join(OBSERVAL_DIR, "pi_run_identity");
 const AGENT_SWITCH_PATH = path.join(OBSERVAL_DIR, "pi_agent_switch_pending.json");
 const OFFLINE_SWITCH_PATH = path.join(OBSERVAL_DIR, "pi_agent_switch_offline.json");
 const UNVERIFIED_SESSIONS_DIR = path.join(OBSERVAL_DIR, "pi_agent_switch_sessions");
@@ -945,8 +948,48 @@ export default function (pi: ExtensionAPI) {
     if (sessionId) process.env.OBSERVAL_SESSION_ID = sessionId;
     process.env.OBSERVAL_HARNESS = "pi";
 
+    const rootCandidate = !!(config?.user_id && sessionFile && sessionId && layerSnapshot);
     return { config, sessionFile, sessionId, cwd: ctx.cwd, byteOffset, lineCount, generation: 0, layerHash, layerSnapshot,
-      registration: null };
+      registration: null, rootCandidate, runIdentity: null };
+  }
+
+  /** Persist the session_start root nonce before source delivery; never upgrade an old cursor. */
+  function rootIdentity(s: ObservalState, mayCreate: boolean): ObservalState["runIdentity"] {
+    if (!s.rootCandidate || !s.config?.user_id || !s.sessionFile || !s.sessionId) return null;
+    try {
+      const fd = fs.openSync(s.sessionFile, "r");
+      let line: string;
+      try {
+        const bytes = Buffer.alloc(4096);
+        const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+        const end = bytes.subarray(0, length).indexOf(10);
+        if (end < 0) return null;
+        line = bytes.toString("utf8", 0, end);
+      } finally { fs.closeSync(fd); }
+      const header = JSON.parse(line);
+      if (header?.type !== "session" || header.id !== s.sessionId || header.parentSession
+        || typeof header.timestamp !== "string" || !/(Z|[+-]\d\d:\d\d)$/.test(header.timestamp)
+        || !Number.isFinite(Date.parse(header.timestamp))) return null;
+      const headerHash = sha256(Buffer.from(line, "utf8"));
+      const key = sha256(Buffer.from(JSON.stringify([s.config.server_url, s.config.user_id, s.sessionId])));
+      fs.mkdirSync(RUN_IDENTITY_DIR, { recursive: true, mode: 0o700 });
+      const file = path.join(RUN_IDENTITY_DIR, `${key}.json`);
+      if (mayCreate) {
+        const claim = { run_incarnation: crypto.randomUUID(), run_header_hash: headerHash,
+          run_origin: "pi_session_start_root_v1" as const };
+        try {
+          const out = fs.openSync(file, "wx", 0o600);
+          try { fs.writeSync(out, JSON.stringify(claim)); fs.fsyncSync(out); } finally { fs.closeSync(out); }
+          return claim;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
+        }
+      }
+      if (!fs.lstatSync(file).isFile()) return null;
+      const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+      return typeof saved.run_incarnation === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(saved.run_incarnation)
+        && saved.run_header_hash === headerHash && saved.run_origin === "pi_session_start_root_v1" ? saved : null;
+    } catch { return null; }
   }
 
   // ─── Capability attribution ───────────────────────────────────────────────
@@ -2033,6 +2076,9 @@ export default function (pi: ExtensionAPI) {
       // permits ordinary telemetry delivery, never a fabricated mobile fact.
       if (s.registration) await s.registration;
       let cursor = readCursor(s.sessionId);
+      if (s.rootCandidate && !s.runIdentity) {
+        s.runIdentity = rootIdentity(s, cursor.offset === 0 && cursor.line_count === 0);
+      }
       const storedPending = readPending(s.sessionId);
       if (storedPending) {
         const result = await deliverPending(s.config, storedPending);
@@ -2093,6 +2139,7 @@ export default function (pi: ExtensionAPI) {
           agent_id: s.config.agent_id ?? null,
           agent_version: s.config.agent_version ?? null,
           layer_hash: s.layerHash,
+          ...(s.runIdentity ?? {}),
           lines: [],
           end_byte_offsets: [],
           start_offset: s.lineCount,
@@ -2137,6 +2184,7 @@ export default function (pi: ExtensionAPI) {
           agent_id: s.config.agent_id ?? null,
           agent_version: s.config.agent_version ?? null,
           layer_hash: s.layerHash,
+          ...(s.runIdentity ?? {}),
           lines: chunk,
           end_byte_offsets: chunkEndOffsets,
           start_offset: initialLineCount + offset,
@@ -2342,6 +2390,8 @@ export default function (pi: ExtensionAPI) {
           byteOffset: entry.offset,
           lineCount: entry.line_count,
           generation: 0,
+          rootCandidate: false,
+          runIdentity: null,
         };
         await pushNewLines(recoveryState, { final: true });
         if (readCursor(sessionId).finalized) recovered++;
