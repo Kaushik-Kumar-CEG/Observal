@@ -90,7 +90,7 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
         try:
             async with verify.connect() as conn:
                 assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == (
-                    "081_mobile_follow_operator_audit"
+                    "082_mobile_synthetic_risk_audit"
                 )
                 assert (
                     await conn.execute(
@@ -154,7 +154,7 @@ async def test_fresh_upstream_usage_then_mobile_migrations_apply_in_order():
                 # PostgreSQL rolls back the entire multi-revision downgrade when
                 # 070's irreversible privacy fence refuses the final step.
                 assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == (
-                    "081_mobile_follow_operator_audit"
+                    "082_mobile_synthetic_risk_audit"
                 )
         finally:
             await verify.dispose()

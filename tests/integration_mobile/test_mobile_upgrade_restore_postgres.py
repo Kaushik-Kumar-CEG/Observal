@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in restored-backup PG077 -> PG081 rehearsal on isolated local PostgreSQL.
+"""Opt-in restored-backup PG077 -> PG082 rehearsal on isolated local PostgreSQL.
 
 Use only the disposable instance from the publication-clock scratch script;
 requires Docker's postgres:18 client. Never run against a shared database.
@@ -127,7 +127,7 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
             timeout=30,
         )
         assert blocked_boot.returncode == 2 and b"BOOT_STARTED" not in blocked_boot.stdout
-        # A restored installation left at PG079 must not boot this PG081 image.
+        # A restored installation left at PG079 must not boot this PG082 image.
         at_070 = subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "079_mobile_follow_sync_state"],
             env=restore_env,
@@ -171,7 +171,7 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         elapsed = time.monotonic() - start
         async with restored.connect() as conn:
             assert (
-                await conn.scalar(text("SELECT version_num FROM alembic_version")) == "081_mobile_follow_operator_audit"
+                await conn.scalar(text("SELECT version_num FROM alembic_version")) == "082_mobile_synthetic_risk_audit"
             )
             assert await conn.scalar(text("SELECT current_setting('track_commit_timestamp')")) == "on"
             assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == row_count
@@ -192,7 +192,7 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         if image:
             image_new = subprocess.run(image_cmd, env=image_env, capture_output=True, timeout=40)
             assert (
-                image_new.returncode == 0 and b'"schema_head": "081_mobile_follow_operator_audit"' in image_new.stdout
+                image_new.returncode == 0 and b'"schema_head": "082_mobile_synthetic_risk_audit"' in image_new.stdout
             ), image_new.stdout[-400:] + image_new.stderr[-400:]
         allowed_boot = subprocess.run(
             ["/bin/sh", "-ec", shell_gate, "--", sys.executable, "-c", "print('BOOT_STARTED')"],
@@ -202,7 +202,7 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         )
         assert allowed_boot.returncode == 0 and b"BOOT_STARTED" in allowed_boot.stdout
         print(
-            f"RESTORED_POPULATED_077_TO_081_ROWS={row_count} MIGRATION_SECONDS={elapsed:.3f} "
+            f"RESTORED_POPULATED_077_TO_082_ROWS={row_count} MIGRATION_SECONDS={elapsed:.3f} "
             f"PUBLICATION_RELATION_BYTES_BEFORE={before_size} AFTER={after_size}"
         )
     finally:
