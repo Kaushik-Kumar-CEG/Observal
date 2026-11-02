@@ -71,6 +71,15 @@ async def require_activity_or_recovery(request: Request, db: AsyncSession = Depe
 
 async def _gate_entries(db: AsyncSession) -> dict[str, str]:
     try:
+        # Match the operator/retention order: project barrier before config rows.
+        # Otherwise an admitted route can hold config FOR SHARE while waiting on
+        # an operator's project lock, as that operator waits to clear its config.
+        from observal_shared.migration.constants import DEFAULT_PROJECT_ID
+
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+            {"key": "mobile-read:" + str(DEFAULT_PROJECT_ID)},
+        )
         entries = dict(
             (
                 await db.execute(

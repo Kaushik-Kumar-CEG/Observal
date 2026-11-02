@@ -115,7 +115,9 @@ def _app(db_session):
     return app
 
 
-def _serve(sock, url, redis_url, key_dir, *, production=False, grant_commit_barrier=None):
+def _serve(
+    sock, url, redis_url, key_dir, *, production=False, grant_commit_barrier=None, operator_event_sink_stub=False
+):
     """Each spawned process has an independent pool, engine and settings cache."""
     import uvicorn
 
@@ -156,6 +158,16 @@ def _serve(sock, url, redis_url, key_dir, *, production=False, grant_commit_barr
         # their normal behavior; the original signer is never replaced.
         AsyncSession.commit = pause_after_consumption
 
+    if operator_event_sink_stub:
+        assert production
+        from api.routes.admin import mobile_setup
+
+        async def external_security_sink(*_args):
+            pass
+
+        # Only the secondary external ClickHouse security sink is omitted;
+        # authentication, Redis, config and transactional operator audit are real.
+        mobile_setup._audit = external_security_sink
     engine = create_async_engine(url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     redis = Redis.from_url(redis_url, decode_responses=True)
@@ -1411,3 +1423,107 @@ def test_local_quota_and_old_server_are_contract_only_not_http_proofs():
         case = cases[name]
         assert case["status"] == status and case["credential"] == "fresh_v12_mobile_read"
         assert case["client_result"] == "local_follows_only_sync_unavailable;never_empty_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(scratch):
+    url, key_dir, _redis, owner, other = scratch
+    engine = create_async_engine(url)
+    operator = uuid.uuid4()
+    async with engine.begin() as db:
+        await db.execute(
+            text(
+                "INSERT INTO users(id,email,username,name,role,created_at) "
+                "VALUES(:id,:email,:name,'Scratch operator','super_admin',clock_timestamp())"
+            ),
+            {"id": operator, "email": f"{operator}@scratch.invalid", "name": operator.hex[:20]},
+        )
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(128)
+    worker = multiprocessing.get_context("spawn").Process(
+        target=_serve,
+        args=(sock, url, REDIS_URL, key_dir),
+        kwargs={"production": True, "operator_event_sink_stub": True},
+    )
+    worker.start()
+    control = "/api/v1/admin/mobile-test/follow-sync"
+    desktop, _ = create_access_token(operator, UserRole.super_admin)
+    nonadmin, _ = create_access_token(other, UserRole.user)
+    phone, _ = create_access_token(owner, UserRole.super_admin, client_id="observal-mobile", device_id="phone-a")
+    try:
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{sock.getsockname()[1]}", timeout=15) as client:
+            for _ in range(100):
+                try:
+                    if (await client.get("/api/v1/config/public")).status_code == 200:
+                        break
+                except httpx.TransportError:
+                    pass
+                assert worker.is_alive()
+                await asyncio.sleep(0.1)
+            else:
+                pytest.fail("normal operator API startup failed")
+            status = await client.get("/api/v1/admin/mobile-test/status", headers=bearer(desktop))
+            assert status.status_code == 200
+            state = status.json()
+            body = dict(
+                server_id=state["server_id"],
+                author_viewer_id=str(owner),
+                user_viewer_id=str(other),
+                cohort_generation=state["generation"],
+                enabled=True,
+                acknowledgement="isolated-disposable-synthetic-only-v1",
+                owner_decisions_acknowledgement=mobile_follow_enablement.ACK_VALUE,
+                review_receipt_sha256="a" * 64,
+            )
+            assert (await client.post(control, json=body)).status_code == 401
+            assert (await client.post(control, json=body, headers=bearer(nonadmin))).status_code == 403
+            assert (
+                await client.post(control, json=body | {"review_receipt_sha256": None}, headers=bearer(desktop))
+            ).status_code == 422
+            assert (await client.post(control, json=body, headers=bearer(desktop))).status_code == 409  # no worker
+            async with engine.begin() as db:
+                await db.execute(
+                    text(
+                        "INSERT INTO enterprise_config(id,key,value,updated_at) "
+                        "VALUES(:id,:key,'running',clock_timestamp())"
+                    ),
+                    {"id": uuid.uuid4(), "key": mobile_follow_enablement.WORKER_KEY},
+                )
+            result = await client.post(control, json=body, headers=bearer(desktop))
+            assert result.status_code == 200, result.text[:200]
+            assert result.json()["follow_sync_operator_enabled"] and result.json()["follow_sync_acknowledged"]
+            assert (await client.get(ROOT + "/availability", headers=bearer(phone))).status_code == 200
+            result = await client.post(control, json=body | {"enabled": False}, headers=bearer(desktop))
+            assert result.status_code == 200
+            assert not result.json()["follow_sync_operator_enabled"] and result.json()["follow_sync_acknowledged"]
+            assert (await client.get(ROOT + "/availability", headers=bearer(phone))).status_code == 404
+            result = await client.post("/api/v1/admin/mobile-test/revoke", headers=bearer(desktop))
+            assert result.status_code == 200, result.text[:200]
+            assert not result.json()["follow_sync_acknowledged"] and not result.json()["configured"]
+            assert (
+                await client.get("/api/v1/mobile-activity/v1/capabilities", headers=bearer(phone))
+            ).status_code == 401
+            # Distinct non-cohort operator remains authenticated after revoking both viewers.
+            assert (await client.get("/api/v1/admin/mobile-test/status", headers=bearer(desktop))).status_code == 200
+            async with engine.connect() as db:
+                audit = (
+                    await db.execute(
+                        text(
+                            "SELECT action,review_receipt_sha256 FROM mobile_operator_audit "
+                            "WHERE actor_id=:id AND action IN ('follow_open','follow_close') "
+                            "ORDER BY created_at"
+                        ),
+                        {"id": operator},
+                    )
+                ).all()
+                assert audit == [("follow_open", "a" * 64), ("follow_close", "a" * 64)]
+    finally:
+        if worker.is_alive():
+            worker.terminate()
+        worker.join(timeout=10)
+        if worker.is_alive():
+            worker.kill()
+            worker.join(timeout=5)
+        sock.close()
+        await engine.dispose()

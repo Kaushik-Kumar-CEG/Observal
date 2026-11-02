@@ -409,3 +409,117 @@ async def test_distinct_high_water_and_fixed_image_pages(scratch):
         page3 = await lease_page(db, key, first, kind="image", last_row=200)
         assert len(page3["items"]) == 1 and page3["complete"] is True
         assert (await locked_partition(db, key))["subject_count"] == 1000
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_supported_follow_operator_audit_and_close_serialize_real_store(scratch, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from api.routes.admin import mobile_setup as ops
+    from models.user import User
+    from services import mobile_follow_enablement as gate
+
+    owner, user = uuid.uuid4(), uuid.uuid4()
+    await _users(scratch, owner, user)
+    monkeypatch.setattr(ops, "routes_installed", lambda: True)
+    # Only external cache/security sinks and token service are replaced. All
+    # config, project locks, principal validation, migration and audit SQL are real.
+    monkeypatch.setattr(ops, "_refresh", AsyncMock())
+    monkeypatch.setattr(ops, "_audit", AsyncMock())
+    monkeypatch.setattr(ops, "get_redis", lambda: object())
+    monkeypatch.setattr(ops, "revoke_user_tokens", AsyncMock())
+    async with scratch.begin() as db:
+        server = await db.scalar(text("SELECT server_id FROM mobile_server_identity WHERE singleton=true"))
+        await db.execute(text("UPDATE users SET role='super_admin' WHERE id=:id"), {"id": owner})
+        await db.execute(
+            text(
+                "UPDATE mobile_read_controls SET blocked=false,source_policy_ready=true,generation=3,"
+                "synthetic_expires_at=clock_timestamp()+interval '20 minutes' WHERE project_id='default'"
+            )
+        )
+        values = {
+            "mobile.auth_enabled": "true",
+            "mobile.synthetic_test_enabled": "true",
+            "mobile.synthetic_test_ack": ops._ACK,
+            "mobile.synthetic_test_server_id": str(server),
+            "mobile.synthetic_test_viewer_id": str(owner),
+            "mobile.synthetic_test_self_user_viewer_id": str(user),
+            gate.WORKER_KEY: "running",
+        }
+        for key, value in values.items():
+            await db.execute(
+                text(
+                    "INSERT INTO enterprise_config(id,key,value,updated_at) VALUES(:id,:key,:value,clock_timestamp()) "
+                    "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=clock_timestamp()"
+                ),
+                {"id": uuid.uuid4(), "key": key, "value": value},
+            )
+        actor = await db.get(User, owner)
+    req = ops.MobileFollowTestControl(
+        server_id=server,
+        author_viewer_id=owner,
+        user_viewer_id=user,
+        cohort_generation=3,
+        enabled=True,
+        acknowledgement=ops._ACK,
+        owner_decisions_acknowledgement=gate.ACK_VALUE,
+        review_receipt_sha256="a" * 64,
+    )
+    async with scratch() as db:
+        result = await ops.mobile_test_follow_sync(req, db, actor)
+        assert result.follow_sync_operator_enabled and result.follow_sync_acknowledged
+        # The endpoint's post-commit status starts a read transaction; close it
+        # as the normal FastAPI dependency would at the end of the request.
+        await db.rollback()
+    normal = scratch()
+    await gate.require_operator_approval(normal)
+    entered = asyncio.Event()
+
+    async def close():
+        async with scratch() as db:
+            entered.set()
+            state = await ops.mobile_test_follow_sync(req.model_copy(update={"enabled": False}), db, actor)
+            assert not state.follow_sync_operator_enabled and state.follow_sync_acknowledged
+            await db.rollback()
+
+    task = asyncio.create_task(close())
+    try:
+        await entered.wait()
+        # Verify a real PG waiter, not just scheduling delay.
+        async with scratch() as observer:
+            for _ in range(100):
+                waiters = await observer.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
+                        "AND wait_event='advisory' AND state='active'"
+                    )
+                )
+                if waiters:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                pytest.fail("operator did not wait on admitted route's project lock")
+        assert not task.done()
+        await normal.commit()
+        await asyncio.wait_for(task, 10)
+    finally:
+        await normal.close()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    async with scratch() as db:
+        await gate.require_status_recovery_approval(db)  # same cohort ACK survives operator-only close
+        await db.rollback()
+        state = await ops.mobile_test_revoke(db, actor)
+        assert not state.configured and not state.follow_sync_acknowledged and not state.follow_sync_operator_enabled
+        assert state.follow_sync_review_sha256 is None
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT action,review_receipt_sha256 FROM mobile_operator_audit "
+                    "WHERE actor_id=:actor AND action IN ('follow_open','follow_close') ORDER BY created_at"
+                ),
+                {"actor": owner},
+            )
+        ).all()
+        assert rows == [("follow_open", "a" * 64), ("follow_close", "a" * 64)]

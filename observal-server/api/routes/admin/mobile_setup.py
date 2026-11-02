@@ -11,7 +11,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from fastapi import Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,7 @@ from api.deps import get_db, require_role
 from models.enterprise_config import EnterpriseConfig
 from models.user import User, UserRole
 from observal_shared.migration.constants import DEFAULT_PROJECT_ID
+from services.mobile_follow_enablement import ACK_KEY, ACK_VALUE, ENABLE_KEY, WORKER_KEY, routes_installed
 from services.mobile_read_control import synthetic_principals_valid
 from services.redis import get_redis
 from services.security_events import EventType, SecurityEvent, Severity, emit_security_event
@@ -28,7 +29,12 @@ from services.token_revocation import revoke_user_tokens
 from ._router import router
 
 _ACK = "isolated-disposable-synthetic-only-v1"
+_FOLLOW_REVIEW_KEY = "mobile.follow_sync_v105_synthetic_review_sha256"
+_FOLLOW_CLOSED = {ACK_KEY: "", ENABLE_KEY: "false", _FOLLOW_REVIEW_KEY: ""}
 _KEYS = (
+    ACK_KEY,
+    ENABLE_KEY,
+    _FOLLOW_REVIEW_KEY,
     "mobile.auth_enabled",
     "mobile.synthetic_test_enabled",
     "mobile.synthetic_test_server_id",
@@ -49,6 +55,19 @@ class MobileTestSetup(BaseModel):
     expires_in_minutes: int | None = None  # Required on setup; open reads the persisted deadline.
 
 
+class MobileFollowTestControl(BaseModel):
+    """Operator attestation references a real external review; it does not create one."""
+
+    server_id: UUID
+    author_viewer_id: UUID
+    user_viewer_id: UUID
+    cohort_generation: int = Field(ge=1)
+    enabled: StrictBool
+    acknowledgement: str
+    owner_decisions_acknowledgement: str | None = None
+    review_receipt_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
 class MobileTestStatus(BaseModel):
     blocked: bool
     generation: int
@@ -59,6 +78,10 @@ class MobileTestStatus(BaseModel):
     trace_headlines: bool
     revocation_pending: bool = False
     expires_at: datetime | None = None
+    follow_sync_routes_installed: bool = False
+    follow_sync_operator_enabled: bool = False
+    follow_sync_acknowledged: bool = False
+    follow_sync_review_sha256: str | None = None
 
 
 async def _lock(db: AsyncSession) -> None:
@@ -104,6 +127,10 @@ async def _status(db: AsyncSession) -> MobileTestStatus:
         trace_headlines=values["trace_headlines"] == "true",
         revocation_pending=bool(row.revocation_pending) if row else False,
         expires_at=row.synthetic_expires_at if row else None,
+        follow_sync_routes_installed=routes_installed(),
+        follow_sync_operator_enabled=values[ENABLE_KEY] == "true",
+        follow_sync_acknowledged=values[ACK_KEY] == ACK_VALUE,
+        follow_sync_review_sha256=values[_FOLLOW_REVIEW_KEY] or None,
     )
 
 
@@ -128,8 +155,8 @@ async def _record_transition(
     await db.execute(
         text(
             "INSERT INTO mobile_operator_audit(project_id,actor_id,action,generation,server_id,"
-            "author_viewer_id,user_viewer_id) VALUES "
-            "(:project,:actor,:action,:generation,:server,:author,:user)"
+            "author_viewer_id,user_viewer_id,review_receipt_sha256) VALUES "
+            "(:project,:actor,:action,:generation,:server,:author,:user,:review)"
         ),
         {
             "project": str(DEFAULT_PROJECT_ID),
@@ -139,6 +166,7 @@ async def _record_transition(
             "server": cohort.server_id,
             "author": cohort.author_viewer_id,
             "user": cohort.user_viewer_id,
+            "review": cohort.follow_sync_review_sha256,
         },
     )
 
@@ -215,6 +243,7 @@ async def mobile_test_setup(
     ):
         raise HTTPException(422, "Both viewers must use reserved .test or .invalid email domains")
     changes = {
+        **_FOLLOW_CLOSED,
         "mobile.auth_enabled": "true",
         "mobile.synthetic_test_enabled": "true",
         "mobile.synthetic_test_server_id": str(req.server_id),
@@ -300,6 +329,80 @@ async def mobile_test_open(
     return await _status(db)
 
 
+@router.post("/mobile-test/follow-sync", response_model=MobileTestStatus)
+async def mobile_test_follow_sync(
+    req: MobileFollowTestControl,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role(UserRole.super_admin)),
+):
+    """Explicit, audited synthetic-only switch; never a production enable route.
+
+    A digest is an operator reference to an externally signed review, not a
+    signature verifier. Deployment and human signoff are independent gates.
+    Closing retains that cohort's ACK for historical status; revoke/setup
+    clear it. No deadline extension, browser consent or write grant is issued.
+    """
+    if req.acknowledgement != _ACK:
+        raise HTTPException(422, "Explicit disposable cohort acknowledgement required")
+    await _lock(db)
+    current = await _status(db)
+    values = await _settings(db)
+    identity = await db.scalar(text("SELECT server_id FROM mobile_server_identity WHERE singleton=true"))
+    if (
+        str(identity) != str(req.server_id)
+        or current.trace_headlines
+        or values["mobile.trace_qualification_server_id"]
+        or values["mobile.trace_qualification_ack"]
+    ):
+        raise HTTPException(409, "Matching server with absent live qualification required")
+    changes = {ENABLE_KEY: "false"}
+    action = "follow_close"
+    if req.enabled:
+        if req.owner_decisions_acknowledgement != ACK_VALUE or req.review_receipt_sha256 is None:
+            raise HTTPException(422, "Explicit owner decisions and signed-review receipt digest required")
+        if (
+            not routes_installed()
+            or current.blocked
+            or current.revocation_pending
+            or not current.configured
+            or current.server_id != req.server_id
+            or current.author_viewer_id != req.author_viewer_id
+            or current.user_viewer_id != req.user_viewer_id
+            or current.generation != req.cohort_generation
+            or not await synthetic_principals_valid(db, req.author_viewer_id, req.user_viewer_id)
+            or not await db.scalar(
+                text(
+                    "SELECT source_policy_ready AND synthetic_expires_at > clock_timestamp() "
+                    "FROM mobile_read_controls WHERE project_id=:project"
+                ),
+                {"project": str(DEFAULT_PROJECT_ID)},
+            )
+        ):
+            raise HTTPException(409, "Open, matching, unexpired disposable cohort and installed routes required")
+        worker = await db.scalar(
+            text(
+                "SELECT value FROM enterprise_config WHERE key=:worker "
+                "AND updated_at >= clock_timestamp() - interval '90 seconds' FOR SHARE"
+            ),
+            {"worker": WORKER_KEY},
+        )
+        if worker != "running":
+            raise HTTPException(409, "Fresh running follow privacy worker required")
+        changes.update({ACK_KEY: ACK_VALUE, ENABLE_KEY: "true", _FOLLOW_REVIEW_KEY: req.review_receipt_sha256})
+        action = "follow_open"
+    await _write(db, changes)
+    audit_status = current.model_copy(
+        update={
+            "follow_sync_review_sha256": req.review_receipt_sha256 if req.enabled else current.follow_sync_review_sha256
+        }
+    )
+    await _record_transition(db, actor, action, audit_status, current.generation)
+    await db.commit()
+    await _refresh(changes)
+    await _audit(actor, action)
+    return await _status(db)
+
+
 @router.post("/mobile-test/revoke", response_model=MobileTestStatus)
 async def mobile_test_revoke(
     db: AsyncSession = Depends(get_db), actor: User = Depends(require_role(UserRole.super_admin))
@@ -331,7 +434,12 @@ async def mobile_test_revoke(
     # Disallow new mobile tokens under the same shared project lock. A later
     # setting write failure cannot reopen the already committed barrier.
     await _lock(db)
-    disable = {"mobile.auth_enabled": "false", "mobile.synthetic_test_enabled": "false", "trace_headlines": "false"}
+    disable = {
+        **_FOLLOW_CLOSED,
+        "mobile.auth_enabled": "false",
+        "mobile.synthetic_test_enabled": "false",
+        "trace_headlines": "false",
+    }
     await _write(db, disable)
     await db.commit()
     await _refresh(disable)
@@ -347,6 +455,7 @@ async def mobile_test_revoke(
     # in the SAME transaction as clearing the cohort.
     await _lock(db)
     changes = {
+        **_FOLLOW_CLOSED,
         "mobile.auth_enabled": "false",
         "mobile.synthetic_test_enabled": "false",
         "mobile.synthetic_test_server_id": "",

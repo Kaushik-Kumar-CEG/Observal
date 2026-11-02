@@ -18,6 +18,11 @@ class Database:
         self.queries = 0
 
     async def execute(self, statement, params):
+        if "pg_advisory_xact_lock_shared" in str(statement):
+            assert params == {"key": "mobile-read:default"}
+            self.barrier_taken = True
+            return None
+        assert self.barrier_taken, "project lock must precede config row locks"
         assert "enterprise_config" in str(statement)
         assert params == {"ack": gate.ACK_KEY, "enabled": gate.ENABLE_KEY, "worker": gate.WORKER_KEY}
         assert "FOR SHARE" in str(statement) and "90 seconds" in str(statement)

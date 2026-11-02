@@ -27,6 +27,8 @@ class Database:
         self.gate_queries = 0
 
     async def execute(self, statement, params):
+        if "pg_advisory_xact_lock_shared" in str(statement):
+            return None
         assert "enterprise_config" in str(statement)
         self.gate_queries += 1
         return SimpleNamespace(all=lambda: list(self.entries.items()))

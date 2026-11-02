@@ -146,6 +146,8 @@ async def test_revoke_commits_closed_barrier_before_settings_and_never_reopens(m
         "commit",
     ]
     assert db.execute.await_count == 2  # first durable deny and final closed cleanup
+    for call in ops._write.await_args_list:
+        assert all(call.args[1][key] == value for key, value in ops._FOLLOW_CLOSED.items())
 
 
 @pytest.mark.asyncio
