@@ -304,6 +304,26 @@ async def operations(request: Request, authorization: str | None = Header(None),
             from services.mobile_follow_enablement import require_operator_approval
 
             await require_operator_approval(db)
+        from services.mobile_follow_enablement import ACK_KEY, RISK_ACK_VALUE
+
+        if (
+            await db.scalar(text("SELECT value FROM enterprise_config WHERE key=:ack FOR SHARE"), {"ack": ACK_KEY})
+            == RISK_ACK_VALUE
+        ):
+            allowed = (
+                (
+                    await db.execute(
+                        text(
+                            "SELECT value FROM enterprise_config WHERE key IN "
+                            "('mobile.synthetic_test_viewer_id','mobile.synthetic_test_self_user_viewer_id') FOR SHARE"
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if str(body.subject_id) not in allowed:
+                _error(403, "restricted")
         await db.scalar(text("SELECT id FROM users WHERE id=:subject FOR KEY SHARE"), {"subject": body.subject_id})
         p = await _write(request, authorization, db)
         status, result = await store.admit_operation(

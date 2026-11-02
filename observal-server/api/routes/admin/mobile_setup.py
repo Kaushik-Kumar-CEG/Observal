@@ -7,6 +7,7 @@ transaction-scoped exclusive project lock as retention and all phone readers.
 The workflow never sets the live trace qualification or trace_headlines switch.
 """
 
+import os
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -20,7 +21,16 @@ from api.deps import get_db, require_role
 from models.enterprise_config import EnterpriseConfig
 from models.user import User, UserRole
 from observal_shared.migration.constants import DEFAULT_PROJECT_ID
-from services.mobile_follow_enablement import ACK_KEY, ACK_VALUE, ENABLE_KEY, WORKER_KEY, routes_installed
+from services.mobile_follow_enablement import (
+    ACK_KEY,
+    ACK_VALUE,
+    ENABLE_KEY,
+    RISK_ACK_VALUE,
+    RISK_INSTALL_ENV,
+    RISK_KEY,
+    WORKER_KEY,
+    routes_installed,
+)
 from services.mobile_read_control import synthetic_principals_valid
 from services.redis import get_redis
 from services.security_events import EventType, SecurityEvent, Severity, emit_security_event
@@ -30,11 +40,12 @@ from ._router import router
 
 _ACK = "isolated-disposable-synthetic-only-v1"
 _FOLLOW_REVIEW_KEY = "mobile.follow_sync_v105_synthetic_review_sha256"
-_FOLLOW_CLOSED = {ACK_KEY: "", ENABLE_KEY: "false", _FOLLOW_REVIEW_KEY: ""}
+_FOLLOW_CLOSED = {ACK_KEY: "", ENABLE_KEY: "false", _FOLLOW_REVIEW_KEY: "", RISK_KEY: ""}
 _KEYS = (
     ACK_KEY,
     ENABLE_KEY,
     _FOLLOW_REVIEW_KEY,
+    RISK_KEY,
     "mobile.auth_enabled",
     "mobile.synthetic_test_enabled",
     "mobile.synthetic_test_server_id",
@@ -66,6 +77,8 @@ class MobileFollowTestControl(BaseModel):
     acknowledgement: str
     owner_decisions_acknowledgement: str | None = None
     review_receipt_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    risk_acceptance_acknowledgement: str | None = None
+    risk_acceptance_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class MobileTestStatus(BaseModel):
@@ -82,6 +95,8 @@ class MobileTestStatus(BaseModel):
     follow_sync_operator_enabled: bool = False
     follow_sync_acknowledged: bool = False
     follow_sync_review_sha256: str | None = None
+    follow_sync_risk_sha256: str | None = None
+    follow_sync_risk_accepted: bool = False
 
 
 async def _lock(db: AsyncSession) -> None:
@@ -131,6 +146,8 @@ async def _status(db: AsyncSession) -> MobileTestStatus:
         follow_sync_operator_enabled=values[ENABLE_KEY] == "true",
         follow_sync_acknowledged=values[ACK_KEY] == ACK_VALUE,
         follow_sync_review_sha256=values[_FOLLOW_REVIEW_KEY] or None,
+        follow_sync_risk_sha256=values[RISK_KEY] or None,
+        follow_sync_risk_accepted=values[ACK_KEY] == RISK_ACK_VALUE,
     )
 
 
@@ -155,8 +172,8 @@ async def _record_transition(
     await db.execute(
         text(
             "INSERT INTO mobile_operator_audit(project_id,actor_id,action,generation,server_id,"
-            "author_viewer_id,user_viewer_id,review_receipt_sha256) VALUES "
-            "(:project,:actor,:action,:generation,:server,:author,:user,:review)"
+            "author_viewer_id,user_viewer_id,review_receipt_sha256,risk_acceptance_sha256) VALUES "
+            "(:project,:actor,:action,:generation,:server,:author,:user,:review,:risk)"
         ),
         {
             "project": str(DEFAULT_PROJECT_ID),
@@ -167,6 +184,7 @@ async def _record_transition(
             "author": cohort.author_viewer_id,
             "user": cohort.user_viewer_id,
             "review": cohort.follow_sync_review_sha256,
+            "risk": cohort.follow_sync_risk_sha256,
         },
     )
 
@@ -337,8 +355,9 @@ async def mobile_test_follow_sync(
 ):
     """Explicit, audited synthetic-only switch; never a production enable route.
 
-    A digest is an operator reference to an externally signed review, not a
-    signature verifier. Deployment and human signoff are independent gates.
+    Reviewed and owner-risk-accepted modes are distinct and mutually exclusive.
+    Risk acceptance is never review or production qualification. Both retain
+    exact current disposable subjects, worker, expiry, consent and privacy fences.
     Closing retains that cohort's ACK for historical status; revoke/setup
     clear it. No deadline extension, browser consent or write grant is issued.
     """
@@ -358,7 +377,18 @@ async def mobile_test_follow_sync(
     changes = {ENABLE_KEY: "false"}
     action = "follow_close"
     if req.enabled:
-        if req.owner_decisions_acknowledgement != ACK_VALUE or req.review_receipt_sha256 is None:
+        risk = req.risk_acceptance_acknowledgement is not None or req.risk_acceptance_sha256 is not None
+        if risk:
+            if (
+                req.risk_acceptance_acknowledgement != RISK_ACK_VALUE
+                or req.risk_acceptance_sha256 is None
+                or req.review_receipt_sha256 is not None
+                or req.owner_decisions_acknowledgement is not None
+            ):
+                raise HTTPException(422, "Explicit synthetic risk acceptance required; cannot mix with review")
+            if os.environ.get(RISK_INSTALL_ENV) != "1":
+                raise HTTPException(409, "Synthetic risk acceptance installation is default-OFF")
+        elif req.owner_decisions_acknowledgement != ACK_VALUE or req.review_receipt_sha256 is None:
             raise HTTPException(422, "Explicit owner decisions and signed-review receipt digest required")
         if (
             not routes_installed()
@@ -388,12 +418,22 @@ async def mobile_test_follow_sync(
         )
         if worker != "running":
             raise HTTPException(409, "Fresh running follow privacy worker required")
-        changes.update({ACK_KEY: ACK_VALUE, ENABLE_KEY: "true", _FOLLOW_REVIEW_KEY: req.review_receipt_sha256})
-        action = "follow_open"
+        changes.update(
+            {
+                ACK_KEY: RISK_ACK_VALUE if risk else ACK_VALUE,
+                ENABLE_KEY: "true",
+                _FOLLOW_REVIEW_KEY: "" if risk else req.review_receipt_sha256,
+                RISK_KEY: req.risk_acceptance_sha256 if risk else "",
+            }
+        )
+        action = "follow_risk_open" if risk else "follow_open"
     await _write(db, changes)
     audit_status = current.model_copy(
         update={
-            "follow_sync_review_sha256": req.review_receipt_sha256 if req.enabled else current.follow_sync_review_sha256
+            "follow_sync_review_sha256": req.review_receipt_sha256
+            if req.enabled
+            else current.follow_sync_review_sha256,
+            "follow_sync_risk_sha256": req.risk_acceptance_sha256 if req.enabled else current.follow_sync_risk_sha256,
         }
     )
     await _record_transition(db, actor, action, audit_status, current.generation)

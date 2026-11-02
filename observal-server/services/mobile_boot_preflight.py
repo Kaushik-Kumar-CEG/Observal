@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from database import engine
 
-MOBILE_SCHEMA_HEAD = "081_mobile_follow_operator_audit"
+MOBILE_SCHEMA_HEAD = "082_mobile_synthetic_risk_audit"
 
 
 @dataclass(frozen=True)
@@ -103,6 +103,16 @@ async def inspect_mobile_postgres() -> MobilePreflight:
                       AND c.contype = 'c' AND c.convalidated
                       AND pg_get_constraintdef(c.oid) LIKE '%follow_open%'
                       AND pg_get_constraintdef(c.oid) LIKE '%follow_close%'
+                      AND pg_get_constraintdef(c.oid) LIKE '%follow_risk_open%'
+                ) AND EXISTS (
+                    SELECT 1 FROM pg_attribute a WHERE a.attrelid=to_regclass('mobile_operator_audit')
+                    AND a.attname='risk_acceptance_sha256' AND a.attnum > 0 AND NOT a.attisdropped
+                    AND a.atttypid='character varying'::regtype AND a.atttypmod=68
+                ) AND EXISTS (
+                    SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('mobile_operator_audit')
+                    AND c.conname='ck_mobile_operator_audit_authority' AND c.contype='c' AND c.convalidated
+                    AND pg_get_constraintdef(c.oid) LIKE '%risk_acceptance_sha256%'
+                    AND pg_get_constraintdef(c.oid) LIKE '%review_receipt_sha256%'
                 )""")
             )
         )

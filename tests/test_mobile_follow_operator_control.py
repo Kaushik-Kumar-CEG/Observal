@@ -62,6 +62,7 @@ async def test_reviewed_control_records_digest_and_audit_before_commit(monkeypat
         ops.ENABLE_KEY: "true",
         ops.ACK_KEY: ops.ACK_VALUE,
         ops._FOLLOW_REVIEW_KEY: "a" * 64,
+        ops.RISK_KEY: "",
     }
     args = ops._record_transition.await_args.args
     assert args[2] == "follow_open" and args[3].follow_sync_review_sha256 == "a" * 64
@@ -157,4 +158,9 @@ def test_input_does_not_coerce_enabled_or_accept_arbitrary_review_text(change):
 
 
 def test_setup_and_revoke_reset_both_stale_authority_and_review_reference():
-    assert ops._FOLLOW_CLOSED == {ops.ACK_KEY: "", ops.ENABLE_KEY: "false", ops._FOLLOW_REVIEW_KEY: ""}
+    assert ops._FOLLOW_CLOSED == {
+        ops.ACK_KEY: "",
+        ops.ENABLE_KEY: "false",
+        ops._FOLLOW_REVIEW_KEY: "",
+        ops.RISK_KEY: "",
+    }

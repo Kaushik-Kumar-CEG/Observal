@@ -1426,7 +1426,10 @@ def test_local_quota_and_old_server_are_contract_only_not_http_proofs():
 
 
 @pytest.mark.asyncio
-async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(scratch):
+@pytest.mark.parametrize("risk", [False, True])
+async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(scratch, monkeypatch, risk):
+    if risk:
+        monkeypatch.setenv(mobile_follow_enablement.RISK_INSTALL_ENV, "1")
     url, key_dir, _redis, owner, other = scratch
     engine = create_async_engine(url)
     operator = uuid.uuid4()
@@ -1476,10 +1479,18 @@ async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(sc
                 owner_decisions_acknowledgement=mobile_follow_enablement.ACK_VALUE,
                 review_receipt_sha256="a" * 64,
             )
+            if risk:
+                body.update(
+                    owner_decisions_acknowledgement=None,
+                    review_receipt_sha256=None,
+                    risk_acceptance_acknowledgement=mobile_follow_enablement.RISK_ACK_VALUE,
+                    risk_acceptance_sha256="c" * 64,
+                )
+            digest_field = "risk_acceptance_sha256" if risk else "review_receipt_sha256"
             assert (await client.post(control, json=body)).status_code == 401
             assert (await client.post(control, json=body, headers=bearer(nonadmin))).status_code == 403
             assert (
-                await client.post(control, json=body | {"review_receipt_sha256": None}, headers=bearer(desktop))
+                await client.post(control, json=body | {digest_field: None}, headers=bearer(desktop))
             ).status_code == 422
             assert (await client.post(control, json=body, headers=bearer(desktop))).status_code == 409  # no worker
             async with engine.begin() as db:
@@ -1492,11 +1503,18 @@ async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(sc
                 )
             result = await client.post(control, json=body, headers=bearer(desktop))
             assert result.status_code == 200, result.text[:200]
-            assert result.json()["follow_sync_operator_enabled"] and result.json()["follow_sync_acknowledged"]
+            assert result.json()["follow_sync_operator_enabled"]
+            assert result.json()["follow_sync_acknowledged"] is (not risk)
+            assert result.json()["follow_sync_risk_accepted"] is risk
+            if risk:
+                assert result.json()["follow_sync_review_sha256"] is None
+                assert result.json()["follow_sync_risk_sha256"] == "c" * 64
             assert (await client.get(ROOT + "/availability", headers=bearer(phone))).status_code == 200
             result = await client.post(control, json=body | {"enabled": False}, headers=bearer(desktop))
             assert result.status_code == 200
-            assert not result.json()["follow_sync_operator_enabled"] and result.json()["follow_sync_acknowledged"]
+            assert not result.json()["follow_sync_operator_enabled"]
+            assert result.json()["follow_sync_acknowledged"] is (not risk)
+            assert result.json()["follow_sync_risk_accepted"] is risk
             assert (await client.get(ROOT + "/availability", headers=bearer(phone))).status_code == 404
             result = await client.post("/api/v1/admin/mobile-test/revoke", headers=bearer(desktop))
             assert result.status_code == 200, result.text[:200]
@@ -1510,14 +1528,18 @@ async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(sc
                 audit = (
                     await db.execute(
                         text(
-                            "SELECT action,review_receipt_sha256 FROM mobile_operator_audit "
-                            "WHERE actor_id=:id AND action IN ('follow_open','follow_close') "
+                            "SELECT action,review_receipt_sha256,risk_acceptance_sha256 FROM mobile_operator_audit "
+                            "WHERE actor_id=:id AND action IN ('follow_open','follow_close','follow_risk_open') "
                             "ORDER BY created_at"
                         ),
                         {"id": operator},
                     )
                 ).all()
-                assert audit == [("follow_open", "a" * 64), ("follow_close", "a" * 64)]
+                assert audit == (
+                    [("follow_risk_open", None, "c" * 64), ("follow_close", None, "c" * 64)]
+                    if risk
+                    else [("follow_open", "a" * 64, None), ("follow_close", "a" * 64, None)]
+                )
     finally:
         if worker.is_alive():
             worker.terminate()

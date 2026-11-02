@@ -23,6 +23,9 @@ ACK_KEY = "mobile.follow_sync_v105_owner_decisions_ack"
 ENABLE_KEY = "mobile.follow_sync_v105_operator_enabled"
 WORKER_KEY = "mobile.follow_sync_v105_worker_heartbeat"
 ACK_VALUE = "owner-approved-v105-quota-consent-storage-recovery"
+RISK_ACK_VALUE = "owner-accepted-unreviewed-synthetic-only-v1"
+RISK_KEY = "mobile.follow_sync_v105_synthetic_risk_sha256"
+RISK_INSTALL_ENV = "OBSERVAL_FOLLOW_SYNTHETIC_RISK_INSTALL"
 
 
 def routes_installed() -> bool:
@@ -98,10 +101,67 @@ async def _gate_entries(db: AsyncSession) -> dict[str, str]:
     return entries
 
 
+async def _ack_authorized(db: AsyncSession, entries: dict[str, str]) -> bool:
+    if entries.get(ACK_KEY) == ACK_VALUE:
+        return True
+    if entries.get(ACK_KEY) != RISK_ACK_VALUE or os.environ.get(RISK_INSTALL_ENV) != "1":
+        return False
+    # Admission remains under the shared project lock. Risk cannot authorize a
+    # live cohort, expired/unconfigured pair, changed server, or real identities.
+    from uuid import UUID
+
+    from services.mobile_read_control import synthetic_principals_valid
+
+    values = dict(
+        (
+            await db.execute(
+                text("""SELECT key,value FROM enterprise_config
+        WHERE key IN ('mobile.auth_enabled','mobile.synthetic_test_enabled','mobile.synthetic_test_ack',
+        'mobile.synthetic_test_server_id','mobile.synthetic_test_viewer_id','mobile.synthetic_test_self_user_viewer_id',
+        'trace_headlines','mobile.trace_qualification_ack','mobile.trace_qualification_server_id',:risk) FOR SHARE"""),
+                {"risk": RISK_KEY},
+            )
+        ).all()
+    )
+    if (
+        values.get("mobile.auth_enabled") != "true"
+        or values.get("mobile.synthetic_test_enabled") != "true"
+        or values.get("mobile.synthetic_test_ack") != "isolated-disposable-synthetic-only-v1"
+        or values.get("trace_headlines") == "true"
+        or values.get("mobile.trace_qualification_ack")
+        or values.get("mobile.trace_qualification_server_id")
+    ):
+        return False
+    digest = values.get(RISK_KEY, "")
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        return False
+    try:
+        author = UUID(values.get("mobile.synthetic_test_viewer_id", ""))
+        user = UUID(values.get("mobile.synthetic_test_self_user_viewer_id", ""))
+        server = UUID(values.get("mobile.synthetic_test_server_id", ""))
+    except (ValueError, TypeError):
+        return False
+    if not await db.scalar(
+        text("""SELECT EXISTS (SELECT 1 FROM mobile_read_controls c, mobile_server_identity s
+        WHERE c.project_id='default' AND NOT c.blocked AND NOT c.revocation_pending AND c.source_policy_ready
+        AND c.synthetic_expires_at > clock_timestamp() AND s.singleton=true AND s.server_id=:server)"""),
+        {"server": server},
+    ):
+        return False
+    if not await synthetic_principals_valid(db, author, user):
+        return False
+    return not await db.scalar(
+        text("""SELECT EXISTS (SELECT 1 FROM mobile_follow_subjects
+        WHERE project_id='default' AND owner_id IN (:author,:actor)
+        AND cohort IN ('synthetic-author','synthetic-user') AND subject_id NOT IN (:author,:actor))"""),
+        {"author": author, "actor": user},
+    )
+
+
 async def require_status_recovery_approval(db: AsyncSession) -> None:
     entries = await _gate_entries(db)
     if (
-        entries.get(ACK_KEY) != ACK_VALUE
+        not await _ack_authorized(db, entries)
         or entries.get(ENABLE_KEY) not in {"true", "false"}
         or entries.get(WORKER_KEY) != "running"
     ):
@@ -110,5 +170,9 @@ async def require_status_recovery_approval(db: AsyncSession) -> None:
 
 async def require_operator_approval(db: AsyncSession = Depends(get_db)) -> None:
     entries = await _gate_entries(db)
-    if entries.get(ACK_KEY) != ACK_VALUE or entries.get(ENABLE_KEY) != "true" or entries.get(WORKER_KEY) != "running":
+    if (
+        not await _ack_authorized(db, entries)
+        or entries.get(ENABLE_KEY) != "true"
+        or entries.get(WORKER_KEY) != "running"
+    ):
         raise HTTPException(404, "follow sync not enabled")
