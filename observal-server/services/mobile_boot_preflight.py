@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from database import engine
 
-MOBILE_SCHEMA_HEAD = "080_mobile_follow_browser_proof"
+MOBILE_SCHEMA_HEAD = "081_mobile_follow_operator_audit"
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,7 @@ class MobilePreflight:
     barrier_closed: bool
     source_policy_ready: bool
     production_qualified: bool
+    follow_operator_audit_ready: bool = False
 
 
 async def inspect_mobile_postgres() -> MobilePreflight:
@@ -84,6 +85,31 @@ async def inspect_mobile_postgres() -> MobilePreflight:
             return MobilePreflight(
                 "MISSING_FOLLOW_BROWSER_PROOF_COLUMN", clock, pending, head, True, False, False, True, False, False
             )
+        # A version stamp is not proof that PG081's audit column and action
+        # constraint were applied. New operator transitions must not start on
+        # a restored or partially migrated database that cannot retain them.
+        operator_audit_ready = bool(
+            await conn.scalar(
+                text("""SELECT EXISTS (
+                    SELECT 1 FROM pg_attribute a
+                    WHERE a.attrelid = to_regclass('mobile_operator_audit')
+                      AND a.attname = 'review_receipt_sha256'
+                      AND a.attnum > 0 AND NOT a.attisdropped
+                      AND a.atttypid = 'character varying'::regtype AND a.atttypmod = 68
+                ) AND EXISTS (
+                    SELECT 1 FROM pg_constraint c
+                    WHERE c.conrelid = to_regclass('mobile_operator_audit')
+                      AND c.conname = 'ck_mobile_operator_audit_action'
+                      AND c.contype = 'c' AND c.convalidated
+                      AND pg_get_constraintdef(c.oid) LIKE '%follow_open%'
+                      AND pg_get_constraintdef(c.oid) LIKE '%follow_close%'
+                )""")
+            )
+        )
+        if not operator_audit_ready:
+            return MobilePreflight(
+                "MISSING_FOLLOW_OPERATOR_AUDIT_SCHEMA", clock, pending, head, True, True, False, True, False, False
+            )
         settings = dict(
             (
                 await conn.execute(
@@ -98,7 +124,7 @@ async def inspect_mobile_postgres() -> MobilePreflight:
         auth = settings.get("mobile.auth_enabled") == "true"
         if clock != "on" or pending:
             return MobilePreflight(
-                "MISSING_DB_PREREQUISITE", clock, pending, head, True, True, auth, True, False, False
+                "MISSING_DB_PREREQUISITE", clock, pending, head, True, True, auth, True, False, False, True
             )
         state = (
             await conn.execute(
@@ -122,7 +148,7 @@ async def inspect_mobile_postgres() -> MobilePreflight:
             status = "EVIDENCE_UNQUALIFIED"
         else:
             status = "PREFLIGHT_ONLY"
-        return MobilePreflight(status, clock, pending, head, True, True, auth, closed, source_ready, qualified)
+        return MobilePreflight(status, clock, pending, head, True, True, auth, closed, source_ready, qualified, True)
 
 
 async def main(*, require_schema: bool = False) -> int:
@@ -143,6 +169,7 @@ async def main(*, require_schema: bool = False) -> int:
             if result.schema_head == MOBILE_SCHEMA_HEAD
             and result.follow_erasure_trigger_ready
             and result.browser_action_proven_ready
+            and result.follow_operator_audit_ready
             and (not result.auth_enabled or (result.pg_commit_clock == "on" and not result.pg_restart_pending))
             else 2
         )
