@@ -75,7 +75,7 @@ async def test_fresh_and_populated_069_upgrade_owner_isolation_and_erasure():
                 async with engine.begin() as conn:
                     assert (
                         await conn.scalar(text("SELECT version_num FROM alembic_version"))
-                        == "080_mobile_follow_browser_proof"
+                        == "081_mobile_follow_operator_audit"
                     )
                     if stage == "populated":
                         assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == 1
