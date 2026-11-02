@@ -22,12 +22,13 @@ class QueryResult:
 
 
 class Database:
-    def __init__(self, *, clock, auth, head, trigger=True, browser_proof_column=True):
+    def __init__(self, *, clock, auth, head, trigger=True, browser_proof_column=True, operator_audit_schema=True):
         self.clock = clock
         self.auth = auth
         self.head = head
         self.trigger = trigger
         self.browser_proof_column = browser_proof_column
+        self.operator_audit_schema = operator_audit_schema
 
     async def __aenter__(self):
         return self
@@ -49,6 +50,11 @@ class Database:
         sql = str(statement)
         if "pg_trigger" in sql:
             return self.trigger
+        if "pg_constraint" in sql:
+            assert "to_regclass('mobile_operator_audit')" in sql
+            assert "review_receipt_sha256" in sql and "a.atttypmod = 68" in sql
+            assert "c.convalidated" in sql and "follow_open" in sql and "follow_close" in sql
+            return self.operator_audit_schema
         if "pg_attribute" in sql:
             assert "to_regclass('mobile_follow_approvals')" in sql
             assert "browser_action_proven" in sql
@@ -70,6 +76,7 @@ class Database:
         ("on", True, preflight.MOBILE_SCHEMA_HEAD, 0),
         ("on", False, "077_mobile_erasure_epoch_guard", 2),
         ("on", False, "079_mobile_follow_sync_state", 2),
+        ("on", False, "080_mobile_follow_browser_proof", 2),
     ],
 )
 async def test_helm_per_pod_check_reads_actual_mobile_flag_before_off_clock_return(
@@ -103,4 +110,14 @@ async def test_schema_stamp_without_080_browser_proof_column_refuses_boot(monkey
     assert result.status == "MISSING_FOLLOW_BROWSER_PROOF_COLUMN"
     assert result.follow_erasure_trigger_ready
     assert not result.browser_action_proven_ready
+    assert await preflight.main(require_schema=True) == 2
+
+
+@pytest.mark.asyncio
+async def test_pg081_stamp_without_physical_operator_audit_schema_refuses_boot(monkeypatch):
+    db = Database(clock="on", auth=False, head=preflight.MOBILE_SCHEMA_HEAD, operator_audit_schema=False)
+    monkeypatch.setattr(preflight, "engine", SimpleNamespace(connect=lambda: db, dispose=AsyncMock()))
+    result = await preflight.inspect_mobile_postgres()
+    assert result.status == "MISSING_FOLLOW_OPERATOR_AUDIT_SCHEMA"
+    assert not result.follow_operator_audit_ready
     assert await preflight.main(require_schema=True) == 2
