@@ -252,7 +252,9 @@ def test_installed_privacy_recovery_does_not_require_activity_gate(monkeypatch, 
     assert ("status", "withdrawal") in calls and ("status", "removal") in calls
     assert ("lookup", owner) in calls
     assert ("partition", True) in calls and ("cohort", owner) in calls
-    assert db.gate_queries >= 7
+    # The CLOSED bridge denies new activity without consulting settings. All
+    # five original-ID status requests still consult fresh DB approval/worker.
+    assert db.gate_queries == 5
 
 
 def test_registered_recovery_paths_still_require_credentials_without_boot_flags(monkeypatch):

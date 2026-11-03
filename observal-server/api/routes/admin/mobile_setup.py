@@ -110,6 +110,7 @@ class MobileTestStatus(BaseModel):
     revocation_pending: bool = False
     expires_at: datetime | None = None
     follow_sync_routes_installed: bool = True
+    follow_sync_runtime_closed: bool = True
     follow_sync_available: bool = False
     follow_sync_risk_configured: bool = False
     follow_sync_operator_enabled: bool = False
@@ -380,6 +381,8 @@ async def mobile_test_configure(
     No auth/cohort/consent/write grant is opened here. Disabling also closes new
     activity but retains bounded recovery provenance until expiry or revoke.
     """
+    if req.available:
+        raise HTTPException(409, "Closed rollback runtime cannot enable Following availability")
     await _lock(db)
     current = await _status(db)
     values = await _settings(db)
@@ -474,6 +477,8 @@ async def mobile_test_follow_sync(
     Closing retains that cohort's ACK for historical status; revoke/setup
     clear it. No deadline extension, browser consent or write grant is issued.
     """
+    if req.enabled:
+        raise HTTPException(409, "Closed rollback runtime cannot enable Following activity")
     if req.acknowledgement != _ACK:
         raise HTTPException(422, "Explicit disposable cohort acknowledgement required")
     await _lock(db)

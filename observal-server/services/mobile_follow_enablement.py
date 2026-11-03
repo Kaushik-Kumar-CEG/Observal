@@ -186,11 +186,7 @@ async def require_status_recovery_approval(db: AsyncSession) -> None:
 
 
 async def require_operator_approval(db: AsyncSession = Depends(get_db)) -> None:
-    entries = await _gate_entries(db)
-    if (
-        entries.get(AVAILABILITY_KEY) != "true"
-        or not await _ack_authorized(db, entries)
-        or entries.get(ENABLE_KEY) != "true"
-        or entries.get(WORKER_KEY) != "running"
-    ):
-        raise HTTPException(404, "follow sync not enabled")
+    # PG083-compatible rollback: retained settings cannot reopen new activity.
+    # Independent, bounded owner recovery and privacy erasure remain intact.
+    del db
+    raise HTTPException(404, "follow sync unavailable in closed rollback runtime")
