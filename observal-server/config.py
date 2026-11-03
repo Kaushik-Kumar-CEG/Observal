@@ -71,7 +71,6 @@ class Settings(BaseSettings):
     SKIP_DDL_ON_STARTUP: bool = False
 
     # Demo accounts (boot-time, needed to bootstrap first login)
-    SEED_DEMO_ACCOUNTS: bool = True
     DEMO_SUPER_ADMIN_EMAIL: str | None = None
     DEMO_SUPER_ADMIN_PASSWORD: str | None = None
     DEMO_ADMIN_EMAIL: str | None = None

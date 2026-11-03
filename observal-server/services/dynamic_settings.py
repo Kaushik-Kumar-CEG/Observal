@@ -325,7 +325,9 @@ DEFAULTS: dict[str, str] = {
     "github.client_id": "",
     "github.client_secret": "",
     "github.allowed_orgs": "",
-    # Deployment
+    # Deployment: demo seeding is an explicit durable opt-in, never an env
+    # default on fresh stores. Existing non-demo users always suppress it.
+    "deployment.seed_demo_accounts": "false",
     "deployment.sso_only": "false",
     "deployment.public_registry_enabled": "false",
     # Interface: the deprecated Leaderboard (tab, page, and API). Off by default.
@@ -349,6 +351,9 @@ DEFAULTS: dict[str, str] = {
     # Off until subscription isolation and the aggregate-only API are deployed
     # and verified together. Phone credentials must not expose legacy feeds.
     "mobile.auth_enabled": "false",
+    # Written only by the audited mobile-test configure API, not generic settings.
+    "mobile.follow_sync_v105_available": "false",
+    "mobile.follow_sync_v105_risk_permission": "",
     # Deliberately separate from production trace_headlines: explicit isolated
     # server + viewer + human test acknowledgement only, never default on.
     "mobile.synthetic_test_enabled": "false",
@@ -447,6 +452,10 @@ SENSITIVE_KEYS: set[str] = {
 SETTING_FEATURES: dict[str, str] = {}
 
 SETTING_SUBTITLES: dict[str, str] = {
+    "deployment.seed_demo_accounts": (
+        "Default-OFF startup policy. Existing non-demo users always suppress demo creation. "
+        "Fresh installations use first-admin bootstrap; no demo accounts are needed."
+    ),
     "registry.skill_folder_delivery_enabled": (
         "Enable complete-folder skill review and installation only after upgrading and draining all API/worker processes, "
         "migrating a restored database through the current head, and confirming supported CLI clients. "
@@ -467,6 +476,7 @@ SETTING_SUBTITLES: dict[str, str] = {
 }
 
 RESTART_REQUIRED_KEYS: set[str] = {
+    "deployment.seed_demo_accounts",
     "oauth.client_id",
     "oauth.client_secret",
     "oauth.server_metadata_url",

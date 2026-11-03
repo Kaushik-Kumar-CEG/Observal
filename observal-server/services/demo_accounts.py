@@ -41,12 +41,19 @@ async def seed_demo_accounts(db: AsyncSession) -> int:
     Returns the number of accounts created.  Idempotent - skips accounts
     that already exist.
     """
-    # An explicit opt-out must win even when legacy DEMO_* credentials remain configured.
-    if not settings.SEED_DEMO_ACCOUNTS:
-        return 0
+    from models.enterprise_config import EnterpriseConfig
     from services.first_admin import lock_first_user
 
     await lock_first_user(db)
+    # Read the persistent policy under the first-user lock, not an env default
+    # or a stale process/Redis cache. Missing/malformed settings fail closed.
+    enabled = await db.scalar(
+        select(EnterpriseConfig.value)
+        .where(EnterpriseConfig.key == "deployment.seed_demo_accounts")
+        .with_for_update(read=True)
+    )
+    if enabled != "true":
+        return 0
     # Bail out if ANY real (non-demo) user exists
     optic.info("seeding demo accounts")
     real_count = await db.scalar(select(func.count()).select_from(User).where(User.is_demo.is_(False)))

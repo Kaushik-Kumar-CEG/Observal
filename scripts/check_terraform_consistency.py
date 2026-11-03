@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Terraform <-> App environment consistency checker.
@@ -80,7 +81,6 @@ DOCKER_COMPOSE_ONLY = {
     "POSTGRES_PASSWORD",
     "CLICKHOUSE_USER",
     "CLICKHOUSE_PASSWORD",
-    "SEED_DEMO_ACCOUNTS",
 }
 
 

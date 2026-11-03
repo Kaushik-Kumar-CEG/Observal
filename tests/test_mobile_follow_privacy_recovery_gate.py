@@ -42,7 +42,7 @@ class Database:
 
 @pytest.mark.parametrize("failure", ["operator_off", "worker_lost"])
 def test_installed_privacy_recovery_does_not_require_activity_gate(monkeypatch, failure):
-    monkeypatch.setenv(gate.ROUTE_INSTALL_ENV, "1")
+    monkeypatch.delenv("OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL", raising=False)
     entries = {gate.ACK_KEY: gate.ACK_VALUE, gate.ENABLE_KEY: "true", gate.WORKER_KEY: "running"}
     entries[gate.ENABLE_KEY if failure == "operator_off" else gate.WORKER_KEY] = (
         "false" if failure == "operator_off" else "stale"
@@ -255,8 +255,8 @@ def test_installed_privacy_recovery_does_not_require_activity_gate(monkeypatch, 
     assert db.gate_queries >= 7
 
 
-def test_uninstalled_recovery_paths_are_404(monkeypatch):
-    monkeypatch.delenv(gate.ROUTE_INSTALL_ENV, raising=False)
+def test_registered_recovery_paths_still_require_credentials_without_boot_flags(monkeypatch):
+    monkeypatch.delenv("OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL", raising=False)
     app = FastAPI()
     include_rest_routes(app)
     with TestClient(app) as client:
@@ -266,4 +266,4 @@ def test_uninstalled_recovery_paths_are_404(monkeypatch):
             ("post", "/removals/lookup"),
             ("get", "/removals/" + str(uuid.uuid4())),
         ):
-            assert getattr(client, method)(ROOT + path).status_code == 404
+            assert getattr(client, method)(ROOT + path).status_code == 401

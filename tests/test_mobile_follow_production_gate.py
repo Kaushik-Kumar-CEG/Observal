@@ -24,7 +24,12 @@ class Database:
             return None
         assert self.barrier_taken, "project lock must precede config row locks"
         assert "enterprise_config" in str(statement)
-        assert params == {"ack": gate.ACK_KEY, "enabled": gate.ENABLE_KEY, "worker": gate.WORKER_KEY}
+        assert params == {
+            "ack": gate.ACK_KEY,
+            "enabled": gate.ENABLE_KEY,
+            "worker": gate.WORKER_KEY,
+            "available": gate.AVAILABILITY_KEY,
+        }
         assert "FOR SHARE" in str(statement) and "90 seconds" in str(statement)
         self.queries += 1
         if self.broken:
@@ -32,19 +37,21 @@ class Database:
         return SimpleNamespace(all=lambda: list(self.entries.items()))
 
 
-@pytest.mark.parametrize("install", (None, "", "true", "0"))
-def test_normal_api_does_not_register_follow_routes_by_default(monkeypatch, install):
+@pytest.mark.parametrize("install", (None, "", "true", "0", "1"))
+def test_normal_api_registers_guarded_shapes_independent_of_obsolete_environment(monkeypatch, install):
     if install is None:
-        monkeypatch.delenv(gate.ROUTE_INSTALL_ENV, raising=False)
+        monkeypatch.delenv("OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL", raising=False)
     else:
-        monkeypatch.setenv(gate.ROUTE_INSTALL_ENV, install)
+        monkeypatch.setenv("OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL", install)
     app = FastAPI()
     include_rest_routes(app)
-    assert not [route for route in app.routes if route.path.startswith("/api/v1/mobile-follow-sync/v1/")]
+    routes = [route for route in app.routes if route.path.startswith("/api/v1/mobile-follow-sync/v1/")]
+    assert len(routes) == 18
+    assert all(any(d.dependency is gate.require_activity_or_recovery for d in r.dependencies) for r in routes)
 
 
 def test_explicit_install_registers_exactly_eighteen_as_one_gated_set(monkeypatch):
-    monkeypatch.setenv(gate.ROUTE_INSTALL_ENV, "1")
+    monkeypatch.delenv("OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL", raising=False)
     app = FastAPI()
     include_rest_routes(app)
     routes = [route for route in app.routes if route.path.startswith("/api/v1/mobile-follow-sync/v1/")]
@@ -154,7 +161,14 @@ async def test_normal_mutations_marked_for_credential_and_action_checks(path):
 
 @pytest.mark.asyncio
 async def test_operator_acceptance_marks_browser_routes_without_supplying_action_proof():
-    db = Database({gate.ACK_KEY: gate.ACK_VALUE, gate.ENABLE_KEY: "true", gate.WORKER_KEY: "running"})
+    db = Database(
+        {
+            gate.ACK_KEY: gate.ACK_VALUE,
+            gate.ENABLE_KEY: "true",
+            gate.WORKER_KEY: "running",
+            gate.AVAILABILITY_KEY: "true",
+        }
+    )
     await gate.require_operator_approval(db)
     request = SimpleNamespace(state=SimpleNamespace())
     await gate.require_user_verifying_approval(request)
@@ -192,7 +206,14 @@ async def test_fresh_db_loss_fails_closed_without_disclosing_dsn():
 
 @pytest.mark.asyncio
 async def test_only_both_exact_owner_and_operator_decisions_allow_request():
-    db = Database({gate.ACK_KEY: gate.ACK_VALUE, gate.ENABLE_KEY: "true", gate.WORKER_KEY: "running"})
+    db = Database(
+        {
+            gate.ACK_KEY: gate.ACK_VALUE,
+            gate.ENABLE_KEY: "true",
+            gate.WORKER_KEY: "running",
+            gate.AVAILABILITY_KEY: "true",
+        }
+    )
     await gate.require_operator_approval(db)
     await gate.require_operator_approval(db)
     assert db.queries == 2  # No process-local/Redis cached permission after operator revocation.

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in restored-backup PG077 -> PG082 rehearsal on isolated local PostgreSQL.
+"""Opt-in restored-backup PG077 -> PG083 rehearsal on isolated local PostgreSQL.
 
 Use only the disposable instance from the publication-clock scratch script;
 requires Docker's postgres:18 client. Never run against a shared database.
@@ -70,6 +70,16 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
                 {"row_count": row_count},
             )
             assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == row_count
+            await conn.execute(
+                text(
+                    "INSERT INTO users(id,email,username,name,role,is_demo,created_at) "
+                    "VALUES(gen_random_uuid(),'retained@scratch.invalid','retained-admin','Retained admin',"
+                    "'super_admin',false,clock_timestamp())"
+                )
+            )
+            users_digest = await conn.scalar(
+                text("SELECT md5(string_agg(to_jsonb(u)::text,',' ORDER BY id)) FROM users u")
+            )
         # The physical dump is created before irreversible migration and then
         # restored into a new database. Never use mock backup APIs as proof.
         client = ["docker", "run", "--rm", "--network=host", "-e", "PGPASSWORD=mobile070-scratch", "postgres:18"]
@@ -127,7 +137,7 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
             timeout=30,
         )
         assert blocked_boot.returncode == 2 and b"BOOT_STARTED" not in blocked_boot.stdout
-        # A restored installation left at PG079 must not boot this PG082 image.
+        # A restored installation left at PG079 must not boot this PG083 image.
         at_070 = subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "079_mobile_follow_sync_state"],
             env=restore_env,
@@ -170,10 +180,28 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         assert migrated.returncode == 0, migrated.stderr[-500:]
         elapsed = time.monotonic() - start
         async with restored.connect() as conn:
-            assert (
-                await conn.scalar(text("SELECT version_num FROM alembic_version")) == "082_mobile_synthetic_risk_audit"
-            )
+            assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == "083_mobile_persistent_config"
             assert await conn.scalar(text("SELECT current_setting('track_commit_timestamp')")) == "on"
+            assert await conn.scalar(text("SELECT count(*) FROM users WHERE NOT is_demo")) == 1
+            assert (
+                await conn.scalar(text("SELECT md5(string_agg(to_jsonb(u)::text,',' ORDER BY id)) FROM users u"))
+                == users_digest
+            )
+            durable_defaults = dict(
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT key,value FROM enterprise_config WHERE key IN "
+                            "('mobile.follow_sync_v105_available','mobile.follow_sync_v105_risk_permission','deployment.seed_demo_accounts')"
+                        )
+                    )
+                ).all()
+            )
+            assert durable_defaults == {
+                "mobile.follow_sync_v105_available": "false",
+                "mobile.follow_sync_v105_risk_permission": "",
+                "deployment.seed_demo_accounts": "false",
+            }
             assert await conn.scalar(text("SELECT count(*) FROM mobile_publication_events")) == row_count
             after_size = await conn.scalar(text("SELECT pg_total_relation_size('mobile_publication_events')"))
             assert (
@@ -191,9 +219,9 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         assert after.returncode == 0, after.stdout[-400:] + after.stderr[-400:]
         if image:
             image_new = subprocess.run(image_cmd, env=image_env, capture_output=True, timeout=40)
-            assert (
-                image_new.returncode == 0 and b'"schema_head": "082_mobile_synthetic_risk_audit"' in image_new.stdout
-            ), image_new.stdout[-400:] + image_new.stderr[-400:]
+            assert image_new.returncode == 0 and b'"schema_head": "083_mobile_persistent_config"' in image_new.stdout, (
+                image_new.stdout[-400:] + image_new.stderr[-400:]
+            )
         allowed_boot = subprocess.run(
             ["/bin/sh", "-ec", shell_gate, "--", sys.executable, "-c", "print('BOOT_STARTED')"],
             env=restore_env,
@@ -202,7 +230,7 @@ async def test_populated_068_backup_restores_and_quarantines_older_approvals():
         )
         assert allowed_boot.returncode == 0 and b"BOOT_STARTED" in allowed_boot.stdout
         print(
-            f"RESTORED_POPULATED_077_TO_082_ROWS={row_count} MIGRATION_SECONDS={elapsed:.3f} "
+            f"RESTORED_POPULATED_077_TO_083_ROWS={row_count} MIGRATION_SECONDS={elapsed:.3f} "
             f"PUBLICATION_RELATION_BYTES_BEFORE={before_size} AFTER={after_size}"
         )
     finally:

@@ -63,7 +63,6 @@ from services.mobile_follow_enablement import (
     require_activity_or_recovery,
     require_user_verifying_approval,
     require_user_verifying_mutation,
-    routes_installed,
 )
 from services.saml_health import register_saml_health_probe
 
@@ -128,28 +127,24 @@ def include_graphql_routes(app: FastAPI) -> None:
 def include_rest_routes(app: FastAPI) -> None:
     for router in REST_ROUTERS:
         app.include_router(router)
-    # All follow paths install together only on explicit operator startup.
-    # The fresh DB decision gate runs before new activity; recovery remains available.
-    if routes_installed():
-        from api.routes.mobile_follow_browser import router as follow_browser_router
-        from api.routes.mobile_follow_read import router as follow_read_router
-        from api.routes.mobile_follow_write import router as follow_write_router
+    # URL registration needs no deployment environment permission. Availability
+    # and all new activity remain default-OFF behind fresh, locked DB approvals.
+    from api.routes.mobile_follow_browser import router as follow_browser_router
+    from api.routes.mobile_follow_read import router as follow_read_router
+    from api.routes.mobile_follow_write import router as follow_write_router
 
-        # Keep the status of one historical operation recoverable for its
-        # independently authorized owner after new writes close. Every other
-        # read still requires the fresh DB operator gate.
-        app.include_router(follow_read_router, dependencies=[Depends(require_activity_or_recovery)])
-        app.include_router(
-            follow_write_router,
-            dependencies=[Depends(require_activity_or_recovery), Depends(require_user_verifying_mutation)],
-        )
-        # Browser Origin and password recency do not establish human presence.
-        # The local-only synthetic QA app mounts its own router without this
-        # production dependency; operator acknowledgement never overrides it.
-        app.include_router(
-            follow_browser_router,
-            dependencies=[Depends(require_activity_or_recovery), Depends(require_user_verifying_approval)],
-        )
+    # Bounded same-owner recovery survives availability/operator closure; these
+    # handlers still require credentials, device/scope, expiry and privacy fences.
+    app.include_router(follow_read_router, dependencies=[Depends(require_activity_or_recovery)])
+    app.include_router(
+        follow_write_router,
+        dependencies=[Depends(require_activity_or_recovery), Depends(require_user_verifying_mutation)],
+    )
+    # Browser intent/action proof is independent of operator permission.
+    app.include_router(
+        follow_browser_router,
+        dependencies=[Depends(require_activity_or_recovery), Depends(require_user_verifying_approval)],
+    )
 
 
 def configure_routes(app: FastAPI) -> None:

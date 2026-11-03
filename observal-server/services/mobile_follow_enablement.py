@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-"""Default-closed 1.0.5 route installation and per-request operator switch.
+"""Always registered route shapes, default-closed persistent authorization.
 
-The installation flag only exposes route shapes. It is not product consent:
-per-request DB approval is required for new activity, including browser grant
-issuance. Owner withdrawal and receipt recovery remain available after the
-switch closes; worker erasure likewise remains independent of that switch.
+Availability and bounded risk permission are authenticated server-side controls,
+not boot environment flags. Neither grants consent. Request-time DB locks retain
+operator, worker, scope, expiry and privacy fences; recovery is independent of
+availability and erasure remains independent of new-activity switches.
 """
 
-import os
+import json
 
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy import text
@@ -16,20 +16,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import get_db
 
-# Separate explicit install action plus DB approval prevents a routine mobile
-# auth flag or stale settings cache from silently enabling 17 routes.
-ROUTE_INSTALL_ENV = "OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL"
+# Registering a URL is not authority. Only the dedicated audited admin API can
+# persist availability; admissions never trust the Redis/process setting cache.
+AVAILABILITY_KEY = "mobile.follow_sync_v105_available"
+RISK_PERMISSION_KEY = "mobile.follow_sync_v105_risk_permission"
 ACK_KEY = "mobile.follow_sync_v105_owner_decisions_ack"
 ENABLE_KEY = "mobile.follow_sync_v105_operator_enabled"
 WORKER_KEY = "mobile.follow_sync_v105_worker_heartbeat"
 ACK_VALUE = "owner-approved-v105-quota-consent-storage-recovery"
 RISK_ACK_VALUE = "owner-accepted-unreviewed-synthetic-only-v1"
 RISK_KEY = "mobile.follow_sync_v105_synthetic_risk_sha256"
-RISK_INSTALL_ENV = "OBSERVAL_FOLLOW_SYNTHETIC_RISK_INSTALL"
 
 
-def routes_installed() -> bool:
-    return os.environ.get(ROUTE_INSTALL_ENV) == "1"
+def risk_permission_matches(
+    raw: str, server: object, author: object, user: object, generation: int, digest: str
+) -> bool:
+    """An exact, separately armed cohort permit; never an unbounded boolean."""
+    try:
+        permit = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(permit, dict) and permit == {
+        "server_id": str(server),
+        "author_viewer_id": str(author),
+        "user_viewer_id": str(user),
+        "cohort_generation": generation,
+        "risk_acceptance_sha256": digest,
+    }
 
 
 async def require_user_verifying_approval(request: Request) -> None:
@@ -42,8 +55,8 @@ async def require_user_verifying_mutation(request: Request) -> None:
     request.state.normal_follow_router = True
 
 
-# Recovery routes are still installed only by the explicit startup flag. Their
-# handlers retain independent credential, owner/cohort, and privacy-store fences;
+# Recovery shapes are always registered. Their handlers retain independent
+# credential, owner/cohort, and privacy-store fences;
 # the operator switch controls new activity, not an owner's ability to erase it.
 STATUS_RECOVERY_ROUTE = ("GET", "/api/v1/mobile-follow-sync/v1/operations/{operation_id}")
 RECOVERY_ROUTES = frozenset(
@@ -87,10 +100,10 @@ async def _gate_entries(db: AsyncSession) -> dict[str, str]:
             (
                 await db.execute(
                     text("""SELECT key,value FROM enterprise_config
-                    WHERE key IN (:ack,:enabled,:worker)
+                    WHERE key IN (:ack,:enabled,:worker,:available)
                       AND (key <> :worker OR updated_at >= clock_timestamp() - interval '90 seconds')
                     ORDER BY key FOR SHARE"""),
-                    {"ack": ACK_KEY, "enabled": ENABLE_KEY, "worker": WORKER_KEY},
+                    {"ack": ACK_KEY, "enabled": ENABLE_KEY, "worker": WORKER_KEY, "available": AVAILABILITY_KEY},
                 )
             ).all()
         )
@@ -104,7 +117,7 @@ async def _gate_entries(db: AsyncSession) -> dict[str, str]:
 async def _ack_authorized(db: AsyncSession, entries: dict[str, str]) -> bool:
     if entries.get(ACK_KEY) == ACK_VALUE:
         return True
-    if entries.get(ACK_KEY) != RISK_ACK_VALUE or os.environ.get(RISK_INSTALL_ENV) != "1":
+    if entries.get(ACK_KEY) != RISK_ACK_VALUE:
         return False
     # Admission remains under the shared project lock. Risk cannot authorize a
     # live cohort, expired/unconfigured pair, changed server, or real identities.
@@ -118,8 +131,8 @@ async def _ack_authorized(db: AsyncSession, entries: dict[str, str]) -> bool:
                 text("""SELECT key,value FROM enterprise_config
         WHERE key IN ('mobile.auth_enabled','mobile.synthetic_test_enabled','mobile.synthetic_test_ack',
         'mobile.synthetic_test_server_id','mobile.synthetic_test_viewer_id','mobile.synthetic_test_self_user_viewer_id',
-        'trace_headlines','mobile.trace_qualification_ack','mobile.trace_qualification_server_id',:risk) FOR SHARE"""),
-                {"risk": RISK_KEY},
+        'trace_headlines','mobile.trace_qualification_ack','mobile.trace_qualification_server_id',:risk,:permit) FOR SHARE"""),
+                {"risk": RISK_KEY, "permit": RISK_PERMISSION_KEY},
             )
         ).all()
     )
@@ -141,11 +154,15 @@ async def _ack_authorized(db: AsyncSession, entries: dict[str, str]) -> bool:
         server = UUID(values.get("mobile.synthetic_test_server_id", ""))
     except (ValueError, TypeError):
         return False
+    generation = await db.scalar(text("SELECT generation FROM mobile_read_controls WHERE project_id='default'"))
+    if not risk_permission_matches(values.get(RISK_PERMISSION_KEY, ""), server, author, user, generation, digest):
+        return False
     if not await db.scalar(
         text("""SELECT EXISTS (SELECT 1 FROM mobile_read_controls c, mobile_server_identity s
         WHERE c.project_id='default' AND NOT c.blocked AND NOT c.revocation_pending AND c.source_policy_ready
-        AND c.synthetic_expires_at > clock_timestamp() AND s.singleton=true AND s.server_id=:server)"""),
-        {"server": server},
+        AND c.generation=:generation AND c.synthetic_expires_at > clock_timestamp()
+        AND s.singleton=true AND s.server_id=:server)"""),
+        {"server": server, "generation": generation},
     ):
         return False
     if not await synthetic_principals_valid(db, author, user):
@@ -171,7 +188,8 @@ async def require_status_recovery_approval(db: AsyncSession) -> None:
 async def require_operator_approval(db: AsyncSession = Depends(get_db)) -> None:
     entries = await _gate_entries(db)
     if (
-        not await _ack_authorized(db, entries)
+        entries.get(AVAILABILITY_KEY) != "true"
+        or not await _ack_authorized(db, entries)
         or entries.get(ENABLE_KEY) != "true"
         or entries.get(WORKER_KEY) != "running"
     ):

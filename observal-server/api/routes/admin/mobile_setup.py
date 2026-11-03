@@ -7,7 +7,7 @@ transaction-scoped exclusive project lock as retention and all phone readers.
 The workflow never sets the live trace qualification or trace_headlines switch.
 """
 
-import os
+import json
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -24,12 +24,13 @@ from observal_shared.migration.constants import DEFAULT_PROJECT_ID
 from services.mobile_follow_enablement import (
     ACK_KEY,
     ACK_VALUE,
+    AVAILABILITY_KEY,
     ENABLE_KEY,
     RISK_ACK_VALUE,
-    RISK_INSTALL_ENV,
     RISK_KEY,
+    RISK_PERMISSION_KEY,
     WORKER_KEY,
-    routes_installed,
+    risk_permission_matches,
 )
 from services.mobile_read_control import synthetic_principals_valid
 from services.redis import get_redis
@@ -40,8 +41,10 @@ from ._router import router
 
 _ACK = "isolated-disposable-synthetic-only-v1"
 _FOLLOW_REVIEW_KEY = "mobile.follow_sync_v105_synthetic_review_sha256"
-_FOLLOW_CLOSED = {ACK_KEY: "", ENABLE_KEY: "false", _FOLLOW_REVIEW_KEY: "", RISK_KEY: ""}
+_FOLLOW_CLOSED = {ACK_KEY: "", ENABLE_KEY: "false", _FOLLOW_REVIEW_KEY: "", RISK_KEY: "", RISK_PERMISSION_KEY: ""}
 _KEYS = (
+    AVAILABILITY_KEY,
+    RISK_PERMISSION_KEY,
     ACK_KEY,
     ENABLE_KEY,
     _FOLLOW_REVIEW_KEY,
@@ -81,17 +84,34 @@ class MobileFollowTestControl(BaseModel):
     risk_acceptance_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
+class MobileFollowRiskPermission(BaseModel):
+    author_viewer_id: UUID
+    user_viewer_id: UUID
+    cohort_generation: int = Field(ge=1)
+    acknowledgement: str
+    risk_acceptance_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class MobileFollowConfiguration(BaseModel):
+    server_id: UUID
+    available: StrictBool
+    risk_permission: MobileFollowRiskPermission | None = None
+
+
 class MobileTestStatus(BaseModel):
     blocked: bool
     generation: int
     server_id: UUID | None
+    installed_server_id: UUID | None = None
     author_viewer_id: UUID | None
     user_viewer_id: UUID | None
     configured: bool
     trace_headlines: bool
     revocation_pending: bool = False
     expires_at: datetime | None = None
-    follow_sync_routes_installed: bool = False
+    follow_sync_routes_installed: bool = True
+    follow_sync_available: bool = False
+    follow_sync_risk_configured: bool = False
     follow_sync_operator_enabled: bool = False
     follow_sync_acknowledged: bool = False
     follow_sync_review_sha256: str | None = None
@@ -134,6 +154,7 @@ async def _status(db: AsyncSession) -> MobileTestStatus:
         blocked=bool(row.blocked) if row else True,
         generation=row.generation if row else 0,
         server_id=ident("mobile.synthetic_test_server_id"),
+        installed_server_id=await db.scalar(text("SELECT server_id FROM mobile_server_identity WHERE singleton=true")),
         author_viewer_id=ident("mobile.synthetic_test_viewer_id"),
         user_viewer_id=ident("mobile.synthetic_test_self_user_viewer_id"),
         configured=values["mobile.synthetic_test_enabled"] == "true"
@@ -142,7 +163,8 @@ async def _status(db: AsyncSession) -> MobileTestStatus:
         trace_headlines=values["trace_headlines"] == "true",
         revocation_pending=bool(row.revocation_pending) if row else False,
         expires_at=row.synthetic_expires_at if row else None,
-        follow_sync_routes_installed=routes_installed(),
+        follow_sync_available=values[AVAILABILITY_KEY] == "true",
+        follow_sync_risk_configured=bool(values[RISK_PERMISSION_KEY]),
         follow_sync_operator_enabled=values[ENABLE_KEY] == "true",
         follow_sync_acknowledged=values[ACK_KEY] == ACK_VALUE,
         follow_sync_review_sha256=values[_FOLLOW_REVIEW_KEY] or None,
@@ -347,6 +369,97 @@ async def mobile_test_open(
     return await _status(db)
 
 
+@router.post("/mobile-test/configure", response_model=MobileTestStatus)
+async def mobile_test_configure(
+    req: MobileFollowConfiguration,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role(UserRole.super_admin)),
+):
+    """Persist capability availability; optionally arm one finite risk cohort.
+
+    No auth/cohort/consent/write grant is opened here. Disabling also closes new
+    activity but retains bounded recovery provenance until expiry or revoke.
+    """
+    await _lock(db)
+    current = await _status(db)
+    values = await _settings(db)
+    identity = await db.scalar(text("SELECT server_id FROM mobile_server_identity WHERE singleton=true"))
+    if str(identity) != str(req.server_id):
+        raise HTTPException(409, "Matching installed server required")
+    if req.risk_permission is not None and not req.available:
+        raise HTTPException(422, "Risk permission cannot be armed while availability is disabled")
+    if req.available and (
+        current.revocation_pending
+        or current.trace_headlines
+        or values["mobile.trace_qualification_server_id"]
+        or values["mobile.trace_qualification_ack"]
+        or values[ENABLE_KEY] == "true"
+    ):
+        raise HTTPException(409, "Closed Following activity and absent live qualification required")
+    if req.available and not await db.scalar(
+        text("SELECT setting='on' AND NOT pending_restart FROM pg_settings WHERE name='track_commit_timestamp'")
+    ):
+        raise HTTPException(409, "Enabled PostgreSQL commit clock required before availability")
+    changes = {AVAILABILITY_KEY: "true" if req.available else "false"}
+    action = "follow_cfg_open" if req.available else "follow_cfg_close"
+    audit_status = current.model_copy(
+        update={
+            "server_id": req.server_id,
+            "follow_sync_review_sha256": None,
+            "follow_sync_risk_sha256": None,
+        }
+    )
+    if not req.available:
+        changes[ENABLE_KEY] = "false"
+    permit = req.risk_permission
+    if permit is not None:
+        if permit.acknowledgement != RISK_ACK_VALUE:
+            raise HTTPException(422, "Explicit separate synthetic owner-risk permission required")
+        if (
+            current.blocked
+            or not current.configured
+            or current.server_id != req.server_id
+            or current.author_viewer_id != permit.author_viewer_id
+            or current.user_viewer_id != permit.user_viewer_id
+            or current.generation != permit.cohort_generation
+            or not await synthetic_principals_valid(db, permit.author_viewer_id, permit.user_viewer_id)
+            or not await db.scalar(
+                text(
+                    "SELECT source_policy_ready AND synthetic_expires_at > clock_timestamp() "
+                    "FROM mobile_read_controls WHERE project_id='default'"
+                )
+            )
+        ):
+            raise HTTPException(409, "Open, exact, unexpired disposable cohort required for risk permission")
+        worker = await db.scalar(
+            text(
+                "SELECT value FROM enterprise_config WHERE key=:worker "
+                "AND updated_at >= clock_timestamp() - interval '90 seconds' FOR SHARE"
+            ),
+            {"worker": WORKER_KEY},
+        )
+        if worker != "running":
+            raise HTTPException(409, "Fresh privacy worker required for risk permission")
+        changes[RISK_PERMISSION_KEY] = json.dumps(
+            {
+                "server_id": str(req.server_id),
+                "author_viewer_id": str(permit.author_viewer_id),
+                "user_viewer_id": str(permit.user_viewer_id),
+                "cohort_generation": permit.cohort_generation,
+                "risk_acceptance_sha256": permit.risk_acceptance_sha256,
+            },
+            sort_keys=True,
+        )
+        action = "follow_risk_arm"
+        audit_status = audit_status.model_copy(update={"follow_sync_risk_sha256": permit.risk_acceptance_sha256})
+    await _write(db, changes)
+    await _record_transition(db, actor, action, audit_status, current.generation)
+    await db.commit()
+    await _refresh(changes)
+    await _audit(actor, action)
+    return await _status(db)
+
+
 @router.post("/mobile-test/follow-sync", response_model=MobileTestStatus)
 async def mobile_test_follow_sync(
     req: MobileFollowTestControl,
@@ -386,12 +499,19 @@ async def mobile_test_follow_sync(
                 or req.owner_decisions_acknowledgement is not None
             ):
                 raise HTTPException(422, "Explicit synthetic risk acceptance required; cannot mix with review")
-            if os.environ.get(RISK_INSTALL_ENV) != "1":
-                raise HTTPException(409, "Synthetic risk acceptance installation is default-OFF")
+            if not risk_permission_matches(
+                values[RISK_PERMISSION_KEY],
+                req.server_id,
+                req.author_viewer_id,
+                req.user_viewer_id,
+                req.cohort_generation,
+                req.risk_acceptance_sha256,
+            ):
+                raise HTTPException(409, "Separate exact-cohort synthetic risk permission is default-OFF")
         elif req.owner_decisions_acknowledgement != ACK_VALUE or req.review_receipt_sha256 is None:
             raise HTTPException(422, "Explicit owner decisions and signed-review receipt digest required")
         if (
-            not routes_installed()
+            values[AVAILABILITY_KEY] != "true"
             or current.blocked
             or current.revocation_pending
             or not current.configured
@@ -408,7 +528,7 @@ async def mobile_test_follow_sync(
                 {"project": str(DEFAULT_PROJECT_ID)},
             )
         ):
-            raise HTTPException(409, "Open, matching, unexpired disposable cohort and installed routes required")
+            raise HTTPException(409, "Open, matching, unexpired disposable cohort and persistent availability required")
         worker = await db.scalar(
             text(
                 "SELECT value FROM enterprise_config WHERE key=:worker "

@@ -132,8 +132,7 @@ async def test_existing_publication_gets_null_retained_floor_on_upgrade():
         try:
             async with verify.connect() as db:
                 assert (
-                    await db.scalar(text("SELECT version_num FROM alembic_version"))
-                    == "082_mobile_synthetic_risk_audit"
+                    await db.scalar(text("SELECT version_num FROM alembic_version")) == "083_mobile_persistent_config"
                 )
                 assert await db.scalar(text("SELECT count(*) FROM first_admin_provision_audit")) == 0
                 for table in ("mobile_source_line_highwater", "mobile_source_final_receipts"):

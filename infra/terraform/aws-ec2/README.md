@@ -1,5 +1,6 @@
 <!-- SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com> -->
 <!-- SPDX-FileCopyrightText: 2026 Apoorv Garg <apoorvgarg.work@gmail.com> -->
+<!-- SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Agentic Resource Registry on AWS EC2 — Single Instance
@@ -170,7 +171,9 @@ This removes all AWS resources. Data is not recoverable after destroy.
 
 ## Default Credentials
 
-After first deploy (if `SEED_DEMO_ACCOUNTS=true` in .env):
+Fresh instances do not seed demo accounts by default. Use first-admin bootstrap.
+The persistent admin setting `deployment.seed_demo_accounts` is an explicit opt-in;
+any existing non-demo user suppresses seeding. When explicitly configured on a demo-only store:
 
 | Role | Email | Password |
 |------|-------|----------|

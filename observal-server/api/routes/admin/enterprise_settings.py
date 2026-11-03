@@ -59,9 +59,11 @@ def _require_dedicated_review_policy_route(key: str) -> None:
         raise HTTPException(status_code=409, detail="Use the dedicated mobile-test operator endpoint")
 
 
-def _require_usage_ping_super_admin(key: str, current_user: User) -> None:
+def _require_policy_super_admin(key: str, current_user: User) -> None:
     if key.startswith("usage_ping.") and current_user.role != UserRole.super_admin:
         raise HTTPException(status_code=403, detail="Usage reporting can only be changed by a super administrator")
+    if key == "deployment.seed_demo_accounts" and current_user.role != UserRole.super_admin:
+        raise HTTPException(status_code=403, detail="Demo seeding policy can only be changed by a super administrator")
 
 
 async def _mark_restart_pending(db: AsyncSession, key: str) -> None:
@@ -259,7 +261,7 @@ async def upsert_setting(
 ):
     optic.trace("key={}", key)
     _require_dedicated_review_policy_route(key)
-    _require_usage_ping_super_admin(key, current_user)
+    _require_policy_super_admin(key, current_user)
     if key in ds.FILE_ONLY_KEYS:
         raise HTTPException(status_code=409, detail="Setting can only be managed through dedicated files")
     if ds.is_externally_managed(key):
@@ -269,6 +271,8 @@ async def upsert_setting(
     # Interior content (multi-line PEM certs) is preserved.
     value = req.value.strip() if isinstance(req.value, str) else req.value
 
+    if key == "deployment.seed_demo_accounts" and value not in {"true", "false"}:
+        raise HTTPException(422, "Demo seeding policy must be exactly true or false")
     if key in ("branding.logo", "branding.wordmark"):
         _validate_branding_logo(value)
     elif key == "branding.app_name":
@@ -357,7 +361,7 @@ async def delete_setting(
 ):
     optic.trace("key={}", key)
     _require_dedicated_review_policy_route(key)
-    _require_usage_ping_super_admin(key, current_user)
+    _require_policy_super_admin(key, current_user)
     if ds.is_externally_managed(key):
         raise HTTPException(status_code=409, detail="Setting is externally managed by a secret file")
     result = await db.execute(select(EnterpriseConfig).where(EnterpriseConfig.key == key))

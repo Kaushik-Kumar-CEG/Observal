@@ -87,6 +87,34 @@ SETTINGS = {
 }
 
 
+async def configure_test_availability(client, desktop):
+    """Use authenticated audited controls, never a new availability SQL shortcut."""
+    headers = bearer(desktop)
+    state = (await client.get("/api/v1/admin/mobile-test/status", headers=headers)).json()
+    config = {"server_id": state["installed_server_id"], "available": False}
+    response = await client.post("/api/v1/admin/mobile-test/configure", headers=headers, json=config)
+    assert response.status_code == 200, response.text[:200]
+    response = await client.post(
+        "/api/v1/admin/mobile-test/configure", headers=headers, json=config | {"available": True}
+    )
+    assert response.status_code == 200, response.text[:200]
+    response = await client.post(
+        "/api/v1/admin/mobile-test/follow-sync",
+        headers=headers,
+        json={
+            "server_id": state["server_id"],
+            "author_viewer_id": state["author_viewer_id"],
+            "user_viewer_id": state["user_viewer_id"],
+            "cohort_generation": state["generation"],
+            "enabled": True,
+            "acknowledgement": "isolated-disposable-synthetic-only-v1",
+            "owner_decisions_acknowledgement": mobile_follow_enablement.ACK_VALUE,
+            "review_receipt_sha256": "a" * 64,
+        },
+    )
+    assert response.status_code == 200, response.text[:200]
+
+
 def _app(db_session):
     app = FastAPI()
     for router in (mobile_follow_read.router, mobile_follow_write.router, mobile_follow_browser.router):
@@ -188,7 +216,6 @@ def _serve(
         if production:
             from routes import include_rest_routes
 
-            os.environ[mobile_follow_enablement.ROUTE_INSTALL_ENV] = "1"
             app = FastAPI()
             include_rest_routes(app)
             app.dependency_overrides[get_db] = db_session
@@ -356,6 +383,7 @@ async def test_production_route_install_stays_closed_until_fresh_owner_and_opera
                             ),
                             {"id": uuid.uuid4(), "key": key, "value": value},
                         )
+                await configure_test_availability(first, desktop)
                 for client in (first, second):
                     result = await client.get(ROOT + "/availability", headers=bearer(phone))
                     assert result.status_code == 200, (result.status_code, result.text[:200])
@@ -659,6 +687,7 @@ async def test_normal_two_api_privacy_recovery_survives_closed_activity_gate(scr
                             ),
                             {"id": uuid.uuid4(), "key": key, "value": value},
                         )
+                await configure_test_availability(first, desktop)
                 for client in (first, second):
                     await expect(await client.get(ROOT + "/availability", headers=bearer(phone)), 200)
 
@@ -918,6 +947,7 @@ async def test_logout_between_grant_consumption_and_signing_revokes_fresh_grant(
                             ),
                             {"id": uuid.uuid4(), "key": key, "value": value},
                         )
+                await configure_test_availability(first, desktop)
                 for client in (first, second):
                     assert (await expect(await client.get(ROOT + "/availability", headers=bearer(phone)), 200))[
                         "state"
@@ -1428,8 +1458,9 @@ def test_local_quota_and_old_server_are_contract_only_not_http_proofs():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("risk", [False, True])
 async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(scratch, monkeypatch, risk):
-    if risk:
-        monkeypatch.setenv(mobile_follow_enablement.RISK_INSTALL_ENV, "1")
+    # Both old flags are deliberately absent; only audited persistent controls authorize.
+    monkeypatch.delenv("OBSERVAL_FOLLOW_SYNC_V105_ROUTE_INSTALL", raising=False)
+    monkeypatch.delenv("OBSERVAL_FOLLOW_SYNTHETIC_RISK_INSTALL", raising=False)
     url, key_dir, _redis, owner, other = scratch
     engine = create_async_engine(url)
     operator = uuid.uuid4()
@@ -1469,6 +1500,13 @@ async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(sc
             status = await client.get("/api/v1/admin/mobile-test/status", headers=bearer(desktop))
             assert status.status_code == 200
             state = status.json()
+            assert not state["follow_sync_available"] and not state["follow_sync_risk_configured"]
+            config_path = "/api/v1/admin/mobile-test/configure"
+            config_body = {"server_id": state["installed_server_id"], "available": True}
+            assert (await client.post(config_path, json=config_body)).status_code == 401
+            assert (await client.post(config_path, json=config_body, headers=bearer(nonadmin))).status_code == 403
+            assert (await client.post(config_path, json=config_body, headers=bearer(phone))).status_code in (401, 403)
+            assert (await client.get(ROOT + "/availability", headers=bearer(phone))).status_code == 404
             body = dict(
                 server_id=state["server_id"],
                 author_viewer_id=str(owner),
@@ -1501,6 +1539,23 @@ async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(sc
                     ),
                     {"id": uuid.uuid4(), "key": mobile_follow_enablement.WORKER_KEY},
                 )
+            if risk:
+                # Even a valid risk-open request cannot replace the separate permission.
+                assert (await client.post(control, json=body, headers=bearer(desktop))).status_code == 409
+                config_body["risk_permission"] = {
+                    "author_viewer_id": str(owner),
+                    "user_viewer_id": str(other),
+                    "cohort_generation": state["generation"],
+                    "acknowledgement": mobile_follow_enablement.RISK_ACK_VALUE,
+                    "risk_acceptance_sha256": "c" * 64,
+                }
+            configured = await client.post(config_path, json=config_body, headers=bearer(desktop))
+            assert configured.status_code == 200, configured.text[:200]
+            assert configured.json()["follow_sync_available"]
+            assert not configured.json()["follow_sync_operator_enabled"]
+            persisted = await client.get("/api/v1/admin/mobile-test/status", headers=bearer(desktop))
+            assert persisted.json()["follow_sync_risk_configured"] is risk
+            assert (await client.get(ROOT + "/availability", headers=bearer(phone))).status_code == 404
             result = await client.post(control, json=body, headers=bearer(desktop))
             assert result.status_code == 200, result.text[:200]
             assert result.json()["follow_sync_operator_enabled"]
@@ -1519,6 +1574,13 @@ async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(sc
             result = await client.post("/api/v1/admin/mobile-test/revoke", headers=bearer(desktop))
             assert result.status_code == 200, result.text[:200]
             assert not result.json()["follow_sync_acknowledged"] and not result.json()["configured"]
+            assert not result.json()["follow_sync_risk_configured"]
+            disabled = await client.post(
+                config_path,
+                json={"server_id": state["installed_server_id"], "available": False},
+                headers=bearer(desktop),
+            )
+            assert disabled.status_code == 200 and not disabled.json()["follow_sync_available"]
             assert (
                 await client.get("/api/v1/mobile-activity/v1/capabilities", headers=bearer(phone))
             ).status_code == 401
@@ -1540,6 +1602,17 @@ async def test_supported_synthetic_operator_control_real_http_auth_and_revoke(sc
                     if risk
                     else [("follow_open", "a" * 64, None), ("follow_close", "a" * 64, None)]
                 )
+        # Exercised configuration history must survive refused downgrade.
+        refused = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "082_mobile_synthetic_risk_audit"],
+            cwd=SERVER,
+            env={**os.environ, "DATABASE_URL": url},
+            capture_output=True,
+            timeout=90,
+        )
+        assert refused.returncode != 0 and b"Refusing to discard persistent configuration audit" in refused.stderr
+        async with engine.connect() as db:
+            assert await db.scalar(text("SELECT version_num FROM alembic_version")) == "083_mobile_persistent_config"
     finally:
         if worker.is_alive():
             worker.terminate()

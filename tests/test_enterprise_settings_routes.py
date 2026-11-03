@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Focused coverage for enterprise settings administration routes."""
@@ -427,6 +428,7 @@ async def test_get_setting_returns_external_plain_and_masks_all_secret_storage(m
 
 @pytest.mark.asyncio
 async def test_upsert_retention_setting_normalizes_persists_and_refreshes_cache(boundaries, monkeypatch):
+    monkeypatch.setattr("services.clickhouse.schema.init_clickhouse", AsyncMock())
     db = _db(_one(None))
     monkeypatch.setattr(es.ds, "is_externally_managed", lambda _key: False)
 
@@ -768,6 +770,7 @@ async def test_revoke_sensitive_restart_setting_deletes_and_emits_critical_event
 
 @pytest.mark.asyncio
 async def test_delete_and_revoke_nonrestart_settings_skip_restart_marker(boundaries, monkeypatch):
+    monkeypatch.setattr("services.clickhouse.schema.init_clickhouse", AsyncMock())
     monkeypatch.setattr(es.ds, "is_externally_managed", lambda _key: False)
     delete_cfg = SimpleNamespace(key="data.retention_days", value="90")
     revoke_cfg = SimpleNamespace(key="insights.api_key", value="enc:key")
@@ -788,7 +791,11 @@ async def test_delete_and_revoke_nonrestart_settings_skip_restart_marker(boundar
         call("insights.api_key"),
     ]
     assert boundaries.refresh.await_count == 2
-    boundaries.emit.assert_awaited_once()
+    assert boundaries.emit.await_count == 2
+    assert [args.args[0].target_id for args in boundaries.emit.await_args_list] == [
+        "data.retention_days",
+        "insights.api_key",
+    ]
 
 
 @pytest.mark.asyncio

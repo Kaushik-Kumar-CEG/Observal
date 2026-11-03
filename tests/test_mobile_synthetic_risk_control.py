@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-"""Owner risk acceptance is not review and cannot authorize production."""
+"""Owner risk permission is durable, exact-cohort scoped and never review."""
 
+import json
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -25,16 +26,31 @@ def risk_req(req):
     )
 
 
+def permit(server, author, user, generation=3):
+    return json.dumps(
+        {
+            "server_id": str(server),
+            "author_viewer_id": str(author),
+            "user_viewer_id": str(user),
+            "cohort_generation": generation,
+            "risk_acceptance_sha256": "c" * 64,
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_risk_default_off_and_separate_durable_provenance(monkeypatch):
     req, _, db, actor = fixture(monkeypatch)
     req = risk_req(req)
-    monkeypatch.delenv(gate.RISK_INSTALL_ENV, raising=False)
+    # Leftover old boot flags cannot authorize the absent DB permit.
+    monkeypatch.setenv("OBSERVAL_FOLLOW_SYNTHETIC_RISK_INSTALL", "1")
     with pytest.raises(HTTPException) as denied:
         await ops.mobile_test_follow_sync(req, db, actor)
     assert denied.value.status_code == 409
     ops._write.assert_not_awaited()
-    monkeypatch.setenv(gate.RISK_INSTALL_ENV, "1")
+    ops._settings.return_value[gate.RISK_PERMISSION_KEY] = permit(
+        req.server_id, req.author_viewer_id, req.user_viewer_id
+    )
     db.scalar.side_effect = [req.server_id, True, "running"]
     await ops.mobile_test_follow_sync(req, db, actor)
     changes = ops._write.await_args.args[1]
@@ -58,11 +74,28 @@ async def test_risk_default_off_and_separate_durable_provenance(monkeypatch):
 )
 async def test_risk_cannot_impersonate_review_or_implicit_acceptance(monkeypatch, change):
     req, _, db, actor = fixture(monkeypatch)
-    monkeypatch.setenv(gate.RISK_INSTALL_ENV, "1")
     with pytest.raises(HTTPException) as denied:
         await ops.mobile_test_follow_sync(risk_req(req).model_copy(update=change), db, actor)
     assert denied.value.status_code == 422
     ops._write.assert_not_awaited()
+
+
+def values():
+    result = {
+        "mobile.auth_enabled": "true",
+        "mobile.synthetic_test_enabled": "true",
+        "mobile.synthetic_test_ack": ops._ACK,
+        "mobile.synthetic_test_server_id": str(uuid.uuid4()),
+        "mobile.synthetic_test_viewer_id": str(uuid.uuid4()),
+        "mobile.synthetic_test_self_user_viewer_id": str(uuid.uuid4()),
+        gate.RISK_KEY: "c" * 64,
+    }
+    result[gate.RISK_PERMISSION_KEY] = permit(
+        result["mobile.synthetic_test_server_id"],
+        result["mobile.synthetic_test_viewer_id"],
+        result["mobile.synthetic_test_self_user_viewer_id"],
+    )
+    return result
 
 
 @pytest.mark.asyncio
@@ -77,23 +110,14 @@ async def test_risk_cannot_impersonate_review_or_implicit_acceptance(monkeypatch
         ("mobile.synthetic_test_viewer_id", "invalid"),
         (gate.RISK_KEY, ""),
         ("mobile.synthetic_test_ack", ""),
+        (gate.RISK_PERMISSION_KEY, ""),
     ],
 )
 async def test_risk_gate_never_falls_back_to_live_or_invalid_scope(monkeypatch, key, value):
-    monkeypatch.setenv(gate.RISK_INSTALL_ENV, "1")
-    values = {
-        "mobile.auth_enabled": "true",
-        "mobile.synthetic_test_enabled": "true",
-        "mobile.synthetic_test_ack": ops._ACK,
-        "mobile.synthetic_test_server_id": str(uuid.uuid4()),
-        "mobile.synthetic_test_viewer_id": str(uuid.uuid4()),
-        "mobile.synthetic_test_self_user_viewer_id": str(uuid.uuid4()),
-        gate.RISK_KEY: "c" * 64,
-        key: value,
-    }
+    configured = values() | {key: value}
     db = SimpleNamespace(
-        execute=AsyncMock(return_value=SimpleNamespace(all=lambda: list(values.items()))),
-        scalar=AsyncMock(return_value=True),
+        execute=AsyncMock(return_value=SimpleNamespace(all=lambda: list(configured.items()))),
+        scalar=AsyncMock(return_value=3),
     )
     assert not await gate._ack_authorized(db, {gate.ACK_KEY: gate.RISK_ACK_VALUE})
 
@@ -101,23 +125,32 @@ async def test_risk_gate_never_falls_back_to_live_or_invalid_scope(monkeypatch, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("valid_barrier,valid_people", [(False, True), (True, False), (True, True)])
 async def test_risk_requires_current_expiry_server_pair_and_disposable_people(monkeypatch, valid_barrier, valid_people):
-    monkeypatch.setenv(gate.RISK_INSTALL_ENV, "1")
-    values = {
-        "mobile.auth_enabled": "true",
-        "mobile.synthetic_test_enabled": "true",
-        "mobile.synthetic_test_ack": ops._ACK,
-        "mobile.synthetic_test_server_id": str(uuid.uuid4()),
-        "mobile.synthetic_test_viewer_id": str(uuid.uuid4()),
-        "mobile.synthetic_test_self_user_viewer_id": str(uuid.uuid4()),
-        gate.RISK_KEY: "c" * 64,
-    }
+    configured = values()
     db = SimpleNamespace(
-        execute=AsyncMock(return_value=SimpleNamespace(all=lambda: list(values.items()))),
-        scalar=AsyncMock(side_effect=[valid_barrier, False]),
+        execute=AsyncMock(return_value=SimpleNamespace(all=lambda: list(configured.items()))),
+        scalar=AsyncMock(side_effect=[3, valid_barrier, False]),
     )
     monkeypatch.setattr("services.mobile_read_control.synthetic_principals_valid", AsyncMock(return_value=valid_people))
     assert await gate._ack_authorized(db, {gate.ACK_KEY: gate.RISK_ACK_VALUE}) is (valid_barrier and valid_people)
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"server_id": str(uuid.uuid4())},
+        {"author_viewer_id": str(uuid.uuid4())},
+        {"user_viewer_id": str(uuid.uuid4())},
+        {"cohort_generation": 4},
+        {"risk_acceptance_sha256": "d" * 64},
+        {"extra": "forbidden"},
+    ],
+)
+def test_permit_never_survives_scope_or_digest_changes(change):
+    s, a, u = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    raw = json.loads(permit(s, a, u)) | change
+    assert not gate.risk_permission_matches(json.dumps(raw), s, a, u, 3, "c" * 64)
+
+
 def test_setup_and_revoke_clear_risk_authority():
     assert ops._FOLLOW_CLOSED[gate.RISK_KEY] == ""
+    assert ops._FOLLOW_CLOSED[gate.RISK_PERMISSION_KEY] == ""

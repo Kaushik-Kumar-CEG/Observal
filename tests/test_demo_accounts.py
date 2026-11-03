@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
 # SPDX-FileCopyrightText: 2026 Vishnu Muthiah <vishnu.muthiah04@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for demo account seeding and cleanup."""
@@ -39,7 +40,8 @@ class TestSeedDemoAccounts:
 
         db = AsyncMock()
         # First call: real_count=0, then per-tier exists checks return 0
-        db.scalar = AsyncMock(side_effect=[0, 0, 0, 0, 0])
+        db.scalar = AsyncMock(side_effect=["true", 0, 0, 0, 0, 0])
+        db.add = MagicMock()
         db.commit = AsyncMock()
 
         with patch("services.demo_accounts.settings") as mock_settings:
@@ -63,7 +65,7 @@ class TestSeedDemoAccounts:
         from services.demo_accounts import seed_demo_accounts
 
         db = AsyncMock()
-        db.scalar = AsyncMock(return_value=1)  # real_count=1
+        db.scalar = AsyncMock(side_effect=["true", 1])  # persistent opt-in, real_count=1
 
         with patch("services.demo_accounts.settings") as mock_settings:
             mock_settings.DEMO_SUPER_ADMIN_EMAIL = "super@demo.example"
@@ -79,7 +81,7 @@ class TestSeedDemoAccounts:
         from services.demo_accounts import seed_demo_accounts
 
         db = AsyncMock()
-        db.scalar = AsyncMock(return_value=0)  # no real users
+        db.scalar = AsyncMock(side_effect=["true", 0])  # explicit opt-in, no real users
 
         with patch("services.demo_accounts.settings") as mock_settings:
             mock_settings.DEMO_SUPER_ADMIN_EMAIL = None
@@ -102,7 +104,8 @@ class TestSeedDemoAccounts:
 
         db = AsyncMock()
         # real_count=0, super_admin exists=1 (skip), admin exists=0 (create)
-        db.scalar = AsyncMock(side_effect=[0, 1, 0])
+        db.scalar = AsyncMock(side_effect=["true", 0, 1, 0])
+        db.add = MagicMock()
         db.commit = AsyncMock()
 
         with patch("services.demo_accounts.settings") as mock_settings:
@@ -118,6 +121,34 @@ class TestSeedDemoAccounts:
             count = await seed_demo_accounts(db)
 
         assert count == 1  # Only admin created, super_admin skipped
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", [None, "", "false", "1", "invalid"])
+async def test_fresh_or_populated_default_never_seeds_from_legacy_env(monkeypatch, policy):
+    from services.demo_accounts import seed_demo_accounts
+
+    monkeypatch.setenv("SEED_DEMO_ACCOUNTS", "true")
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=policy)
+    assert await seed_demo_accounts(db) == 0
+    from sqlalchemy.dialects import postgresql
+
+    assert "FOR SHARE" in str(db.scalar.call_args.args[0].compile(dialect=postgresql.dialect()))
+    db.add.assert_not_called()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_demo_policy_database_failure_never_creates_accounts():
+    from services.demo_accounts import seed_demo_accounts
+
+    db = AsyncMock()
+    db.scalar.side_effect = ConnectionError("scratch store unavailable")
+    with pytest.raises(ConnectionError):
+        await seed_demo_accounts(db)
+    db.add.assert_not_called()
+    db.commit.assert_not_awaited()
 
 
 class TestCleanupDemoAccounts:

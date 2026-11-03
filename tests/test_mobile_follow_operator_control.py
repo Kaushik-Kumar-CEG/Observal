@@ -40,10 +40,17 @@ def fixture(monkeypatch):
     monkeypatch.setattr(
         ops,
         "_settings",
-        AsyncMock(return_value={"mobile.trace_qualification_server_id": "", "mobile.trace_qualification_ack": ""}),
+        AsyncMock(
+            return_value={
+                "mobile.trace_qualification_server_id": "",
+                "mobile.trace_qualification_ack": "",
+                ops.AVAILABILITY_KEY: "true",
+                ops.ENABLE_KEY: "false",
+                ops.RISK_PERMISSION_KEY: "",
+            }
+        ),
     )
     monkeypatch.setattr(ops, "synthetic_principals_valid", AsyncMock(return_value=True))
-    monkeypatch.setattr(ops, "routes_installed", lambda: True)
     for name in ["_write", "_record_transition", "_refresh", "_audit"]:
         monkeypatch.setattr(ops, name, AsyncMock())
     return req, state, db, SimpleNamespace(id=uuid.uuid4())
@@ -111,7 +118,7 @@ async def test_control_denies_unsafe_environment(monkeypatch, failure):
     elif failure == "identity":
         ops.synthetic_principals_valid.return_value = False
     else:
-        monkeypatch.setattr(ops, "routes_installed", lambda: False)
+        ops._settings.return_value[ops.AVAILABILITY_KEY] = "false"
     with pytest.raises(HTTPException) as denied:
         await ops.mobile_test_follow_sync(req, db, actor)
     assert denied.value.status_code == 409
@@ -163,4 +170,5 @@ def test_setup_and_revoke_reset_both_stale_authority_and_review_reference():
         ops.ENABLE_KEY: "false",
         ops._FOLLOW_REVIEW_KEY: "",
         ops.RISK_KEY: "",
+        ops.RISK_PERMISSION_KEY: "",
     }
