@@ -41,6 +41,7 @@ def test_union_reuses_actual_publication_and_scoped_source_sql():
     assert "identity_conflict" in sql
     assert "confirmed_loads > 0 OR invocations > 0" in sql
     assert "hook_context" in sql
+    assert "(projection_state = 'complete' AND eligibility = 'eligible') AS complete" in sql
     assert "'actor'" not in sql
     for kind, identifier in ids:
         assert params[f"param_component_ids_{kind}"] == f"['{identifier}']"

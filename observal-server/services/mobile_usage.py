@@ -79,11 +79,15 @@ def _branch(kind: str, identifiers: list[str], window, project, users):
         restriction = "WHERE has({mobile_users:Array(String)}, user_id)"
         params["param_mobile_users"] = queries._clickhouse_array(users)
     unknown = "projection_state != 'complete' OR collision_count > 0 OR unmatched_count > 0"
+    measured = "projection_state = 'complete'"
     if kind == "hook":
+        # Match main's denominator: a processed but ineligible/unknown hook
+        # context cannot establish a measured zero.
+        measured += " AND eligibility = 'eligible'"
         unknown += " OR harness = 'claude-code' OR eligibility NOT IN ('eligible', 'headless', 'agent_inactive')"
     return (
         f"SELECT '{kind}' AS component_type, component_id, user_id, harness, session_id, "
-        "projection_state = 'complete' AS complete, "
+        f"({measured}) AS complete, "
         f"({unknown}) AS unknown, (projection_state = 'complete' AND ({observed})) AS observed "
         f"FROM ({sql}) {restriction}",
         params,
