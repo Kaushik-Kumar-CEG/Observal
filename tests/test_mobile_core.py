@@ -40,6 +40,7 @@ def test_union_reuses_actual_publication_and_scoped_source_sql():
     assert "s.revision != p.source_revision" in sql
     assert "identity_conflict" in sql
     assert "confirmed_loads > 0 OR invocations > 0" in sql
+    assert "OR unknown_result_count > 0" in sql
     assert "hook_context" in sql
     assert "(projection_state = 'complete' AND eligibility = 'eligible') AS complete" in sql
     assert "'actor'" not in sql

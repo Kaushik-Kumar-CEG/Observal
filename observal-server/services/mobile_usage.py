@@ -80,6 +80,8 @@ def _branch(kind: str, identifiers: list[str], window, project, users):
         params["param_mobile_users"] = queries._clickhouse_array(users)
     unknown = "projection_state != 'complete' OR collision_count > 0 OR unmatched_count > 0"
     measured = "projection_state = 'complete'"
+    if kind == "skill":
+        unknown += " OR unknown_result_count > 0"  # Unconfirmed loads are not a proven zero.
     if kind == "hook":
         # Match main's denominator: a processed but ineligible/unknown hook
         # context cannot establish a measured zero.

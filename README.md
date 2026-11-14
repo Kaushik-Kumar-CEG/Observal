@@ -337,7 +337,7 @@ See [AGENTS.md](AGENTS.md) for internal codebase context.
 
 ## Android usage companion
 
-The minimal phone API is `/api/v1/mobile`. A compatible Android build accepts the server address at runtime; no per-server build is required. Deploy the website and API on the same HTTPS origin with a publicly trusted certificate, then enable **Mobile access → Mobile Enabled** in admin settings (`mobile.enabled`, off by default). No mobile migrations or separate telemetry collector are required.
+The minimal phone API is `/api/v1/mobile`. A compatible Android build accepts the server address at runtime; no per-server build is required. Deploy the website and API on the same HTTPS origin with a publicly trusted certificate, then enable **Mobile access** in admin settings (`mobile.enabled`, off by default). No mobile migrations or separate telemetry collector are required.
 
 The phone uses ordinary `/api/v1/auth/login`, device-browser approval and token refresh. Its JWTs have **normal account authority**, not a new restricted mobile scope. The phone keeps access tokens in memory, refresh tokens in Android secure storage, and its selected people locally. Turning mobile access off stops mobile reads but does not disable ordinary account login or the CLI.
 
