@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for OAuth 2.0 Device Authorization Grant (RFC 8628) endpoints."""
@@ -619,6 +620,16 @@ class TestResolveFrontendUrl:
         request = self._make_request()
         result = _resolve_frontend_url(request)
         assert result == "https://app.example.com"
+
+    @patch("services.dynamic_settings.get_sync")
+    def test_explicit_https_loopback_keeps_scheme_and_port(self, mock_get_sync):
+        from api.routes.device_auth import _resolve_frontend_url
+
+        mock_get_sync.side_effect = lambda key, *a: {
+            "deployment.frontend_url": "https://localhost:9443/",
+            "deployment.public_url": "",
+        }.get(key, "")
+        assert _resolve_frontend_url(self._make_request()) == "https://localhost:9443"
 
     @patch("services.dynamic_settings.get_sync")
     def test_strips_trailing_slash(self, mock_get_sync):

@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
 # SPDX-FileCopyrightText: 2026 Shaan Narendran <shaannaren06@gmail.com>
+# SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 """OAuth 2.0 Device Authorization Grant (RFC 8628) endpoints.
@@ -67,16 +68,17 @@ def _resolve_frontend_url(request: Request) -> str:
     """Derive the frontend base URL for verification links.
 
     Resolution order:
-      1. deployment.frontend_url (if explicitly set to a non-localhost value)
+      1. deployment.frontend_url (HTTPS or a non-localhost value)
       2. deployment.public_url hostname (scheme + host, no port/path)
       3. Request headers (x-forwarded-proto/host, or Host)
       4. Fallback to http://localhost (local dev only)
     """
     import services.dynamic_settings as ds
 
-    # 1. Explicitly configured frontend URL
+    # Keep default HTTP localhost as unconfigured, but honor an explicitly
+    # configured HTTPS loopback origin (including its port) for local devices.
     configured = ds.get_sync("deployment.frontend_url")
-    if configured and not _is_localhost_url(configured):
+    if configured and (not _is_localhost_url(configured) or urlparse(configured).scheme == "https"):
         return configured.rstrip("/")
 
     # 2. Derive from public_url if set
