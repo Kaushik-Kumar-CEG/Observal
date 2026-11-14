@@ -335,6 +335,25 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). The short version:
 
 See [AGENTS.md](AGENTS.md) for internal codebase context.
 
+## Android usage companion
+
+The minimal phone API is `/api/v1/mobile`. A compatible Android build accepts the server address at runtime; no per-server build is required. Deploy the website and API on the same HTTPS origin with a publicly trusted certificate, then enable **Mobile access → Mobile Enabled** in admin settings (`mobile.enabled`, off by default). No mobile migrations or separate telemetry collector are required.
+
+The phone uses ordinary `/api/v1/auth/login`, device-browser approval and token refresh. Its JWTs have **normal account authority**, not a new restricted mobile scope. The phone keeps access tokens in memory, refresh tokens in Android secure storage, and its selected people locally. Turning mobile access off stops mobile reads but does not disable ordinary account login or the CLI.
+
+- `GET /api/v1/mobile/capabilities` is public: contract version `1`, enabled flag, unit, verified harness/type coverage and limitations.
+- Authenticated `GET /api/v1/mobile/people?limit=50&offset=0` lists only permitted people.
+- `GET /api/v1/mobile/people/{uuid}/summary?days=7` returns separate `author` and `user` readings.
+- `GET /api/v1/mobile/people/{uuid}/components?scope=author|user&days=7&limit=50&offset=0` returns the breakdown; add `/{type}/{component_uuid}` for detail.
+
+Super-admins may view everyone. Admins may view others only when trace privacy is off. Everyone else may view only themselves, including the contributing users behind Author-usage. Following never grants access. Registry visibility and unpublished-item permissions still apply.
+
+**Counting:** one trace is a distinct `(user_id, harness, session_id)` with verified component use, matching the main dashboard's session unit. Author-usage unions use of the person's currently authored registry components; User-usage unions that person's observed component use. Component rows overlap and must not be added together. Registry identity and authorship are current, not a reconstructed historical ownership ledger.
+
+Reads reuse main's verified presence and current, complete, non-failed component publications with matching source revisions. MCP calls, confirmed skill loads/invocations and recorded hook runs count; installs and merely available skills never do. Pi and Claude Code have verified extractors. A skill load is not proof of invocation; Claude Code may omit silent successful hooks. Agents, prompts, sandboxes and harnesses without component evidence are **Not recorded**, not zero. Authored unsupported types can be inspected as explicitly unrecorded metadata; no usage is inferred from agent sessions. Completeness describes the verified present cohort, not unseen or unmapped activity.
+
+Readings use `{value, state}`: numeric `0` requires a processed present cohort; `partial` indicates incomplete coverage/attribution; `not_recorded` has `value: null`. Query failures return `503`, never zero or an empty success. Windows are based on session last-event time in the selected last 1–90 days. The phone reports server too old, mobile access off, account not allowed and unreachable separately. This is a versioned surface: incompatible future shapes require a new version/capability, not silent changes to v1.
+
 ## Community
 
 [GitHub Discussions](https://github.com/AgenticResourceRegistry/AgenticResourceRegistry/discussions) for questions and ideas. [Discord](https://discord.observal.io) for chat. Open Issues for confirmed bugs.

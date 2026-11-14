@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: 2026 Kaushik <kaushikrjpm10@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read-only mobile session unions over the existing published component cohorts.
+"""Session unions over main's published component cohorts, never installs.
 
-Do not reinterpret presence, installs or available skills as use. All validity
-checks (source revision, publication generation, identity and harness support)
-come from the same session SQL as the owner-facing activity API.
+Use the same source, generation, identity, evidence and harness validity checks
+as owner-facing activity. Three set-based branches, not one query per component
+or hydrated transcript/session sets. Private SQL expressions are covered by
+parity tests: any upstream structural change must update this adapter.
 """
 
 import re
@@ -14,85 +15,129 @@ from datetime import datetime
 
 from services.component_activity import hook_queries, queries, skill_queries
 
+SUPPORTED_TYPES = ("mcp", "skill", "hook")
 _TYPES = {
-    "mcp": (queries._SESSIONS, queries._activity_params, "calls > 0"),
-    "skill": (skill_queries._SKILL_SESSIONS, skill_queries._params, "confirmed_loads > 0 OR invocations > 0"),
+    "mcp": (queries._SESSIONS, queries._activity_params, "calls > 0", "a"),
+    "skill": (skill_queries._SKILL_SESSIONS, skill_queries._params, "confirmed_loads > 0 OR invocations > 0", "e"),
     "hook": (
         hook_queries._HOOK_SESSIONS,
         hook_queries._params,
         "runs_with_output + silent_runs + failures + blocks > 0",
+        "e",
     ),
 }
 
 
 def metric(row: dict) -> dict:
-    """Zero requires a measured cohort; uncertainty never becomes zero."""
+    """Zero requires a measured present cohort; uncertainty never becomes zero."""
     complete = int(row.get("complete", 0))
-    unknown = int(row.get("unknown", 0))
-    observed = int(row.get("observed", 0))
     if not complete:
         return {"value": None, "state": "not_recorded"}
-    return {"value": observed, "state": "partial" if unknown else "complete"}
+    return {"value": int(row.get("observed", 0)), "state": "partial" if int(row.get("unknown", 0)) else "complete"}
 
 
-def _branch(kind: str, identifier: str, period: tuple[datetime, datetime], project: str, users: list[str] | None):
-    sql, params_fn, observed = _TYPES[kind]
-    if kind == "mcp":
-        params = params_fn(project, kind, identifier, None, period)
-    else:
-        params = params_fn(project, identifier, None, period)
-    # Reuse the actual per-type session expression, not a new matcher or raw
-    # activity read. A publication without current source is excluded there.
+def _many_components(sql: str, alias: str) -> str:
+    """Lift the canonical single-component cohort to a keyed component set.
+
+    All validity predicates are unchanged. Carry component_id through presence
+    and evidence grouping, then add it to the evidence join so two components in
+    the same session cannot exchange their counts. Source/publication joins stay
+    bound to user+harness+session exactly as in main.
+    """
+    replacements = {
+        "SELECT c.user_id AS user_id": "SELECT c.component_id AS component_id, c.user_id AS user_id",
+        "s.layer_hash AS layer_hash, s.last_event_time AS last_event_time": "s.layer_hash AS layer_hash, s.last_event_time AS last_event_time, present.component_id AS component_id",
+        "SELECT DISTINCT c.project_id, c.user_id, c.layer_hash, c.harness": "SELECT DISTINCT c.project_id, c.user_id, c.layer_hash, c.harness, c.component_id",
+        "SELECT a.user_id AS user_id": "SELECT a.component_id AS component_id, a.user_id AS user_id",
+        "GROUP BY a.user_id, a.harness, a.session_id": "GROUP BY a.component_id, a.user_id, a.harness, a.session_id",
+        f"c.session_id = {alias}.session_id": f"c.session_id = {alias}.session_id AND c.component_id = {alias}.component_id",
+    }
+    for old, new in replacements.items():
+        if old not in sql:
+            raise RuntimeError("Component activity SQL changed; mobile parity update required")
+        sql = sql.replace(old, new)
+    # Both mapping validity (including current snapshot conflicts) and evidence
+    # membership now bind to the same authorized set of UUIDs.
+    return re.sub(
+        r"(?P<column>(?:[ac]\.)?component_id) = \{component_id:String\}",
+        lambda m: "has({component_ids:Array(String)}, " + m["column"] + ")",
+        sql,
+    )
+
+
+def _branch(kind: str, identifiers: list[str], window, project, users):
+    sql, params_fn, observed, alias = _TYPES[kind]
+    params = (
+        params_fn(project, kind, identifiers[0], None, window)
+        if kind == "mcp"
+        else params_fn(project, identifiers[0], None, window)
+    )
+    params["param_component_ids"] = queries._clickhouse_array(identifiers)
+    sql = _many_components(sql, alias)
     restriction = ""
     if users is not None:
         restriction = "WHERE has({mobile_users:Array(String)}, user_id)"
         params["param_mobile_users"] = queries._clickhouse_array(users)
     unknown = "projection_state != 'complete' OR collision_count > 0 OR unmatched_count > 0"
-    # Claude's silent hooks are not recorded; skill loads do not prove invocation.
     if kind == "hook":
         unknown += " OR harness = 'claude-code' OR eligibility NOT IN ('eligible', 'headless', 'agent_inactive')"
-    branch = (
-        "SELECT user_id, harness, session_id, "
+    return (
+        f"SELECT '{kind}' AS component_type, component_id, user_id, harness, session_id, "
         "projection_state = 'complete' AS complete, "
-        f"({unknown}) AS unknown, "
-        f"(projection_state = 'complete' AND ({observed})) AS observed "
-        f"FROM ({sql}) {restriction}"
+        f"({unknown}) AS unknown, (projection_state = 'complete' AND ({observed})) AS observed "
+        f"FROM ({sql}) {restriction}",
+        params,
     )
-    return branch, params
 
 
 def union_sql(
-    components: list[tuple[str, str]], project: str, period: tuple[datetime, datetime], users: list[str] | None
+    components: list[tuple[str, str]],
+    project: str,
+    window: tuple[datetime, datetime],
+    users: list[str] | None,
+    *,
+    by_component: bool = False,
 ):
     branches, bound = [], {}
-    for index, (kind, identifier) in enumerate(components):
-        if kind not in _TYPES:
+    for kind in SUPPORTED_TYPES:
+        identifiers = sorted({identifier for component_type, identifier in components if component_type == kind})
+        if not identifiers:
             continue
-        branch, params = _branch(kind, identifier, period, project, users)
-        # ClickHouse parameters must be unique per branch/component. Rename only
-        # placeholders, never interpolate caller-controlled values into SQL.
-        branch = re.sub(r"\{(\w+):", lambda m, index=index: "{" + m[1] + f"_{index}:", branch)
-        bound.update({key + f"_{index}": value for key, value in params.items()})
+        branch, params = _branch(kind, identifiers, window, project, users)
+        branch = re.sub(r"\{(\w+):", lambda m, kind=kind: "{" + m[1] + f"_{kind}:", branch)
+        bound.update({key + f"_{kind}": value for key, value in params.items()})
         branches.append(branch)
     if not branches:
         return None, {}
+    keys = "component_type, component_id, " if by_component else ""
+    group = " GROUP BY component_type, component_id" if by_component else ""
     return (
-        "SELECT uniqExactIf((user_id, harness, session_id), observed) AS observed, "
+        f"SELECT {keys}uniqExactIf((user_id, harness, session_id), observed) AS observed, "
         "countIf(complete) AS complete, countIf(unknown) AS unknown FROM ("
         + " UNION ALL ".join(branches)
-        + ") FORMAT JSON",
+        + ")"
+        + group
+        + " FORMAT JSON",
         bound,
     )
 
 
-async def usage(
-    components: list[tuple[str, str]], project: str, period: tuple[datetime, datetime], users: list[str] | None
-):
-    sql, params = union_sql(components, project, period, users)
+async def usage(components, project, window, users):
+    sql, params = union_sql(components, project, window, users)
     if sql is None:
         return {"value": None, "state": "not_recorded"}
-    # _rows raises on HTTP/query failure: the route returns 503, never a zero.
-    rows = await queries._rows(sql, params)
+    rows = await queries._rows(sql, params)  # HTTP/query failures propagate, never become zero.
     if not rows:
         raise RuntimeError("Missing mobile aggregate")
-    return metric(rows[0])
+    result = metric(rows[0])
+    if result["value"] is not None and any(kind not in SUPPORTED_TYPES for kind, _ in components):
+        result["state"] = "partial"
+    return result
+
+
+async def component_usage(components, project, window, users):
+    sql, params = union_sql(components, project, window, users, by_component=True)
+    rows = await queries._rows(sql, params) if sql else []
+    # Only current verified present cohorts appear. Absent components have no
+    # attributable evidence, not a fabricated install/usage count.
+    return {(row["component_type"], row["component_id"]): metric(row) for row in rows}

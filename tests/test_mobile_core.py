@@ -42,10 +42,36 @@ def test_union_reuses_actual_publication_and_scoped_source_sql():
     assert "confirmed_loads > 0 OR invocations > 0" in sql
     assert "hook_context" in sql
     assert "'actor'" not in sql
-    for i, (_, identifier) in enumerate(ids):
-        assert params[f"param_component_id_{i}"] == identifier
-        assert params[f"param_mobile_users_{i}"] == "['actor']"
-        assert f"{{component_id_{i}:String}}" in sql
+    for kind, identifier in ids:
+        assert params[f"param_component_ids_{kind}"] == f"['{identifier}']"
+        assert params[f"param_mobile_users_{kind}"] == "['actor']"
+        assert f"{{component_ids_{kind}:Array(String)}}" in sql
+    assert "c.component_id = e.component_id" in sql
+    assert "c.component_id = a.component_id" in sql
+    assert "GROUP BY a.component_id, a.user_id, a.harness, a.session_id" in sql
+
+
+def test_component_sets_do_not_expand_sql_per_listing():
+    end = datetime.now(UTC)
+    window = (end - timedelta(days=7), end)
+    one, _ = mobile_usage.union_sql([("skill", str(uuid4()))], "project", window, None)
+    many, params = mobile_usage.union_sql([("skill", str(uuid4())) for _ in range(200)], "project", window, None)
+    assert one == many
+    assert len(params["param_component_ids_skill"]) > 7000
+    assert many.count(" AS component_type") == 1
+    assert "c.component_id = e.component_id" in many
+
+
+@pytest.mark.asyncio
+async def test_unsupported_type_is_unknown_without_query(monkeypatch):
+    query = AsyncMock()
+    monkeypatch.setattr(mobile_usage.queries, "_rows", query)
+    end = datetime.now(UTC)
+    assert await mobile_usage.usage([("agent", str(uuid4()))], "p", (end - timedelta(days=7), end), None) == {
+        "value": None,
+        "state": "not_recorded",
+    }
+    query.assert_not_awaited()
 
 
 def test_switch_off_default_and_registered():
@@ -68,6 +94,9 @@ def api(monkeypatch):
     monkeypatch.setattr(mobile, "components", AsyncMock(return_value=[component]))
     monkeypatch.setattr(mobile, "is_deleted_account", lambda _: False)
     monkeypatch.setattr(mobile, "usage", query)
+    monkeypatch.setattr(
+        mobile, "component_usage", AsyncMock(return_value={("mcp", component["id"]): {"value": 2, "state": "complete"}})
+    )
     return SimpleNamespace(
         client=TestClient(app), actor=actor, db=db, enabled=enabled, query=query, component=component
     )
@@ -120,6 +149,13 @@ def test_telemetry_failure_is_503_never_zero(api):
     response = api.client.get(f"/api/v1/mobile/people/{api.actor.id}/summary")
     assert response.status_code == 503
     assert "value" not in response.json()
+
+
+def test_breakdown_query_failure_is_not_an_empty_list(api, monkeypatch):
+    monkeypatch.setattr(mobile, "component_usage", AsyncMock(side_effect=RuntimeError("offline")))
+    response = api.client.get(f"/api/v1/mobile/people/{api.actor.id}/components?scope=user")
+    assert response.status_code == 503
+    assert "components" not in response.json()
 
 
 def test_bounds_and_ids_rejected_before_telemetry(api):
