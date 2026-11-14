@@ -325,6 +325,8 @@ DEFAULTS: dict[str, str] = {
     "github.client_id": "",
     "github.client_secret": "",
     "github.allowed_orgs": "",
+    # Mobile reads reuse ordinary account auth and trace privacy.
+    "mobile.enabled": "false",
     # Deployment
     "deployment.sso_only": "false",
     "deployment.public_registry_enabled": "false",
@@ -518,6 +520,13 @@ def settings_schema() -> list[dict[str, Any]]:
 
 
 SECTIONS: list[dict[str, Any]] = [
+    {
+        "id": "mobile",
+        "title": "Mobile access",
+        "description": "Enable phone usage views for real accounts. Existing trace privacy still applies.",
+        "icon": "smartphone",
+        "keys": ["mobile.enabled"],
+    },
     {
         "id": "experimental",
         "title": "Experimental",
